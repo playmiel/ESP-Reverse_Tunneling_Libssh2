@@ -61,14 +61,12 @@ private:
     bool checkConnection();
     void handleReconnection();
     
-    // Utility functions for WiFiClient callbacks
-    static ssize_t wifiClientSend(libssh2_socket_t socket, const void *buffer, size_t length, int flags, void **abstract);
-    static ssize_t wifiClientRecv(libssh2_socket_t socket, void *buffer, size_t length, int flags, void **abstract);
+    // Utility functions
     
     // Member variables
     LIBSSH2_SESSION* session;
     LIBSSH2_LISTENER* listener;
-    WiFiClient sshClient;
+    int socketfd;
     TunnelChannel channels[MAX_CHANNELS];
     
     TunnelState state;

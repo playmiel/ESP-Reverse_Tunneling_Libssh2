@@ -3,6 +3,7 @@
 SSHTunnel::SSHTunnel() : 
     session(nullptr),
     listener(nullptr),
+    socketfd(-1),
     state(TUNNEL_DISCONNECTED),
     lastKeepAlive(0),
     lastConnectionAttempt(0),
@@ -50,9 +51,23 @@ bool SSHTunnel::connect() {
     
     LOG_I("SSH", "Attempting SSH connection...");
     
-    // Connect to SSH server
-    if (!sshClient.connect(SSH_HOST, SSH_PORT)) {
+    // Create socket and connect to SSH server
+    socketfd = socket(AF_INET, SOCK_STREAM, 0);
+    if (socketfd < 0) {
+        LOG_E("SSH", "Failed to create socket");
+        state = TUNNEL_ERROR;
+        return false;
+    }
+    
+    struct sockaddr_in addr;
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(SSH_PORT);
+    inet_pton(AF_INET, SSH_HOST, &addr.sin_addr);
+    
+    if (connect(socketfd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         LOGF_E("SSH", "Failed to connect to %s:%d", SSH_HOST, SSH_PORT);
+        close(socketfd);
+        socketfd = -1;
         state = TUNNEL_ERROR;
         return false;
     }
@@ -60,7 +75,8 @@ bool SSHTunnel::connect() {
     if (!initializeSSH()) {
         LOG_E("SSH", "SSH initialization failed");
         state = TUNNEL_ERROR;
-        sshClient.stop();
+        close(socketfd);
+        socketfd = -1;
         return false;
     }
     
@@ -68,6 +84,8 @@ bool SSHTunnel::connect() {
         LOG_E("SSH", "SSH authentication failed");
         state = TUNNEL_ERROR;
         cleanupSSH();
+        close(socketfd);
+        socketfd = -1;
         return false;
     }
     
@@ -75,6 +93,8 @@ bool SSHTunnel::connect() {
         LOG_E("SSH", "Failed to create reverse tunnel");
         state = TUNNEL_ERROR;
         cleanupSSH();
+        close(socketfd);
+        socketfd = -1;
         return false;
     }
     
@@ -99,7 +119,10 @@ void SSHTunnel::disconnect() {
     }
     
     cleanupSSH();
-    sshClient.stop();
+    if (socketfd >= 0) {
+        close(socketfd);
+        socketfd = -1;
+    }
     state = TUNNEL_DISCONNECTED;
     
     LOG_I("SSH", "SSH tunnel disconnected");
@@ -152,13 +175,7 @@ bool SSHTunnel::initializeSSH() {
 
     /* Start it up. This will trade welcome banners, exchange keys,
      * and setup crypto, compression, and MAC layers */
-    // For WiFiClient, we need to use the client directly with libssh2
-    // Set the socket to use for libssh2 - we'll use a custom read/write function
-    libssh2_session_callback_set(session, LIBSSH2_CALLBACK_SEND, (void*)wifiClientSend);
-    libssh2_session_callback_set(session, LIBSSH2_CALLBACK_RECV, (void*)wifiClientRecv);
-    libssh2_session_abstract(session, &sshClient);
-    
-    int rc = libssh2_session_handshake(session, 0);
+    int rc = libssh2_session_handshake(session, socketfd);
     if (rc) {
         LOGF_E("SSH", "Error when starting up SSH session: %d", rc);
         return false;
@@ -414,11 +431,18 @@ void SSHTunnel::sendKeepAlive() {
 }
 
 bool SSHTunnel::checkConnection() {
-    if (!session || !sshClient.connected()) {
+    if (!session || socketfd < 0) {
         return false;
     }
     
-    // Additional connection health checks could be added here
+    // Check if socket is still valid
+    int error = 0;
+    socklen_t len = sizeof(error);
+    int retval = getsockopt(socketfd, SOL_SOCKET, SO_ERROR, &error, &len);
+    if (retval != 0 || error != 0) {
+        return false;
+    }
+    
     return true;
 }
 
@@ -474,26 +498,3 @@ int SSHTunnel::getActiveChannels() {
     return count;
 }
 
-// WiFiClient callback functions for libssh2
-ssize_t SSHTunnel::wifiClientSend(libssh2_socket_t socket, const void *buffer, size_t length, int flags, void **abstract) {
-    WiFiClient* client = static_cast<WiFiClient*>(*abstract);
-    if (!client || !client->connected()) {
-        return LIBSSH2_ERROR_SOCKET_SEND;
-    }
-    return client->write((const uint8_t*)buffer, length);
-}
-
-ssize_t SSHTunnel::wifiClientRecv(libssh2_socket_t socket, void *buffer, size_t length, int flags, void **abstract) {
-    WiFiClient* client = static_cast<WiFiClient*>(*abstract);
-    if (!client || !client->connected()) {
-        return LIBSSH2_ERROR_SOCKET_RECV;
-    }
-    
-    int available = client->available();
-    if (available == 0) {
-        return LIBSSH2_ERROR_EAGAIN;
-    }
-    
-    size_t toRead = (available < length) ? available : length;
-    return client->readBytes((char*)buffer, toRead);
-}
