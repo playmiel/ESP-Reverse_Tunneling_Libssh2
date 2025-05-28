@@ -311,28 +311,28 @@ void SSHTunnel::handleChannelData(int channelIndex) {
     }
 
     // Local -> SSH
-    int available = ch.localClient.available();
-    if (available > 0) {
-        size_t toRead = min(available, (int)BUFFER_SIZE);
-        size_t bytesRead = ch.localClient.readBytes(txBuffer, toRead);
-
-        if (bytesRead > 0) {
-            ssize_t written = libssh2_channel_write(ch.channel, (char*)txBuffer, bytesRead);
-            if (written > 0) {
-                bytesSent += written;
-                dataTransferred = true;
-                LOGF_D("SSH", "Channel %d: Local->SSH %d bytes", channelIndex, written);
-            } else if (written < 0 && written != LIBSSH2_ERROR_EAGAIN) {
-                LOGF_W("SSH", "Channel %d write error: %d", channelIndex, written);
-                closeChannel(channelIndex);
-                return;
-            }
+    ssize_t bytesRead = recv(ch.localSocket, txBuffer, BUFFER_SIZE, MSG_DONTWAIT);
+    if (bytesRead > 0) {
+        ssize_t written = libssh2_channel_write(ch.channel, (char*)txBuffer, bytesRead);
+        if (written > 0) {
+            bytesSent += written;
+            dataTransferred = true;
+            LOGF_D("SSH", "Channel %d: Local->SSH %d bytes", channelIndex, written);
+        } else if (written < 0 && written != LIBSSH2_ERROR_EAGAIN) {
+            LOGF_W("SSH", "Channel %d write error: %d", channelIndex, written);
+            closeChannel(channelIndex);
+            return;
         }
+    } else if (bytesRead == 0) {
+        // Socket closed
+        LOGF_I("SSH", "Channel %d: local socket closed", channelIndex);
+        closeChannel(channelIndex);
+        return;
     }
 
-    // Check if channel is closed
-    if (libssh2_channel_eof(ch.channel) || !ch.localClient.connected()) {
-        LOGF_I("SSH", "Channel %d closed", channelIndex);
+    // Check if SSH channel is closed
+    if (libssh2_channel_eof(ch.channel)) {
+        LOGF_I("SSH", "Channel %d: SSH channel closed", channelIndex);
         closeChannel(channelIndex);
         return;
     }
@@ -352,8 +352,9 @@ void SSHTunnel::closeChannel(int channelIndex) {
         ch.channel = nullptr;
     }
 
-    if (ch.localClient.connected()) {
-        ch.localClient.stop();
+    if (ch.localSocket >= 0) {
+        close(ch.localSocket);
+        ch.localSocket = -1;
     }
 
     ch.active = false;
