@@ -49,12 +49,6 @@ bool SSHTunnel::connect() {
     
     LOG_I("SSH", "Attempting SSH connection...");
     
-    if (!NetworkManager::isConnected()) {
-        LOG_E("SSH", "Network not connected");
-        state = TUNNEL_ERROR;
-        return false;
-    }
-    
     // Connect to SSH server
     if (!sshClient.connect(SSH_HOST, SSH_PORT)) {
         LOGF_E("SSH", "Failed to connect to %s:%d", SSH_HOST, SSH_PORT);

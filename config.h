@@ -1,11 +1,6 @@
 #ifndef CONFIG_H
 #define CONFIG_H
 
-// WiFi Configuration
-#define WIFI_SSID "YOUR_WIFI_SSID"
-#define WIFI_PASSWORD "YOUR_WIFI_PASSWORD"
-#define WIFI_TIMEOUT_MS 20000
-
 // SSH Server Configuration
 #define SSH_HOST "your-remote-server.com"
 #define SSH_PORT 22

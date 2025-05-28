@@ -5,7 +5,6 @@
 #include <libssh2.h>
 #include "config.h"
 #include "logger.h"
-#include "network_manager.h"
 
 enum TunnelState {
     TUNNEL_DISCONNECTED = 0,

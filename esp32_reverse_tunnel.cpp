@@ -1,6 +1,5 @@
 #include "config.h"
 #include "logger.h"
-#include "network_manager.h"
 #include "ssh_tunnel.h"
 
 // Global objects
@@ -25,12 +24,6 @@ void setup() {
     LOGF_I("MAIN", "Target: %s@%s:%d", SSH_USERNAME, SSH_HOST, SSH_PORT);
     LOGF_I("MAIN", "Tunnel: %s:%d -> %s:%d", REMOTE_BIND_HOST, REMOTE_BIND_PORT, LOCAL_HOST, LOCAL_PORT);
     
-    // Initialize network manager
-    if (!NetworkManager::init()) {
-        LOG_E("MAIN", "Failed to initialize network manager");
-        return;
-    }
-    
     // Initialize SSH tunnel
     if (!tunnel.init()) {
         LOG_E("MAIN", "Failed to initialize SSH tunnel");
@@ -43,29 +36,16 @@ void setup() {
 void loop() {
     unsigned long now = millis();
     
-    // Handle network events
-    NetworkManager::handleEvents();
-    
     // Update status LED
     updateStatusLED();
     
     // Handle SSH tunnel
-    if (NetworkManager::isConnected()) {
-        if (!tunnel.isConnected()) {
-            // Attempt to connect tunnel
-            tunnel.connect();
-        } else {
-            // Run tunnel loop
-            tunnel.loop();
-        }
+    if (!tunnel.isConnected()) {
+        // Attempt to connect tunnel
+        tunnel.connect();
     } else {
-        // Ensure tunnel is disconnected when network is down
-        if (tunnel.isConnected()) {
-            tunnel.disconnect();
-        }
-        
-        // Try to reconnect network
-        NetworkManager::connect();
+        // Run tunnel loop
+        tunnel.loop();
     }
     
     // Print status updates
@@ -130,15 +110,6 @@ void updateStatusLED() {
 
 void printStatus() {
     LOG_I("STATUS", "=== System Status ===");
-    
-    // Network status
-    if (NetworkManager::isConnected()) {
-        LOGF_I("STATUS", "Network: Connected (%s, %d dBm)", 
-               NetworkManager::getLocalIP().c_str(), 
-               NetworkManager::getSignalStrength());
-    } else {
-        LOG_W("STATUS", "Network: Disconnected");
-    }
     
     // Tunnel status
     LOGF_I("STATUS", "Tunnel: %s", tunnel.getStateString().c_str());
