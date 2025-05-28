@@ -3,7 +3,12 @@
 
 #include <WiFiClient.h>
 #include <libssh2.h>
-#include "config_ssh.h"
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <fcntl.h>
+#include <unistd.h>
+#include "config.h"
 #include "logger.h"
 
 enum TunnelState {
@@ -15,7 +20,7 @@ enum TunnelState {
 
 struct TunnelChannel {
     LIBSSH2_CHANNEL* channel;
-    WiFiClient localClient;
+    int localSocket;
     bool active;
     unsigned long lastActivity;
 };
