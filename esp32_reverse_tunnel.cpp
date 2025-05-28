@@ -1,4 +1,4 @@
-#include "config.h"
+#include "config_ssh.h"
 #include "logger.h"
 #include "ssh_tunnel.h"
 

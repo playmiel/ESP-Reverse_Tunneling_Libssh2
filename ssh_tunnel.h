@@ -3,7 +3,7 @@
 
 #include <WiFiClient.h>
 #include <libssh2.h>
-#include "config.h"
+#include "config_ssh.h"
 #include "logger.h"
 
 enum TunnelState {
@@ -56,8 +56,7 @@ private:
     bool checkConnection();
     void handleReconnection();
     
-    // Utility functions
-    static int socketCallback(LIBSSH2_SESSION* session, libssh2_socket_t fd, void** abstract);
+    // Utility functions (removed socket callback as not needed)
     
     // Member variables
     LIBSSH2_SESSION* session;

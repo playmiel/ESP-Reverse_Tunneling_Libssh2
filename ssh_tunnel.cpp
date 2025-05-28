@@ -151,8 +151,7 @@ bool SSHTunnel::initializeSSH() {
     // Set non-blocking mode
     libssh2_session_set_blocking(session, 0);
     
-    // Set socket
-    libssh2_session_callback_set(session, LIBSSH2_CALLBACK_SOCKET, (void*)socketCallback);
+    // Set socket - callback not needed for basic functionality
     
     // Handshake
     int rc;
@@ -194,9 +193,10 @@ bool SSHTunnel::authenticateSSH() {
 
 bool SSHTunnel::createReverseTunnel() {
     int rc;
+    int bound_port;
     
     while ((rc = libssh2_channel_forward_listen_ex(session, REMOTE_BIND_HOST, REMOTE_BIND_PORT,
-                                                   &listener, nullptr)) == LIBSSH2_ERROR_EAGAIN) {
+                                                   &listener, &bound_port)) == LIBSSH2_ERROR_EAGAIN) {
         delay(10);
     }
     
@@ -205,7 +205,7 @@ bool SSHTunnel::createReverseTunnel() {
         return false;
     }
     
-    LOG_I("SSH", "Reverse tunnel listener created");
+    LOGF_I("SSH", "Reverse tunnel listener created on port %d", bound_port);
     return true;
 }
 
@@ -225,18 +225,10 @@ void SSHTunnel::cleanupSSH() {
 bool SSHTunnel::handleNewConnection() {
     if (!listener) return false;
     
-    LIBSSH2_CHANNEL* channel;
-    int rc = libssh2_channel_forward_accept(listener, &channel);
+    LIBSSH2_CHANNEL* channel = libssh2_channel_forward_accept(listener);
     
-    if (rc == LIBSSH2_ERROR_EAGAIN) {
-        return false; // No new connection
-    }
-    
-    if (rc || !channel) {
-        if (rc != LIBSSH2_ERROR_EAGAIN) {
-            LOGF_E("SSH", "Failed to accept forward connection: %d", rc);
-        }
-        return false;
+    if (!channel) {
+        return false; // No new connection or error
     }
     
     // Find available channel slot
@@ -434,7 +426,4 @@ int SSHTunnel::getActiveChannels() {
     return count;
 }
 
-int SSHTunnel::socketCallback(LIBSSH2_SESSION* session, libssh2_socket_t fd, void** abstract) {
-    // Socket callback for libssh2
-    return 0;
-}
+
