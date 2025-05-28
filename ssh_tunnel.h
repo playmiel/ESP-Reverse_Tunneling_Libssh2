@@ -61,7 +61,9 @@ private:
     bool checkConnection();
     void handleReconnection();
     
-    // Utility functions (removed socket callback as not needed)
+    // Utility functions for WiFiClient callbacks
+    static ssize_t wifiClientSend(libssh2_socket_t socket, const void *buffer, size_t length, int flags, void **abstract);
+    static ssize_t wifiClientRecv(libssh2_socket_t socket, void *buffer, size_t length, int flags, void **abstract);
     
     // Member variables
     LIBSSH2_SESSION* session;

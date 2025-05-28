@@ -152,8 +152,13 @@ bool SSHTunnel::initializeSSH() {
 
     /* Start it up. This will trade welcome banners, exchange keys,
      * and setup crypto, compression, and MAC layers */
-    int sock = sshClient.fd();
-    int rc = libssh2_session_handshake(session, sock);
+    // For WiFiClient, we need to use the client directly with libssh2
+    // Set the socket to use for libssh2 - we'll use a custom read/write function
+    libssh2_session_callback_set(session, LIBSSH2_CALLBACK_SEND, (void*)wifiClientSend);
+    libssh2_session_callback_set(session, LIBSSH2_CALLBACK_RECV, (void*)wifiClientRecv);
+    libssh2_session_abstract(session, &sshClient);
+    
+    int rc = libssh2_session_handshake(session, 0);
     if (rc) {
         LOGF_E("SSH", "Error when starting up SSH session: %d", rc);
         return false;
@@ -467,4 +472,28 @@ int SSHTunnel::getActiveChannels() {
         if (channels[i].active) count++;
     }
     return count;
+}
+
+// WiFiClient callback functions for libssh2
+ssize_t SSHTunnel::wifiClientSend(libssh2_socket_t socket, const void *buffer, size_t length, int flags, void **abstract) {
+    WiFiClient* client = static_cast<WiFiClient*>(*abstract);
+    if (!client || !client->connected()) {
+        return LIBSSH2_ERROR_SOCKET_SEND;
+    }
+    return client->write((const uint8_t*)buffer, length);
+}
+
+ssize_t SSHTunnel::wifiClientRecv(libssh2_socket_t socket, void *buffer, size_t length, int flags, void **abstract) {
+    WiFiClient* client = static_cast<WiFiClient*>(*abstract);
+    if (!client || !client->connected()) {
+        return LIBSSH2_ERROR_SOCKET_RECV;
+    }
+    
+    int available = client->available();
+    if (available == 0) {
+        return LIBSSH2_ERROR_EAGAIN;
+    }
+    
+    size_t toRead = (available < length) ? available : length;
+    return client->readBytes((char*)buffer, toRead);
 }
