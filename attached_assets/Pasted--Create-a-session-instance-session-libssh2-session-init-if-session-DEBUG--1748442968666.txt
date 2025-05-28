@@ -1,0 +1,61 @@
+ /* Create a session instance */
+  session = libssh2_session_init();
+  if (!session) {
+    DEBUG("Could not initialize the SSH session!\n");
+    vTaskDelete(main_loop_handle);
+    return;
+  }
+
+  /* ... start it up. This will trade welcome banners, exchange keys,
+   * and setup crypto, compression, and MAC layers
+   */
+  rc = libssh2_session_handshake(session, sock);
+  if (rc) {
+    DEBUG("Error when starting up SSH session: %d\n", rc);
+    vTaskDelete(main_loop_handle);
+    return;
+  }
+  libssh2_trace(session, LIBSSH2_TRACE_SOCKET | LIBSSH2_TRACE_ERROR);
+  const char *username = "jorge";
+  const char *password = "PortaLegre7";
+  /* At this point we havn't yet authenticated.  The first thing to do
+   * is check the hostkey's fingerprint against our known hosts Your app
+   * may have it hard coded, may go to a file, may present it to the
+   * user, that's your call
+   */
+  fingerprint = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1);
+  DEBUG("Fingerprint: ");
+  for (i = 0; i < 20; i++)
+    DEBUG("%02X ", (unsigned char)fingerprint[i]);
+  DEBUG("\n");
+
+  /* check what authentication methods are available */
+  userauthlist = libssh2_userauth_list(session, username, strlen(username));
+  DEBUG("Authentication methods: %s\n", userauthlist);
+  if (strstr(userauthlist, "password"))
+    auth |= AUTH_PASSWORD;
+  if (strstr(userauthlist, "publickey"))
+    auth |= AUTH_PUBLICKEY;
+
+  auth = AUTH_PASSWORD;
+
+  // auth = AUTH_PUBLICKEY;
+
+  if (auth & AUTH_PASSWORD) {
+    if (libssh2_userauth_password(session, username, password)) {
+      DEBUG("Authentication by password failed.\n");
+      goto shutdown;
+    }
+  } else if (auth & AUTH_PUBLICKEY) {
+    const char *keyfile1 = "/littlefs/.ssh/id_ed25519.pub";
+    const char *keyfile2 = "/littlefs/.ssh/id_ed25519";
+    if (libssh2_userauth_publickey_fromfile(session, username, keyfile1,
+                                            keyfile2, password)) {
+      DEBUG("\tAuthentication by public key failed!\n");
+      goto shutdown;
+    }
+    DEBUG("\tAuthentication by public key succeeded.\n");
+  } else {
+    DEBUG("No supported authentication methods found!\n");
+    goto shutdown;
+  }
