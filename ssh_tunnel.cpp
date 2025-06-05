@@ -11,6 +11,8 @@ SSHTunnel::SSHTunnel()
     channels[i].localSocket = -1;
     channels[i].active = false;
     channels[i].lastActivity = 0;
+    channels[i].pendingBytes = 0;
+    channels[i].flowControlPaused = false;
   }
 }
 
@@ -335,6 +337,8 @@ bool SSHTunnel::handleNewConnection() {
   channels[channelIndex].localSocket = localSocket;
   channels[channelIndex].active = true;
   channels[channelIndex].lastActivity = millis();
+  channels[channelIndex].pendingBytes = 0;
+  channels[channelIndex].flowControlPaused = false;
 
   libssh2_channel_set_blocking(channel, 0);
 
@@ -350,14 +354,40 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   unsigned long now = millis();
   bool dataTransferred = false;
 
-  // SSH -> Local
+  // SSH -> Local avec gestion des écritures partielles
   ssize_t rc = libssh2_channel_read(ch.channel, (char *)rxBuffer, BUFFER_SIZE);
   if (rc > 0) {
-    ssize_t written = send(ch.localSocket, rxBuffer, rc, MSG_DONTWAIT);
-    if (written > 0) {
-      bytesReceived += written;
-      dataTransferred = true;
-      LOGF_D("SSH", "Channel %d: SSH->Local %d bytes", channelIndex, written);
+    ssize_t totalWritten = 0;
+    ssize_t remaining = rc;
+    
+    while (remaining > 0) {
+      ssize_t written = send(ch.localSocket, rxBuffer + totalWritten, remaining, MSG_DONTWAIT);
+      if (written > 0) {
+        totalWritten += written;
+        remaining -= written;
+        dataTransferred = true;
+      } else if (written < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) {
+          // Socket plein, on attend un peu
+          delay(1);
+          continue;
+        } else {
+          LOGF_W("SSH", "Channel %d: Local write error: %s", channelIndex, strerror(errno));
+          closeChannel(channelIndex);
+          return;
+        }
+      } else {
+        // written == 0, socket fermé
+        LOGF_I("SSH", "Channel %d: local socket closed during write", channelIndex);
+        closeChannel(channelIndex);
+        return;
+      }
+    }
+    
+    if (totalWritten > 0) {
+      bytesReceived += totalWritten;
+      ch.lastActivity = now; // Mettre à jour l'activité du canal
+      LOGF_D("SSH", "Channel %d: SSH->Local %d bytes", channelIndex, totalWritten);
     }
   } else if (rc < 0 && rc != LIBSSH2_ERROR_EAGAIN) {
     LOGF_W("SSH", "Channel %d read error: %d", channelIndex, rc);
@@ -365,23 +395,47 @@ void SSHTunnel::handleChannelData(int channelIndex) {
     return;
   }
 
-  // Local -> SSH
+  // Local -> SSH avec gestion des écritures partielles
   ssize_t bytesRead = recv(ch.localSocket, txBuffer, BUFFER_SIZE, MSG_DONTWAIT);
   if (bytesRead > 0) {
-    ssize_t written =
-        libssh2_channel_write(ch.channel, (char *)txBuffer, bytesRead);
-    if (written > 0) {
-      bytesSent += written;
-      dataTransferred = true;
-      LOGF_D("SSH", "Channel %d: Local->SSH %d bytes", channelIndex, written);
-    } else if (written < 0 && written != LIBSSH2_ERROR_EAGAIN) {
-      LOGF_W("SSH", "Channel %d write error: %d", channelIndex, written);
-      closeChannel(channelIndex);
-      return;
+    ssize_t totalWritten = 0;
+    ssize_t remaining = bytesRead;
+    
+    while (remaining > 0) {
+      ssize_t written = libssh2_channel_write(ch.channel, (char *)txBuffer + totalWritten, remaining);
+      if (written > 0) {
+        totalWritten += written;
+        remaining -= written;
+        dataTransferred = true;
+      } else if (written < 0) {
+        if (written == LIBSSH2_ERROR_EAGAIN) {
+          // Canal SSH plein, on attend un peu
+          delay(1);
+          continue;
+        } else {
+          LOGF_W("SSH", "Channel %d write error: %d", channelIndex, written);
+          closeChannel(channelIndex);
+          return;
+        }
+      } else {
+        // written == 0, problème avec le canal
+        LOGF_W("SSH", "Channel %d: SSH write returned 0", channelIndex);
+        break;
+      }
+    }
+    
+    if (totalWritten > 0) {
+      bytesSent += totalWritten;
+      ch.lastActivity = now; // Mettre à jour l'activité du canal
+      LOGF_D("SSH", "Channel %d: Local->SSH %d bytes", channelIndex, totalWritten);
     }
   } else if (bytesRead == 0) {
     // Socket closed
     LOGF_I("SSH", "Channel %d: local socket closed", channelIndex);
+    closeChannel(channelIndex);
+    return;
+  } else if (bytesRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+    LOGF_W("SSH", "Channel %d: Local read error: %s", channelIndex, strerror(errno));
     closeChannel(channelIndex);
     return;
   }
@@ -425,7 +479,7 @@ void SSHTunnel::cleanupInactiveChannels() {
 
   for (int i = 0; i < MAX_CHANNELS; i++) {
     if (channels[i].active &&
-        (now - channels[i].lastActivity > 300000)) { // 5 minutes timeout
+        (now - channels[i].lastActivity > CHANNEL_TIMEOUT_MS)) {
       LOGF_W("SSH", "Channel %d timeout, closing", i);
       closeChannel(i);
     }

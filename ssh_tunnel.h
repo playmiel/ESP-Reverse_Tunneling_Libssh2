@@ -22,6 +22,8 @@ struct TunnelChannel {
     bool active;
     int localSocket; // Local socket for this channel
     unsigned long lastActivity;
+    size_t pendingBytes; // Données en attente d'écriture
+    bool flowControlPaused; // Pause temporaire pour éviter la congestion
 };
 
 class SSHTunnel {

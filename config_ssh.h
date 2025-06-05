@@ -23,8 +23,9 @@
 #define CONNECTION_TIMEOUT_SEC 30
 
 // Buffer Sizes
-#define BUFFER_SIZE 1024
+#define BUFFER_SIZE 8192        // Augmenté pour de meilleures performances
 #define MAX_CHANNELS 5
+#define CHANNEL_TIMEOUT_MS 1800000  // 30 minutes au lieu de 5
 
 // Status LED Pin (optional)
 #define STATUS_LED_PIN 2
