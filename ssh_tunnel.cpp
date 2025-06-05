@@ -1,4 +1,5 @@
 #include "ssh_tunnel.h"
+#include "network_optimizations.h"
 
 SSHTunnel::SSHTunnel()
     : session(nullptr), listener(nullptr), socketfd(-1),
@@ -150,8 +151,12 @@ bool SSHTunnel::initializeSSH() {
   socketfd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (socketfd == -1) {
     LOGF_E("SSH", "Error opening socket");
-
     return false;
+  }
+
+  // Optimiser le socket SSH pour de meilleures performances
+  if (!NetworkOptimizer::optimizeSSHSocket(socketfd)) {
+    LOGF_W("SSH", "Warning: Could not apply all socket optimizations");
   }
 
   sin.sin_family = AF_INET;
@@ -326,6 +331,11 @@ bool SSHTunnel::handleNewConnection() {
     libssh2_channel_close(channel);
     libssh2_channel_free(channel);
     return false;
+  }
+
+  // Optimiser le socket local pour les performances
+  if (!NetworkOptimizer::optimizeSocket(localSocket)) {
+    LOGF_W("SSH", "Warning: Could not optimize local socket for channel %d", channelIndex);
   }
 
   // Set socket non-blocking
