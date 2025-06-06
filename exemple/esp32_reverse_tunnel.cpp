@@ -1,149 +1,164 @@
-#include "config_ssh.h"
-#include "logger.h"
+#include <WiFi.h>
 #include "ssh_tunnel.h"
+#include "logger.h"
 
-// Global objects
+// Configuration WiFi
+const char* ssid = "YOUR_WIFI_SSID";
+const char* password = "YOUR_WIFI_PASSWORD";
+
+// Instance du tunnel SSH
 SSHTunnel tunnel;
 
-// Status tracking
-unsigned long lastStatusUpdate = 0;
-unsigned long lastStatsUpdate = 0;
+// Variables pour le monitoring
+unsigned long lastStatsReport = 0;
+const unsigned long STATS_INTERVAL = 10000; // 10 secondes
 
 void setup() {
-    // Initialize status LED if configured
-    #ifdef STATUS_LED_PIN
-    pinMode(STATUS_LED_PIN, OUTPUT);
-    digitalWrite(STATUS_LED_PIN, LOW);
-    #endif
-    
-    // Initialize logger
-    Logger::init();
-    LOG_I("MAIN", "ESP32 Reverse SSH Tunnel starting...");
-    
-    // Print configuration
-    LOGF_I("MAIN", "Target: %s@%s:%d", SSH_USERNAME, SSH_HOST, SSH_PORT);
-    LOGF_I("MAIN", "Tunnel: %s:%d -> %s:%d", REMOTE_BIND_HOST, REMOTE_BIND_PORT, LOCAL_HOST, LOCAL_PORT);
-    
-    // Initialize SSH tunnel
-    if (!tunnel.init()) {
-        LOG_E("MAIN", "Failed to initialize SSH tunnel");
-        return;
-    }
-    
-    LOG_I("MAIN", "Initialization complete");
+  Serial.begin(SERIAL_BAUD_RATE);
+  while (!Serial) {
+    delay(10);
+  }
+
+  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version optimisée");
+  LOG_I("MAIN", "Buffer size: " + String(BUFFER_SIZE) + " bytes");
+  LOG_I("MAIN", "Max channels: " + String(MAX_CHANNELS));
+
+  // Configuration LED de statut
+#ifdef STATUS_LED_PIN
+  pinMode(STATUS_LED_PIN, OUTPUT);
+  digitalWrite(STATUS_LED_PIN, LOW);
+#endif
+
+  // Connexion WiFi
+  connectWiFi();
+
+  // Initialisation du tunnel SSH
+  if (!tunnel.init()) {
+    LOG_E("MAIN", "Failed to initialize SSH tunnel");
+    return;
+  }
+
+  // Démarrage de la connexion SSH
+  if (!tunnel.connectSSH()) {
+    LOG_E("MAIN", "Failed to connect SSH tunnel");
+  }
+
+  LOG_I("MAIN", "Setup completed successfully");
 }
 
 void loop() {
-    unsigned long now = millis();
-    
-    // Update status LED
-    updateStatusLED();
-    
-    // Handle SSH tunnel
-    if (!tunnel.isConnected()) {
-        // Attempt to connect tunnel
-        tunnel.connect();
-    } else {
-        // Run tunnel loop
-        tunnel.loop();
-    }
-    
-    // Print status updates
-    if (now - lastStatusUpdate > 30000) { // Every 30 seconds
-        printStatus();
-        lastStatusUpdate = now;
-    }
-    
-    // Print statistics
-    if (now - lastStatsUpdate > 60000) { // Every minute
-        printStatistics();
-        lastStatsUpdate = now;
-    }
-    
-    // Small delay to prevent tight loop
-    delay(10);
+  // Vérifier la connexion WiFi
+  if (WiFi.status() != WL_CONNECTED) {
+    LOG_W("MAIN", "WiFi disconnected, reconnecting...");
+    connectWiFi();
+  }
+
+  // Traitement du tunnel SSH
+  tunnel.loop();
+
+  // Mise à jour LED de statut
+  updateStatusLED();
+
+  // Rapport de statistiques
+  reportStats();
+
+  // Petit délai pour éviter la surcharge CPU
+  delay(1);
+}
+
+void connectWiFi() {
+  LOG_I("WIFI", "Connecting to WiFi...");
+  WiFi.begin(ssid, password);
+
+  int attempts = 0;
+  while (WiFi.status() != WL_CONNECTED && attempts < 30) {
+    delay(1000);
+    Serial.print(".");
+    attempts++;
+  }
+
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.println();
+    LOG_I("WIFI", "WiFi connected successfully");
+    LOGF_I("WIFI", "IP address: %s", WiFi.localIP().toString().c_str());
+    LOGF_I("WIFI", "Signal strength: %d dBm", WiFi.RSSI());
+  } else {
+    LOG_E("WIFI", "Failed to connect to WiFi");
+  }
 }
 
 void updateStatusLED() {
-    #ifdef STATUS_LED_PIN
-    static unsigned long lastBlink = 0;
-    static bool ledState = false;
-    unsigned long now = millis();
-    
-    TunnelState state = tunnel.getState();
-    
-    switch (state) {
-        case TUNNEL_DISCONNECTED:
-            // Slow blink - disconnected
-            if (now - lastBlink > 1000) {
-                ledState = !ledState;
-                digitalWrite(STATUS_LED_PIN, ledState);
-                lastBlink = now;
-            }
-            break;
-            
-        case TUNNEL_CONNECTING:
-            // Fast blink - connecting
-            if (now - lastBlink > 200) {
-                ledState = !ledState;
-                digitalWrite(STATUS_LED_PIN, ledState);
-                lastBlink = now;
-            }
-            break;
-            
-        case TUNNEL_CONNECTED:
-            // Solid on - connected
-            digitalWrite(STATUS_LED_PIN, HIGH);
-            break;
-            
-        case TUNNEL_ERROR:
-            // Very fast blink - error
-            if (now - lastBlink > 100) {
-                ledState = !ledState;
-                digitalWrite(STATUS_LED_PIN, ledState);
-                lastBlink = now;
-            }
-            break;
-    }
-    #endif
+#ifdef STATUS_LED_PIN
+  static unsigned long lastBlink = 0;
+  static bool ledState = false;
+  unsigned long now = millis();
+
+  switch (tunnel.getState()) {
+    case TUNNEL_DISCONNECTED:
+      // LED éteinte
+      digitalWrite(STATUS_LED_PIN, LOW);
+      break;
+
+    case TUNNEL_CONNECTING:
+      // LED clignote rapidement
+      if (now - lastBlink > 200) {
+        ledState = !ledState;
+        digitalWrite(STATUS_LED_PIN, ledState);
+        lastBlink = now;
+      }
+      break;
+
+    case TUNNEL_CONNECTED:
+      // LED allumée fixe
+      digitalWrite(STATUS_LED_PIN, HIGH);
+      break;
+
+    case TUNNEL_ERROR:
+      // LED clignote lentement
+      if (now - lastBlink > 1000) {
+        ledState = !ledState;
+        digitalWrite(STATUS_LED_PIN, ledState);
+        lastBlink = now;
+      }
+      break;
+  }
+#endif
 }
 
-void printStatus() {
-    LOG_I("STATUS", "=== System Status ===");
-    
-    // Tunnel status
-    LOGF_I("STATUS", "Tunnel: %s", tunnel.getStateString().c_str());
-    LOGF_I("STATUS", "Active channels: %d", tunnel.getActiveChannels());
-    
-    // Memory status
-    LOGF_I("STATUS", "Free heap: %d bytes", ESP.getFreeHeap());
-    LOGF_I("STATUS", "Uptime: %lu seconds", millis() / 1000);
-}
+void reportStats() {
+  unsigned long now = millis();
+  if (now - lastStatsReport < STATS_INTERVAL) {
+    return;
+  }
 
-void printStatistics() {
-    if (!tunnel.isConnected()) {
-        return;
-    }
-    
-    LOG_I("STATS", "=== Transfer Statistics ===");
-    LOGF_I("STATS", "Bytes received: %lu", tunnel.getBytesReceived());
-    LOGF_I("STATS", "Bytes sent: %lu", tunnel.getBytesSent());
-    LOGF_I("STATS", "Total transferred: %lu", tunnel.getBytesReceived() + tunnel.getBytesSent());
-}
+  lastStatsReport = now;
 
-// Error handling function
-void handleError(const char* context, const char* error) {
-    LOGF_E("ERROR", "%s: %s", context, error);
-    
-    // Could implement additional error handling here:
-    // - Send error notifications
-    // - Reset system if critical
-    // - Log to persistent storage
-}
+  // Rapport de statut
+  LOGF_I("STATS", "Tunnel State: %s", tunnel.getStateString().c_str());
+  LOGF_I("STATS", "Active Channels: %d", tunnel.getActiveChannels());
+  LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
+  LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
 
-// Watchdog reset function (if needed)
-void resetSystem() {
-    LOG_E("MAIN", "System reset requested");
-    delay(1000);
-    ESP.restart();
+  // Calcul du débit (approximatif)
+  static unsigned long lastBytesSent = 0;
+  static unsigned long lastBytesReceived = 0;
+
+  unsigned long bytesSent = tunnel.getBytesSent();
+  unsigned long bytesReceived = tunnel.getBytesReceived();
+
+  unsigned long sentRate = (bytesSent - lastBytesSent) * 1000 / STATS_INTERVAL;
+  unsigned long receivedRate = (bytesReceived - lastBytesReceived) * 1000 / STATS_INTERVAL;
+
+  LOGF_I("STATS", "Send Rate: %lu B/s", sentRate);
+  LOGF_I("STATS", "Receive Rate: %lu B/s", receivedRate);
+
+  lastBytesSent = bytesSent;
+  lastBytesReceived = bytesReceived;
+
+  // Information WiFi
+  LOGF_I("WIFI", "RSSI: %d dBm", WiFi.RSSI());
+
+  // Information mémoire
+  LOGF_I("SYSTEM", "Free Heap: %d bytes", ESP.getFreeHeap());
+  LOGF_I("SYSTEM", "Uptime: %lu seconds", millis() / 1000);
 }
