@@ -16,5 +16,3 @@ See the `examples/` folder for an ESP32 usage example.
 ## Supported Platform
 - ESP32 only
 
-## Continuous Integration
-Automatic compilation for ESP32 is ensured by GitHub Actions (see `.github/workflows/build.yml`).
