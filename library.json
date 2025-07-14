@@ -17,8 +17,12 @@
   "platforms": "espressif32",
   "dependencies": [
     {
-      "name": "libssh2",
-      "version": ">=1.0.0"
+      "name": "libssh2_esp",
+      "version": ">=1.0.0",
+      "repository": {
+        "type": "git",
+        "url": "https://github.com/skuodi/libssh2_esp.git"
+      }
     }
   ]
 }

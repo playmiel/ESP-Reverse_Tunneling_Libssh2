@@ -11,7 +11,7 @@ Add this library to your PlatformIO or Arduino IDE project.
 See the `examples/` folder for an ESP32 usage example.
 
 ## Dependencies
-- libssh2
+- [libssh2_esp](https://github.com/skuodi/libssh2_esp) - ESP32 port of libssh2
 
 ## Supported Platform
 - ESP32 only

@@ -1,5 +1,5 @@
 #include <WiFi.h>
-#include "ssh_tunnel.h"
+#include <ESP-Reverse_Tunneling_Libssh2.h>
 #include "logger.h"
 
 // Configuration WiFi
