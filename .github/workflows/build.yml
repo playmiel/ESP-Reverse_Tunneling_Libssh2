@@ -2,7 +2,7 @@ name: ESP32 SSH Tunnel Library CI
 
 on:
   push:
-    branches: [ main, master]
+    branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master ]
 
@@ -11,13 +11,15 @@ jobs:
     runs-on: ubuntu-latest
     
     steps:
-    - name: Cache pip
-      uses: actions/cache@v4
+    - name: Checkout code
+      uses: actions/checkout@v4
       with:
-        path: ~/.cache/pip
-        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
-        restore-keys: |
-          ${{ runner.os }}-pip-
+        submodules: recursive
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
     
     - name: Cache PlatformIO
       uses: actions/cache@v4
@@ -26,11 +28,6 @@ jobs:
         key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
         restore-keys: |
           ${{ runner.os }}-pio-
-    
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
     
     - name: Install PlatformIO Core
       run: pip install --upgrade platformio
@@ -41,20 +38,18 @@ jobs:
         chmod +x fix_libssh2_esp.sh
         ./fix_libssh2_esp.sh
     
-    - name: Clean build environment
-      run: |
-        cd examples
-        pio run --target clean -e esp32dev
-    
     - name: Build for ESP32
       run: |
         cd examples
         pio run -e esp32dev
     
-    - name: Check memory usage
+    - name: Verify no OS/400 files compiled
       run: |
         cd examples
-        echo "=== Memory Usage Report ==="
-        pio run -e esp32dev --silent | grep -E "(RAM|Flash):" || echo "Memory info not available"
-    
-    
+        echo "=== Verification: OS/400 Files Check ==="
+        if pio run -e esp32dev -v 2>&1 | grep -i "qtqiconv\|qadrt"; then
+          echo "❌ ERROR: OS/400 platform files are being compiled!"
+          exit 1
+        else
+          echo "✅ SUCCESS: No OS/400 platform files compiled"
+        fi
