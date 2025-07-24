@@ -31,6 +31,13 @@ if [ -d "$LIBSSH2_PATH" ]; then
     rm -rf "$LIBSSH2_PATH/libssh2/vms" 2>/dev/null
     rm -rf "$LIBSSH2_PATH/libssh2/win32" 2>/dev/null
     
+    echo "   - Suppression de tous les fichiers OS/400 restants..."
+    find "$LIBSSH2_PATH" -name "*os400*" -type f -delete 2>/dev/null
+    find "$LIBSSH2_PATH" -name "*qtqiconv*" -type f -delete 2>/dev/null
+    find "$LIBSSH2_PATH" -name "*qadrt*" -type f -delete 2>/dev/null
+    find "$LIBSSH2_PATH" -name "ccsid.c" -delete 2>/dev/null
+    find "$LIBSSH2_PATH" -name "os400sys.c" -delete 2>/dev/null
+    
     echo "✅ Nettoyage terminé"
 else
     echo "⚠️  Répertoire libssh2_esp non trouvé - la dépendance n'est peut-être pas encore téléchargée"

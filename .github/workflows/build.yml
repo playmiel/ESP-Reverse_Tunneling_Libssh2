@@ -30,6 +30,11 @@ jobs:
     - name: Install PlatformIO Core
       run: pip install --upgrade platformio
     
+    - name: Download dependencies first
+      run: |
+        cd examples
+        pio pkg install
+
     - name: Apply libssh2 configuration fix
       run: |
         cd examples
