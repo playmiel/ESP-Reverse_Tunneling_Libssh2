@@ -60,6 +60,9 @@ lib_ignore =
     libssh2_esp/libssh2/example
     libssh2_esp/libssh2/tests
     libssh2_esp/libssh2/docs
+    libssh2_esp/libssh2/os400
+    libssh2_esp/libssh2/win32
+    libssh2_esp/libssh2/vms
 
 ; Source filters to avoid compiling examples
 build_src_filter = 
@@ -71,6 +74,9 @@ build_src_filter =
     -<test/>
     -<tests/>
     -<docs/>
+    -<os400/>
+    -<win32/>
+    -<vms/>
 
 ; Specific configuration for libssh2_esp
 lib_ldf_mode = chain+
@@ -154,11 +160,24 @@ This project provides two example formats:
 ### Error "libssh2_setup.h: No such file or directory"
 ➡️ **Solution**: The script automatically cleans problematic examples
 
+### Error "qtqiconv.h: No such file or directory" (GitHub Actions)
+➡️ **Solution**: OS/400 files are now automatically excluded from compilation
+- The configuration excludes `libssh2_esp/libssh2/os400/` directory
+- Build filters prevent compilation of platform-specific files
+
+### Error "qadrt.h: No such file or directory" (GitHub Actions)
+➡️ **Solution**: IBM i system files are excluded via `lib_ignore` configuration
+
 ### Compilation error with mbedTLS
 ➡️ **Solution**: The script automatically configures mbedTLS
 
 ### Error "CONFIG_LWIP_MAX_SOCKETS redefined"
 ➡️ **Solution**: The script configures appropriate flags
+
+### Submodule changes appearing automatically
+➡️ **Solution**: Enhanced `.gitignore` now excludes PlatformIO dependency files
+- `.pio/libdeps/` directories are ignored
+- `*.piopm` files are excluded from version control
 
 ## 📚 Technical Documentation
 

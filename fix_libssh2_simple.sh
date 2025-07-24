@@ -62,14 +62,17 @@ monitor_speed = 115200
 lib_deps =
 $EXISTING_LIBS
 
-; Configuration pour libssh2_esp - exclure les exemples
-lib_ignore = 
+; Configuration pour libssh2_esp - exclure les exemples et plateformes non-ESP32
+lib_ignore =
     libssh2_esp/libssh2/example
     libssh2_esp/libssh2/tests
     libssh2_esp/libssh2/docs
+    libssh2_esp/libssh2/os400
+    libssh2_esp/libssh2/win32
+    libssh2_esp/libssh2/vms
 
-; Filtres de source pour éviter la compilation des exemples
-build_src_filter = 
+; Filtres de source pour éviter la compilation des exemples et plateformes non-ESP32
+build_src_filter =
     +<*>
     -<.git/>
     -<.svn/>
@@ -78,6 +81,9 @@ build_src_filter =
     -<test/>
     -<tests/>
     -<docs/>
+    -<os400/>
+    -<win32/>
+    -<vms/>
 
 ; Configuration spécifique pour libssh2_esp
 lib_ldf_mode = chain+
