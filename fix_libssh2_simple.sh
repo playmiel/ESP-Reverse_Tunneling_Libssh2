@@ -84,6 +84,9 @@ build_src_filter =
     -<os400/>
     -<win32/>
     -<vms/>
+    -<*os400*>
+    -<*win32*>
+    -<*vms*>
 
 ; Configuration spécifique pour libssh2_esp
 lib_ldf_mode = chain+

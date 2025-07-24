@@ -64,8 +64,8 @@ lib_ignore =
     libssh2_esp/libssh2/win32
     libssh2_esp/libssh2/vms
 
-; Source filters to avoid compiling examples
-build_src_filter = 
+; Source filters to avoid compiling examples and platform-specific files
+build_src_filter =
     +<*>
     -<.git/>
     -<.svn/>
@@ -77,6 +77,9 @@ build_src_filter =
     -<os400/>
     -<win32/>
     -<vms/>
+    -<*os400*>
+    -<*win32*>
+    -<*vms*>
 
 ; Specific configuration for libssh2_esp
 lib_ldf_mode = chain+
@@ -179,7 +182,18 @@ This project provides two example formats:
 - `.pio/libdeps/` directories are ignored
 - `*.piopm` files are excluded from version control
 
-## 📚 Technical Documentation
+## 🚀 GitHub Actions CI/CD
+
+This project includes a unified GitHub Actions workflow that:
+- ✅ **Automatically tests compilation** on every push and pull request
+- ✅ **Applies libssh2 configuration fixes** before building
+- ✅ **Verifies no OS/400 files are compiled** (prevents `qtqiconv.h` errors)
+- ✅ **Checks memory usage** and build artifacts
+- ✅ **Uses the same configuration** as local compilation in `examples/` directory
+
+The workflow ensures that GitHub Actions compilation behavior matches exactly what happens when you compile locally with `pio run -e esp32dev` in the examples directory.
+
+## � Technical Documentation
 
 For more technical details:
 - [`examples/`](examples/) - Usage examples
