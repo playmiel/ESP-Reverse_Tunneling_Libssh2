@@ -1,6 +1,10 @@
 #include <WiFi.h>
-#include <ESP-Reverse_Tunneling_Libssh2.h>
+#include <Arduino.h>
+#include "ESP-Reverse_Tunneling_Libssh2.h"
+#include "ssh_tunnel.h"
 #include "logger.h"
+
+
 
 // Configuration WiFi
 const char* ssid = "YOUR_WIFI_SSID";
@@ -13,6 +17,10 @@ SSHTunnel tunnel;
 unsigned long lastStatsReport = 0;
 const unsigned long STATS_INTERVAL = 10000; // 10 secondes
 
+void connectWiFi();
+void updateStatusLED();
+void reportStats();
+
 void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
   while (!Serial) {
@@ -20,8 +28,8 @@ void setup() {
   }
 
   LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version optimisée");
-  LOG_I("MAIN", "Buffer size: " + String(BUFFER_SIZE) + " bytes");
-  LOG_I("MAIN", "Max channels: " + String(MAX_CHANNELS));
+  LOGF_I("MAIN", "Buffer size: %d bytes", BUFFER_SIZE);
+  LOGF_I("MAIN", "Max channels: %d", MAX_CHANNELS);
 
   // Configuration LED de statut
 #ifdef STATUS_LED_PIN

@@ -162,7 +162,7 @@ bool SSHTunnel::initializeSSH() {
   sin.sin_family = AF_INET;
   struct hostent *he = gethostbyname(SSH_HOST);
   if (he == nullptr) {
-    LOGF_E("Invalid remote hostname: %s\n", SSH_HOST);
+    LOGF_E("SSH", "Invalid remote hostname: %s", SSH_HOST);
     close(socketfd);
     return false;
   }
