@@ -1,26 +1,87 @@
-name: Build ESP32 Arduino Library
+name: ESP32 SSH Tunnel Library CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, develop ]
   pull_request:
     branches: [ main, master ]
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    strategy:
-      matrix:
-        board: [esp32dev]
+    
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      - name: Install PlatformIO
-        run: pip install platformio
-      - name: Build example for ${{ matrix.board }}
-        run: |
-          cd examples
-          pio run -e ${{ matrix.board }}
+    - name: Checkout code
+      uses: actions/checkout@v4
+      with:
+        submodules: recursive
+    
+    - name: Cache pip
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/pip
+        key: ${{ runner.os }}-pip-${{ hashFiles('**/requirements.txt') }}
+        restore-keys: |
+          ${{ runner.os }}-pip-
+    
+    - name: Cache PlatformIO
+      uses: actions/cache@v4
+      with:
+        path: ~/.platformio
+        key: ${{ runner.os }}-pio-${{ hashFiles('**/platformio.ini') }}
+        restore-keys: |
+          ${{ runner.os }}-pio-
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    
+    - name: Install PlatformIO Core
+      run: pip install --upgrade platformio
+    
+    - name: Apply libssh2 configuration fix
+      run: |
+        cd examples
+        chmod +x fix_libssh2_esp.sh
+        ./fix_libssh2_esp.sh
+    
+    - name: Clean build environment
+      run: |
+        cd examples
+        pio run --target clean -e esp32dev
+    
+    - name: Build for ESP32
+      run: |
+        cd examples
+        pio run -e esp32dev
+    
+    - name: Check memory usage
+      run: |
+        cd examples
+        echo "=== Memory Usage Report ==="
+        pio run -e esp32dev --silent | grep -E "(RAM|Flash):" || echo "Memory info not available"
+    
+    - name: Verify no OS/400 files compiled
+      run: |
+        cd examples
+        echo "=== Verification: OS/400 Files Check ==="
+        if pio run -e esp32dev -v 2>&1 | grep -i "os400\|qtqiconv\|qadrt"; then
+          echo "❌ ERROR: OS/400 platform files are being compiled!"
+          echo "This should not happen with proper lib_src_filter configuration."
+          exit 1
+        else
+          echo "✅ SUCCESS: No OS/400 platform files compiled"
+        fi
+    
+    - name: Verify build artifacts
+      run: |
+        cd examples
+        echo "=== Build Artifacts Check ==="
+        if [ -f ".pio/build/esp32dev/firmware.bin" ]; then
+          echo "✅ Firmware binary created successfully"
+          ls -la .pio/build/esp32dev/firmware.*
+        else
+          echo "❌ ERROR: Firmware binary not found"
+          exit 1
+        fi
