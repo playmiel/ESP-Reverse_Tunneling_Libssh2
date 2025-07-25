@@ -3,7 +3,7 @@
 
 #include "ssh_tunnel.h"
 #include "logger.h"
-#include "config_ssh.h"
+#include "ssh_config.h"
 #include "network_optimizations.h"
 
 #endif
