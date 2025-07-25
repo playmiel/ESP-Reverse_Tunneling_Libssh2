@@ -23,5 +23,15 @@
         "url": "https://github.com/skuodi/libssh2_esp.git"
       }
     }
-  ]
+  ],
+    "export": {
+    "include": [
+      "examples",
+      "src",
+      "library.json",
+      "library.properties",
+      "LICENSE",
+      "README.md"
+    ]
+  }
 }

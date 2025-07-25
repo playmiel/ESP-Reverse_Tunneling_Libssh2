@@ -95,6 +95,66 @@ void SSHConfiguration::setDebugConfig(bool enabled, int baudRate) {
     }
 }
 
+void SSHConfiguration::setCompressionConfig(bool enabled, int level, int threshold, bool adaptiveMode) {
+    if (lockConfig()) {
+        compressionConfig.enabled = enabled;
+        compressionConfig.level = (level >= 1 && level <= 9) ? level : 6;
+        compressionConfig.threshold = (threshold > 0) ? threshold : 512;
+        compressionConfig.adaptiveMode = adaptiveMode;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Compression config: enabled=%s, level=%d, threshold=%d, adaptive=%s",
+               enabled ? "true" : "false", compressionConfig.level, compressionConfig.threshold,
+               adaptiveMode ? "true" : "false");
+    }
+}
+
+void SSHConfiguration::setAdvancedCompressionConfig(bool enabled, int level, int threshold, bool adaptiveMode,
+                                                   bool forceCompression, int windowBits, int memLevel) {
+    if (lockConfig()) {
+        compressionConfig.enabled = enabled;
+        compressionConfig.level = (level >= 1 && level <= 9) ? level : 6;
+        compressionConfig.threshold = (threshold > 0) ? threshold : 512;
+        compressionConfig.adaptiveMode = adaptiveMode;
+        compressionConfig.forceCompression = forceCompression;
+        compressionConfig.windowBits = (windowBits >= 8 && windowBits <= 15) ? windowBits : 15;
+        compressionConfig.memLevel = (memLevel >= 1 && memLevel <= 9) ? memLevel : 8;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Advanced compression: enabled=%s, level=%d, threshold=%d, adaptive=%s, force=%s, window=%d, mem=%d",
+               enabled ? "true" : "false", compressionConfig.level, compressionConfig.threshold,
+               adaptiveMode ? "true" : "false", forceCompression ? "true" : "false",
+               compressionConfig.windowBits, compressionConfig.memLevel);
+    }
+}
+
+void SSHConfiguration::enableCompression(bool enable) {
+    if (lockConfig()) {
+        compressionConfig.enabled = enable;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Compression %s", enable ? "enabled" : "disabled");
+    }
+}
+
+void SSHConfiguration::setCompressionLevel(int level) {
+    if (lockConfig()) {
+        compressionConfig.level = (level >= 1 && level <= 9) ? level : 6;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Compression level set to %d", compressionConfig.level);
+    }
+}
+
+void SSHConfiguration::setCompressionThreshold(int threshold) {
+    if (lockConfig()) {
+        compressionConfig.threshold = (threshold > 0) ? threshold : 512;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Compression threshold set to %d bytes", compressionConfig.threshold);
+    }
+}
+
 bool SSHConfiguration::validateConfiguration() const {
     return validateSSHConfig() && validateTunnelConfig() && validateConnectionConfig();
 }

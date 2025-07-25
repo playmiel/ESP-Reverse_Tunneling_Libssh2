@@ -1,9 +1,6 @@
 #include <WiFi.h>
 #include <Arduino.h>
 #include "ESP-Reverse_Tunneling_Libssh2.h"
-#include "ssh_tunnel.h"
-#include "ssh_config.h"
-#include "logger.h"
 
 // Configuration WiFi
 const char* ssid = "YOUR_WIFI_SSID";

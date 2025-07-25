@@ -2,7 +2,7 @@
 #define LOGGER_H
 
 #include <Arduino.h>
-#include "config_ssh.h"
+
 
 enum LogLevel {
     LOG_ERROR = 0,
