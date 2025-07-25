@@ -2,9 +2,8 @@
 #include <Arduino.h>
 #include "ESP-Reverse_Tunneling_Libssh2.h"
 #include "ssh_tunnel.h"
+#include "ssh_config.h"
 #include "logger.h"
-
-
 
 // Configuration WiFi
 const char* ssid = "YOUR_WIFI_SSID";
@@ -18,24 +17,19 @@ unsigned long lastStatsReport = 0;
 const unsigned long STATS_INTERVAL = 10000; // 10 secondes
 
 void connectWiFi();
-void updateStatusLED();
 void reportStats();
+void configureSSHTunnel();
 
 void setup() {
-  Serial.begin(SERIAL_BAUD_RATE);
+  Serial.begin(115200);
   while (!Serial) {
     delay(10);
   }
 
-  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version optimisée");
-  LOGF_I("MAIN", "Buffer size: %d bytes", BUFFER_SIZE);
-  LOGF_I("MAIN", "Max channels: %d", MAX_CHANNELS);
+  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version améliorée avec configuration dynamique");
 
-  // Configuration LED de statut
-#ifdef STATUS_LED_PIN
-  pinMode(STATUS_LED_PIN, OUTPUT);
-  digitalWrite(STATUS_LED_PIN, LOW);
-#endif
+  // Configuration du tunnel SSH
+  configureSSHTunnel();
 
   // Connexion WiFi
   connectWiFi();
@@ -63,9 +57,6 @@ void loop() {
 
   // Traitement du tunnel SSH
   tunnel.loop();
-
-  // Mise à jour LED de statut
-  updateStatusLED();
 
   // Rapport de statistiques
   reportStats();
@@ -95,42 +86,56 @@ void connectWiFi() {
   }
 }
 
-void updateStatusLED() {
-#ifdef STATUS_LED_PIN
-  static unsigned long lastBlink = 0;
-  static bool ledState = false;
-  unsigned long now = millis();
-
-  switch (tunnel.getState()) {
-    case TUNNEL_DISCONNECTED:
-      // LED éteinte
-      digitalWrite(STATUS_LED_PIN, LOW);
-      break;
-
-    case TUNNEL_CONNECTING:
-      // LED clignote rapidement
-      if (now - lastBlink > 200) {
-        ledState = !ledState;
-        digitalWrite(STATUS_LED_PIN, ledState);
-        lastBlink = now;
-      }
-      break;
-
-    case TUNNEL_CONNECTED:
-      // LED allumée fixe
-      digitalWrite(STATUS_LED_PIN, HIGH);
-      break;
-
-    case TUNNEL_ERROR:
-      // LED clignote lentement
-      if (now - lastBlink > 1000) {
-        ledState = !ledState;
-        digitalWrite(STATUS_LED_PIN, ledState);
-        lastBlink = now;
-      }
-      break;
-  }
-#endif
+void configureSSHTunnel() {
+  LOG_I("CONFIG", "Configuration du tunnel SSH...");
+  
+  // Configuration du serveur SSH
+  globalSSHConfig.setSSHServer(
+    "your-remote-server.com",  // Remplacez par votre serveur
+    22,                        // Port SSH
+    "your_username",           // Nom d'utilisateur
+    "your_password"            // Mot de passe
+  );
+  
+  // Alternative: Configuration avec clé SSH
+  // globalSSHConfig.setSSHKeyAuth(
+  //   "your-remote-server.com",
+  //   22,
+  //   "your_username",
+  //   "/ssh_key",
+  //   ""  // Passphrase pour la clé (optionnel)
+  // );
+  
+  // Configuration du tunnel
+  globalSSHConfig.setTunnelConfig(
+    "0.0.0.0",        // Adresse de bind sur le serveur distant
+    8080,             // Port de bind sur le serveur distant
+    "192.168.1.100",  // Adresse locale à tunneler
+    80                // Port local à tunneler
+  );
+  
+  // Configuration de la connexion
+  globalSSHConfig.setConnectionConfig(
+    30,    // Intervalle keep-alive (secondes)
+    5000,  // Délai de reconnexion (ms)
+    5,     // Nombre max de tentatives de reconnexion
+    30     // Timeout de connexion (secondes)
+  );
+  
+  // Configuration des buffers
+  globalSSHConfig.setBufferConfig(
+    8192,    // Taille des buffers
+    5,       // Nombre max de canaux
+    1800000  // Timeout des canaux (ms) - 30 minutes
+  );
+  
+  // Configuration du debug
+  globalSSHConfig.setDebugConfig(
+    true,   // Debug activé
+    115200  // Baud rate série
+  );
+  
+  LOG_I("CONFIG", "Configuration terminée");
 }
 
 void reportStats() {
