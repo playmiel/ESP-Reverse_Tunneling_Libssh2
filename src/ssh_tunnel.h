@@ -2,7 +2,6 @@
 #define SSH_TUNNEL_H
 
 #include <libssh2/include/libssh2.h>
-#include "config_ssh.h"
 #include "logger.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
