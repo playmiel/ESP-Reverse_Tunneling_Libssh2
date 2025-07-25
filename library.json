@@ -5,12 +5,11 @@
 "description": "Library for ESP32 Arduino enabling creation of reverse SSH tunnels using libssh2.",
   "repository": {
     "type": "git",
-    "url": "https://github.com/votre-utilisateur/ESP-Reverse_Tunneling_Libssh2.git"
+    "url": "https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git"
   },
   "authors": [
     {
-      "name": "playmiel",
-
+      "name": "playmiel"
     }
   ],
   "frameworks": "arduino",
