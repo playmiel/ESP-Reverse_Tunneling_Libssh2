@@ -5,6 +5,5 @@
 #include "logger.h"
 #include "ssh_config.h"
 #include "network_optimizations.h"
-#include <Arduino.h>
 
 #endif

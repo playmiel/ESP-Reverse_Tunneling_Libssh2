@@ -3,7 +3,6 @@
 
 #include <Arduino.h>
 
-
 enum LogLevel {
     LOG_ERROR = 0,
     LOG_WARN = 1,

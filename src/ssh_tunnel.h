@@ -2,6 +2,7 @@
 #define SSH_TUNNEL_H
 
 #include <libssh2/include/libssh2.h>
+#include "ssh_config.h"
 #include "logger.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -9,6 +10,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include "lwip/netdb.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/semphr.h>
 enum TunnelState {
     TUNNEL_DISCONNECTED = 0,
     TUNNEL_CONNECTING = 1,
@@ -23,6 +26,7 @@ struct TunnelChannel {
     unsigned long lastActivity;
     size_t pendingBytes; // Données en attente d'écriture
     bool flowControlPaused; // Pause temporaire pour éviter la congestion
+    SemaphoreHandle_t channelMutex; // Protection thread-safe pour ce canal
 };
 
 class SSHTunnel {
@@ -69,7 +73,7 @@ private:
     LIBSSH2_LISTENER* listener;
     int socketfd;
 
-    TunnelChannel channels[MAX_CHANNELS];
+    TunnelChannel* channels; // Allocation dynamique basée sur la config
     
     TunnelState state;
     unsigned long lastKeepAlive;
@@ -80,9 +84,24 @@ private:
     unsigned long bytesReceived;
     unsigned long bytesSent;
     
-    // Buffers
-    uint8_t rxBuffer[BUFFER_SIZE];
-    uint8_t txBuffer[BUFFER_SIZE];
+    // Buffers (allocation dynamique basée sur la config)
+    uint8_t* rxBuffer;
+    uint8_t* txBuffer;
+    
+    // Protection thread-safe
+    SemaphoreHandle_t tunnelMutex;
+    SemaphoreHandle_t statsMutex;
+    
+    // Configuration reference
+    SSHConfiguration* config;
+    
+    // Méthodes de protection
+    bool lockTunnel();
+    void unlockTunnel();
+    bool lockStats();
+    void unlockStats();
+    bool lockChannel(int channelIndex);
+    void unlockChannel(int channelIndex);
 };
 
 #endif
