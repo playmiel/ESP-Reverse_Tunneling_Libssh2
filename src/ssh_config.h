@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
-#include "ESP-Reverse_Tunneling_Libssh2.h"
+
 // Structure pour la configuration SSH
 struct SSHServerConfig {
     String host;
@@ -60,27 +60,6 @@ struct ConnectionConfig {
         channelTimeoutMs(1800000) {}
 };
 
-// Structure pour la configuration de compression
-struct CompressionConfig {
-    bool enabled;
-    int level;              // Niveau de compression 1-9 (1=rapide, 9=meilleure compression)
-    int threshold;          // Taille minimum en bytes pour activer la compression
-    bool adaptiveMode;      // Mode adaptatif selon le type de données
-    bool forceCompression;  // Forcer la compression même pour les petites données
-    int windowBits;         // Taille de la fenêtre zlib (8-15, défaut: 15)
-    int memLevel;           // Niveau mémoire zlib (1-9, défaut: 8)
-    
-    // Constructeur par défaut
-    CompressionConfig() :
-        enabled(false),
-        level(6),              // Équilibre performance/compression
-        threshold(512),        // 512 bytes minimum
-        adaptiveMode(true),
-        forceCompression(false),
-        windowBits(15),        // Fenêtre maximale pour meilleure compression
-        memLevel(8) {}         // Niveau mémoire équilibré
-};
-
 // Structure pour la configuration de debug
 struct DebugConfig {
     bool debugEnabled;
@@ -112,20 +91,11 @@ public:
     // Méthodes de configuration debug
     void setDebugConfig(bool enabled, int baudRate);
     
-    // Méthodes de configuration de compression
-    void setCompressionConfig(bool enabled, int level = 6, int threshold = 512, bool adaptiveMode = true);
-    void setAdvancedCompressionConfig(bool enabled, int level, int threshold, bool adaptiveMode,
-                                     bool forceCompression, int windowBits, int memLevel);
-    void enableCompression(bool enable = true);
-    void setCompressionLevel(int level);
-    void setCompressionThreshold(int threshold);
-    
     // Getters pour accéder aux configurations
     const SSHServerConfig& getSSHConfig() const { return sshConfig; }
     const TunnelConfig& getTunnelConfig() const { return tunnelConfig; }
     const ConnectionConfig& getConnectionConfig() const { return connectionConfig; }
     const DebugConfig& getDebugConfig() const { return debugConfig; }
-    const CompressionConfig& getCompressionConfig() const { return compressionConfig; }
     
     // Méthodes de validation
     bool validateConfiguration() const;
@@ -140,7 +110,6 @@ private:
     TunnelConfig tunnelConfig;
     ConnectionConfig connectionConfig;
     DebugConfig debugConfig;
-    CompressionConfig compressionConfig;
     
     // Sémaphore pour la protection thread-safe
     SemaphoreHandle_t configMutex;
