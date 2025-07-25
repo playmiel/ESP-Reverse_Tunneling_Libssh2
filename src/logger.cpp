@@ -1,9 +1,8 @@
-#include "logger.h"
-#include "ssh_config.h"
-#include <stdarg.h>
 
+#include <stdarg.h>
+#include "ESP-Reverse_Tunneling_Libssh2.h"
 void Logger::init() {
-    Serial.begin(globalSSHConfig.getDebugConfig().serialBaudRate);
+    Serial.begin(SERIAL_BAUD_RATE);
     while (!Serial && millis() < 5000) {
         delay(10);
     }
@@ -11,7 +10,7 @@ void Logger::init() {
 }
 
 void Logger::log(LogLevel level, const char* tag, const char* message) {
-    if (!globalSSHConfig.getDebugConfig().debugEnabled && level > LOG_WARN) {
+    if (!DEBUG_ENABLED && level > LOG_WARN) {
         return;
     }
     
@@ -20,7 +19,7 @@ void Logger::log(LogLevel level, const char* tag, const char* message) {
 }
 
 void Logger::logf(LogLevel level, const char* tag, const char* format, ...) {
-    if (!globalSSHConfig.getDebugConfig().debugEnabled && level > LOG_WARN) {
+    if (!DEBUG_ENABLED && level > LOG_WARN) {
         return;
     }
     
