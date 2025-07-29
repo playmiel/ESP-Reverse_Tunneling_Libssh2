@@ -56,7 +56,7 @@ struct ConnectionConfig {
         maxReconnectAttempts(5),
         connectionTimeoutSec(30),
         bufferSize(8192),
-        maxChannels(5),
+        maxChannels(10),  // Augmenté de 5 à 10 pour les gros transferts
         channelTimeoutMs(1800000) {}
 };
 
