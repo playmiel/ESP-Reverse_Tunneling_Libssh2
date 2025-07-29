@@ -1,114 +1,36 @@
 #include "ssh_tunnel.h"
+#include <general_fun.h>
+#include "new_tunnel.h"
 #include "network_optimizations.h"
 
+bool ssh_ready = false;
 SSHTunnel::SSHTunnel()
     : session(nullptr), listener(nullptr), socketfd(-1),
       state(TUNNEL_DISCONNECTED), lastKeepAlive(0), lastConnectionAttempt(0),
-      reconnectAttempts(0), bytesReceived(0), bytesSent(0),
-      channels(nullptr), rxBuffer(nullptr), txBuffer(nullptr),
-      tunnelMutex(nullptr), statsMutex(nullptr), config(&globalSSHConfig) {
+      reconnectAttempts(0), bytesReceived(0), bytesSent(0) {
 
-  // Créer les sémaphores de protection
-  tunnelMutex = xSemaphoreCreateMutex();
-  statsMutex = xSemaphoreCreateMutex();
-  
-  if (tunnelMutex == NULL || statsMutex == NULL) {
-    LOG_E("SSH", "Failed to create tunnel mutexes");
-  }
-}
-
-SSHTunnel::~SSHTunnel() {
-  disconnect();
-  
-  // Libérer les sémaphores
-  if (tunnelMutex != NULL) {
-    vSemaphoreDelete(tunnelMutex);
-  }
-  if (statsMutex != NULL) {
-    vSemaphoreDelete(statsMutex);
-  }
-  
-  // Libérer la mémoire allouée dynamiquement
-  if (channels != nullptr) {
-    for (int i = 0; i < config->getConnectionConfig().maxChannels; i++) {
-      if (channels[i].channelMutex != NULL) {
-        vSemaphoreDelete(channels[i].channelMutex);
-      }
-    }
-    free(channels);
-  }
-  
-  if (rxBuffer != nullptr) {
-    free(rxBuffer);
-  }
-  
-  if (txBuffer != nullptr) {
-    free(txBuffer);
-  }
-}
-
-bool SSHTunnel::init() {
-  if (!lockTunnel()) {
-    LOG_E("SSH", "Failed to lock tunnel for initialization");
-    return false;
-  }
-  
-  // Valider la configuration
-  if (!config->validateConfiguration()) {
-    LOG_E("SSH", "Invalid configuration");
-    unlockTunnel();
-    return false;
-  }
-  
-  // Allouer la mémoire pour les canaux
-  int maxChannels = config->getConnectionConfig().maxChannels;
-  channels = (TunnelChannel*)malloc(sizeof(TunnelChannel) * maxChannels);
-  if (channels == nullptr) {
-    LOG_E("SSH", "Failed to allocate memory for channels");
-    unlockTunnel();
-    return false;
-  }
-  
-  // Initialiser les canaux
-  for (int i = 0; i < maxChannels; i++) {
+  // Initialize channels
+  for (int i = 0; i < MAX_CHANNELS; i++) {
     channels[i].channel = nullptr;
     channels[i].localSocket = -1;
     channels[i].active = false;
     channels[i].lastActivity = 0;
     channels[i].pendingBytes = 0;
     channels[i].flowControlPaused = false;
-    channels[i].channelMutex = xSemaphoreCreateMutex();
-    
-    if (channels[i].channelMutex == NULL) {
-      LOGF_E("SSH", "Failed to create mutex for channel %d", i);
-      unlockTunnel();
-      return false;
-    }
   }
-  
-  // Allouer les buffers
-  int bufferSize = config->getConnectionConfig().bufferSize;
-  rxBuffer = (uint8_t*)malloc(bufferSize);
-  txBuffer = (uint8_t*)malloc(bufferSize);
-  
-  if (rxBuffer == nullptr || txBuffer == nullptr) {
-    LOG_E("SSH", "Failed to allocate memory for buffers");
-    unlockTunnel();
-    return false;
-  }
-  
+}
+
+SSHTunnel::~SSHTunnel() { disconnect(); }
+
+bool SSHTunnel::init() {
   // Initialize libssh2
   int rc = libssh2_init(0);
   if (rc != 0) {
     LOGF_E("SSH", "libssh2 initialization failed: %d", rc);
-    unlockTunnel();
     return false;
   }
 
   LOG_I("SSH", "SSH tunnel initialized");
-  config->printConfiguration();
-  
-  unlockTunnel();
   return true;
 }
 
@@ -154,12 +76,12 @@ bool SSHTunnel::connectSSH() {
   }
 
   state = TUNNEL_CONNECTED;
-
+  ssh_ready = true;
   reconnectAttempts = 0;
   lastKeepAlive = millis();
-
+  IPAddress localIP = WiFi.localIP();
   LOGF_I("SSH", "Reverse tunnel established: %s:%d -> %s:%d", REMOTE_BIND_HOST,
-         REMOTE_BIND_PORT, LOCAL_HOST, LOCAL_PORT);
+         REMOTE_BIND_PORT, localIP.toString().c_str(), LOCAL_PORT);
 
   return true;
 }
@@ -240,18 +162,15 @@ bool SSHTunnel::initializeSSH() {
     LOGF_W("SSH", "Warning: Could not apply all socket optimizations");
   }
 
-  // Utiliser la configuration SSH
-  const SSHServerConfig& sshConfig = config->getSSHConfig();
-  
   sin.sin_family = AF_INET;
-  struct hostent *he = gethostbyname(sshConfig.host.c_str());
+  struct hostent *he = gethostbyname(L_HOST);
   if (he == nullptr) {
-    LOGF_E("Invalid remote hostname: %s\n", sshConfig.host.c_str());
+    LOGF_E("Invalid remote hostname: %s\n", L_HOST);
     close(socketfd);
     return false;
   }
   memcpy(&sin.sin_addr, he->h_addr_list[0], he->h_length);
-  sin.sin_port = htons(sshConfig.port); /* SSH port */
+  sin.sin_port = htons(22); /* SSH port */
   if (connect(socketfd, (struct sockaddr *)(&sin),
               sizeof(struct sockaddr_in)) != 0) {
     LOGF_E("SSH", "Failed to connect!");
@@ -289,12 +208,9 @@ bool SSHTunnel::initializeSSH() {
 }
 
 bool SSHTunnel::authenticateSSH() {
-  // Utiliser la configuration SSH
-  const SSHServerConfig& sshConfig = config->getSSHConfig();
-  
   /* check what authentication methods are available */
   char *userauthlist =
-      libssh2_userauth_list(session, sshConfig.username.c_str(), sshConfig.username.length());
+      libssh2_userauth_list(session, SSH_USERNAME, strlen(SSH_USERNAME));
   LOGF_I("SSH", "Authentication methods: %s", userauthlist);
 
   int auth = 0;
@@ -306,24 +222,23 @@ bool SSHTunnel::authenticateSSH() {
   if (strstr(userauthlist, "publickey"))
     auth |= AUTH_PUBLICKEY;
 
-  if (sshConfig.useSSHKey) {
+  if (USE_SSH_KEY) {
     auth = AUTH_PUBLICKEY;
   } else {
     auth = AUTH_PASSWORD;
   }
 
   if (auth & AUTH_PASSWORD) {
-    if (libssh2_userauth_password(session, sshConfig.username.c_str(), sshConfig.password.c_str())) {
+    if (libssh2_userauth_password(session, SSH_USERNAME, SSH_PASSWORD)) {
       LOG_E("SSH", "Authentication by password failed");
       return false;
     }
     LOG_I("SSH", "Authentication by password succeeded");
   } else if (auth & AUTH_PUBLICKEY) {
-    String keyfile1_str = sshConfig.privateKeyPath + ".pub";
-    const char *keyfile1 = keyfile1_str.c_str();
-    const char *keyfile2 = sshConfig.privateKeyPath.c_str();
-    if (libssh2_userauth_publickey_fromfile(session, sshConfig.username.c_str(), keyfile1,
-                                            keyfile2, sshConfig.password.c_str())) {
+    const char *keyfile1 = "/littlefs/.ssh/id_ed25519.pub";
+    const char *keyfile2 = "/littlefs/.ssh/id_ed25519";
+    if (libssh2_userauth_publickey_fromfile(session, SSH_USERNAME, keyfile1,
+                                            keyfile2, SSH_PASSWORD)) {
       LOG_E("SSH", "Authentication by public key failed!");
       return false;
     }
@@ -338,16 +253,18 @@ bool SSHTunnel::authenticateSSH() {
 
 bool SSHTunnel::createReverseTunnel() {
   int bound_port;
+  int localPort = LOCAL_PORT;
   int maxlisten = 10; // Max number of connections to listen for
   
-  // Utiliser la configuration au lieu des constantes
-  const TunnelConfig& tunnelConfig = config->getTunnelConfig();
-  int ssh_port = tunnelConfig.remoteBindPort;
-  const char* bind_host = tunnelConfig.remoteBindHost.c_str();
-  
+    Preferences preferences;
+    preferences.begin("ssh", false);
+    ssh_port = preferences.getInt("port", 9000);
+    preferences.end();
+    Serial.print("ssh_port: ");
+    Serial.println(ssh_port);
   do {
     listener = libssh2_channel_forward_listen_ex(
-        session, bind_host, ssh_port, &bound_port, maxlisten);
+        session, REMOTE_BIND_HOST, ssh_port, &bound_port, maxlisten);
     if (!listener) {
       delay(10);
     }
@@ -387,8 +304,7 @@ bool SSHTunnel::handleNewConnection() {
 
   // Find available channel slot
   int channelIndex = -1;
-  int maxChannels = config->getConnectionConfig().maxChannels;
-  for (int i = 0; i < maxChannels; i++) {
+  for (int i = 0; i < MAX_CHANNELS; i++) {
     if (!channels[i].active) {
       channelIndex = i;
       break;
@@ -411,16 +327,16 @@ bool SSHTunnel::handleNewConnection() {
     return false;
   }
 
-  // Utiliser la configuration pour l'endpoint local
-  const TunnelConfig& tunnelConfig = config->getTunnelConfig();
   struct sockaddr_in addr;
   addr.sin_family = AF_INET;
-  addr.sin_port = htons(tunnelConfig.localPort);
-  inet_pton(AF_INET, tunnelConfig.localHost.c_str(), &addr.sin_addr);
+
+  addr.sin_port = htons(LOCAL_PORT);
+  IPAddress localIP = WiFi.localIP(); // Ensure WiFi is initialized
+  inet_pton(AF_INET, localIP.toString().c_str(), &addr.sin_addr);
 
   if (::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d", 
-           tunnelConfig.localHost.c_str(), tunnelConfig.localPort);
+    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d", localIP.toString().c_str(),
+           LOCAL_PORT);
     close(localSocket);
     libssh2_channel_close(channel);
     libssh2_channel_free(channel);
@@ -451,108 +367,73 @@ bool SSHTunnel::handleNewConnection() {
 }
 
 void SSHTunnel::handleChannelData(int channelIndex) {
-  if (!lockChannel(channelIndex)) {
-    return;
-  }
-  
   TunnelChannel &ch = channels[channelIndex];
-  if (!ch.active || !ch.channel || ch.localSocket < 0) {
-    unlockChannel(channelIndex);
+  if (!ch.active || !ch.channel || ch.localSocket < 0)
     return;
-  }
 
   unsigned long now = millis();
   bool dataTransferred = false;
-  int bufferSize = config->getConnectionConfig().bufferSize;
 
-  // SSH -> Local avec gestion des écritures partielles et protection contre les erreurs
-  ssize_t rc = libssh2_channel_read(ch.channel, (char *)rxBuffer, bufferSize);
+  // SSH -> Local avec gestion des écritures partielles
+  ssize_t rc = libssh2_channel_read(ch.channel, (char *)rxBuffer, BUFFER_SIZE);
   if (rc > 0) {
     ssize_t totalWritten = 0;
     ssize_t remaining = rc;
-    int retryCount = 0;
-    const int maxRetries = 3;
     
-    while (remaining > 0 && retryCount < maxRetries) {
+    while (remaining > 0) {
       ssize_t written = send(ch.localSocket, rxBuffer + totalWritten, remaining, MSG_DONTWAIT);
       if (written > 0) {
         totalWritten += written;
         remaining -= written;
         dataTransferred = true;
-        retryCount = 0; // Reset retry count on success
       } else if (written < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           // Socket plein, on attend un peu
           delay(1);
-          retryCount++;
           continue;
-        } else if (errno == ECONNRESET || errno == EPIPE) {
-          // Connection reset by peer - gestion spéciale
-          LOGF_W("SSH", "Channel %d: Connection reset by peer during write", channelIndex);
-          unlockChannel(channelIndex);
-          closeChannel(channelIndex);
-          return;
         } else {
           LOGF_W("SSH", "Channel %d: Local write error: %s", channelIndex, strerror(errno));
-          unlockChannel(channelIndex);
           closeChannel(channelIndex);
           return;
         }
       } else {
         // written == 0, socket fermé
         LOGF_I("SSH", "Channel %d: local socket closed during write", channelIndex);
-        unlockChannel(channelIndex);
         closeChannel(channelIndex);
         return;
       }
     }
     
-    if (retryCount >= maxRetries) {
-      LOGF_W("SSH", "Channel %d: Max retries reached for local write", channelIndex);
-      unlockChannel(channelIndex);
-      closeChannel(channelIndex);
-      return;
-    }
-    
     if (totalWritten > 0) {
-      if (lockStats()) {
-        bytesReceived += totalWritten;
-        unlockStats();
-      }
-      ch.lastActivity = now;
+      bytesReceived += totalWritten;
+      ch.lastActivity = now; // Mettre à jour l'activité du canal
       LOGF_D("SSH", "Channel %d: SSH->Local %d bytes", channelIndex, totalWritten);
     }
   } else if (rc < 0 && rc != LIBSSH2_ERROR_EAGAIN) {
     LOGF_W("SSH", "Channel %d read error: %d", channelIndex, rc);
-    unlockChannel(channelIndex);
     closeChannel(channelIndex);
     return;
   }
 
-  // Local -> SSH avec gestion des écritures partielles et protection contre les erreurs
-  ssize_t bytesRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
+  // Local -> SSH avec gestion des écritures partielles
+  ssize_t bytesRead = recv(ch.localSocket, txBuffer, BUFFER_SIZE, MSG_DONTWAIT);
   if (bytesRead > 0) {
     ssize_t totalWritten = 0;
     ssize_t remaining = bytesRead;
-    int retryCount = 0;
-    const int maxRetries = 3;
     
-    while (remaining > 0 && retryCount < maxRetries) {
+    while (remaining > 0) {
       ssize_t written = libssh2_channel_write(ch.channel, (char *)txBuffer + totalWritten, remaining);
       if (written > 0) {
         totalWritten += written;
         remaining -= written;
         dataTransferred = true;
-        retryCount = 0; // Reset retry count on success
       } else if (written < 0) {
         if (written == LIBSSH2_ERROR_EAGAIN) {
           // Canal SSH plein, on attend un peu
           delay(1);
-          retryCount++;
           continue;
         } else {
           LOGF_W("SSH", "Channel %d write error: %d", channelIndex, written);
-          unlockChannel(channelIndex);
           closeChannel(channelIndex);
           return;
         }
@@ -563,48 +444,25 @@ void SSHTunnel::handleChannelData(int channelIndex) {
       }
     }
     
-    if (retryCount >= maxRetries) {
-      LOGF_W("SSH", "Channel %d: Max retries reached for SSH write", channelIndex);
-      unlockChannel(channelIndex);
-      closeChannel(channelIndex);
-      return;
-    }
-    
     if (totalWritten > 0) {
-      if (lockStats()) {
-        bytesSent += totalWritten;
-        unlockStats();
-      }
-      ch.lastActivity = now;
+      bytesSent += totalWritten;
+      ch.lastActivity = now; // Mettre à jour l'activité du canal
       LOGF_D("SSH", "Channel %d: Local->SSH %d bytes", channelIndex, totalWritten);
     }
   } else if (bytesRead == 0) {
     // Socket closed
     LOGF_I("SSH", "Channel %d: local socket closed", channelIndex);
-    unlockChannel(channelIndex);
     closeChannel(channelIndex);
     return;
-  } else if (bytesRead < 0) {
-    if (errno == EAGAIN || errno == EWOULDBLOCK) {
-      // Pas de données disponibles, c'est normal
-    } else if (errno == ECONNRESET || errno == EPIPE) {
-      // Connection reset by peer - gestion spéciale
-      LOGF_W("SSH", "Channel %d: Connection reset by peer during read", channelIndex);
-      unlockChannel(channelIndex);
-      closeChannel(channelIndex);
-      return;
-    } else {
-      LOGF_W("SSH", "Channel %d: Local read error: %s", channelIndex, strerror(errno));
-      unlockChannel(channelIndex);
-      closeChannel(channelIndex);
-      return;
-    }
+  } else if (bytesRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+    LOGF_W("SSH", "Channel %d: Local read error: %s", channelIndex, strerror(errno));
+    closeChannel(channelIndex);
+    return;
   }
 
   // Check if SSH channel is closed
   if (libssh2_channel_eof(ch.channel)) {
     LOGF_I("SSH", "Channel %d: SSH channel closed", channelIndex);
-    unlockChannel(channelIndex);
     closeChannel(channelIndex);
     return;
   }
@@ -612,9 +470,23 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   if (dataTransferred) {
     ch.lastActivity = now;
   }
-  
-  unlockChannel(channelIndex);
+  //   // Check for flow control
+  // if (ch.flowControlPaused) {
+  //   // If we have pending bytes, we can resume flow control
+  //   if (ch.pendingBytes > 0) {
+  //     ch.flowControlPaused = false;
+  //     LOGF_D("SSH", "Channel %d: Resuming flow control", channelIndex);
+  //   }
+  // } else {
+  //   // If no data transferred, pause flow control to avoid congestion
+  //   if (!dataTransferred) {
+  //     ch.flowControlPaused = true;
+  //     LOGF_D("SSH", "Channel %d: Pausing flow control due to no data transfer", channelIndex);
+  //   }
+  // }
 }
+
+
 
 void SSHTunnel::closeChannel(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
@@ -643,7 +515,7 @@ void SSHTunnel::cleanupInactiveChannels() {
 
   for (int i = 0; i < MAX_CHANNELS; i++) {
     if (channels[i].active &&
-        (now - channels[i].lastActivity > CHANNEL_TIMEOUT_MS)) {
+        (now - channels[i].lastActivity > 300000)) { // 5 minutes timeout
       LOGF_W("SSH", "Channel %d timeout, closing", i);
       closeChannel(i);
     }
@@ -740,52 +612,4 @@ int SSHTunnel::socketCallback(LIBSSH2_SESSION *session, libssh2_socket_t fd,
   // This function can be used to handle socket events if needed
   // For now, we return 0 to indicate no special handling
   return 0;
-}
-// Méthodes de protection par sémaphore
-bool SSHTunnel::lockTunnel() {
-  if (tunnelMutex == NULL) {
-    return false;
-  }
-  return xSemaphoreTake(tunnelMutex, portMAX_DELAY) == pdTRUE;
-}
-
-void SSHTunnel::unlockTunnel() {
-  if (tunnelMutex != NULL) {
-    xSemaphoreGive(tunnelMutex);
-  }
-}
-
-bool SSHTunnel::lockStats() {
-  if (statsMutex == NULL) {
-    return false;
-  }
-  return xSemaphoreTake(statsMutex, portMAX_DELAY) == pdTRUE;
-}
-
-void SSHTunnel::unlockStats() {
-  if (statsMutex != NULL) {
-    xSemaphoreGive(statsMutex);
-  }
-}
-
-bool SSHTunnel::lockChannel(int channelIndex) {
-  if (channels == nullptr || channelIndex < 0 || channelIndex >= config->getConnectionConfig().maxChannels) {
-    return false;
-  }
-  
-  if (channels[channelIndex].channelMutex == NULL) {
-    return false;
-  }
-  
-  return xSemaphoreTake(channels[channelIndex].channelMutex, portMAX_DELAY) == pdTRUE;
-}
-
-void SSHTunnel::unlockChannel(int channelIndex) {
-  if (channels == nullptr || channelIndex < 0 || channelIndex >= config->getConnectionConfig().maxChannels) {
-    return;
-  }
-  
-  if (channels[channelIndex].channelMutex != NULL) {
-    xSemaphoreGive(channels[channelIndex].channelMutex);
-  }
 }
