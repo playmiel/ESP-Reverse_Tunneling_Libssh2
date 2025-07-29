@@ -48,18 +48,11 @@ This project provides two example formats:
 - **Usage**: Compiled when running `pio run` in the examples/ directory
 - **Features**: Full PlatformIO integration with advanced logging
 
-### Arduino IDE Example
-- **File**: [`examples/esp32_reverse_tunnel_example.ino`](examples/esp32_reverse_tunnel_example.ino)
-- **Usage**: Open directly in Arduino IDE
-- **Features**: Compatible with Arduino IDE environment
-
-**Note**: When using PlatformIO (`pio run`), the system compiles `examples/src/main.cpp`, not the `.ino` file.
 
 ## 📚 Technical Documentation
 
 For more technical details:
 - [`examples/`](examples/) - Usage examples
-- [`fix_libssh2_simple.sh`](fix_libssh2_simple.sh) - Automatic configuration script
 
 ## 🎯 Specifications
 
