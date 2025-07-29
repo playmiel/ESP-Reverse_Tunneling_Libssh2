@@ -35,4 +35,5 @@ attached_assets/
 # Submodule changes (to avoid automatic commits)
 # Note: This helps with the submodule issue mentioned by user
 examples/.pio/libdeps/*/
+examples/.pio/
 *.piopm

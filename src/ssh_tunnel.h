@@ -1,7 +1,7 @@
 #ifndef SSH_TUNNEL_H
 #define SSH_TUNNEL_H
 
-#include <libssh2/include/libssh2.h>
+#include <libssh2_esp.h>
 #include "ssh_config.h"
 #include "logger.h"
 #include <sys/socket.h>
