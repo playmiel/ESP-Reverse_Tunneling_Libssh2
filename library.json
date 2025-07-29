@@ -5,7 +5,7 @@
   "description": "Library for ESP32 Arduino enabling creation of reverse SSH tunnels using libssh2.",
   "license": "MIT",
   "dependencies": {
-    "libssh2_esp": "https://github.com/skuodi/libssh2_esp.git"
+    "libssh2_esp": "https://github.com/playmiel/libssh2_esp.git"
   },
   "repository": {
     "type": "git",
@@ -17,15 +17,6 @@
     }
   ],
   "frameworks": "arduino",
-  "platforms": "espressif32",
-  "export": {
-    "include": [
-      "examples",
-      "src",
-      "library.json",
-      "library.properties",
-      "LICENSE",
-      "README.md"
-    ]
-  }
+  "platforms": "espressif32"
+
 }
