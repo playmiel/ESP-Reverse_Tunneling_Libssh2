@@ -26,7 +26,8 @@ struct TunnelChannel {
     unsigned long lastActivity;
     size_t pendingBytes; // Données en attente d'écriture
     bool flowControlPaused; // Pause temporaire pour éviter la congestion
-    SemaphoreHandle_t channelMutex; // Protection thread-safe pour ce canal
+    SemaphoreHandle_t readMutex; // Protection thread-safe pour la lecture
+    SemaphoreHandle_t writeMutex; // Protection thread-safe pour l'écriture
 };
 
 class SSHTunnel {
@@ -100,6 +101,14 @@ private:
     void unlockTunnel();
     bool lockStats();
     void unlockStats();
+    
+    // Méthodes de protection par canal avec mutex séparés
+    bool lockChannelRead(int channelIndex);
+    void unlockChannelRead(int channelIndex);
+    bool lockChannelWrite(int channelIndex);
+    void unlockChannelWrite(int channelIndex);
+    
+    // Méthodes de compatibilité (deprecated)
     bool lockChannel(int channelIndex);
     void unlockChannel(int channelIndex);
 };
