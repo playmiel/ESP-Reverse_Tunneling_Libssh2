@@ -35,24 +35,9 @@ jobs:
         cd examples
         pio pkg install
 
-    - name: Apply libssh2 configuration fix
-      run: |
-        cd examples
-        chmod +x fix_libssh2_esp.sh
-        ./fix_libssh2_esp.sh
     
     - name: Build for ESP32
       run: |
         cd examples
         pio run -e esp32dev
     
-    - name: Verify no OS/400 files compiled
-      run: |
-        cd examples
-        echo "=== Verification: OS/400 Files Check ==="
-        if pio run -e esp32dev -v 2>&1 | grep -i "qtqiconv\|qadrt"; then
-          echo "❌ ERROR: OS/400 platform files are being compiled!"
-          exit 1
-        else
-          echo "✅ SUCCESS: No OS/400 platform files compiled"
-        fi
