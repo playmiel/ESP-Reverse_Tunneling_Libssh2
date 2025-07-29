@@ -691,7 +691,7 @@ void SSHTunnel::cleanupInactiveChannels() {
     }
   }
 }
-}
+
 
 void SSHTunnel::sendKeepAlive() {
   if (!session)
