@@ -210,7 +210,8 @@ void SSHTunnel::loop() {
   handleNewConnection();
 
   // Handle data for existing channels
-  for (int i = 0; i < MAX_CHANNELS; i++) {
+  int maxChannels = config->getConnectionConfig().maxChannels;
+  for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
       handleChannelData(i);
     }
@@ -218,6 +219,9 @@ void SSHTunnel::loop() {
 
   // Cleanup inactive channels
   cleanupInactiveChannels();
+  
+  // Petit délai pour éviter de surcharger le CPU
+  delay(1);
 }
 
 bool SSHTunnel::initializeSSH() {
@@ -471,7 +475,7 @@ void SSHTunnel::handleChannelData(int channelIndex) {
     ssize_t totalWritten = 0;
     ssize_t remaining = rc;
     int retryCount = 0;
-    const int maxRetries = 3;
+    const int maxRetries = 20;
     
     while (remaining > 0 && retryCount < maxRetries) {
       ssize_t written = send(ch.localSocket, rxBuffer + totalWritten, remaining, MSG_DONTWAIT);
@@ -529,25 +533,41 @@ void SSHTunnel::handleChannelData(int channelIndex) {
     return;
   }
 
-  // Local -> SSH avec gestion des écritures partielles et protection contre les erreurs
+  // Local -> SSH avec gestion des écritures partielles et contrôle de flux intelligent
   ssize_t bytesRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
   if (bytesRead > 0) {
     ssize_t totalWritten = 0;
     ssize_t remaining = bytesRead;
     int retryCount = 0;
-    const int maxRetries = 3;
+    const int maxRetries = 20; // Plus tolérant
     
     while (remaining > 0 && retryCount < maxRetries) {
+      // Vérifier si le canal est en pause pour éviter la congestion
+      if (ch.flowControlPaused) {
+        delay(5);
+        retryCount++;
+        continue;
+      }
+      
       ssize_t written = libssh2_channel_write(ch.channel, (char *)txBuffer + totalWritten, remaining);
       if (written > 0) {
         totalWritten += written;
         remaining -= written;
         dataTransferred = true;
         retryCount = 0; // Reset retry count on success
+        ch.pendingBytes = 0; // Reset pending bytes
       } else if (written < 0) {
         if (written == LIBSSH2_ERROR_EAGAIN) {
-          // Canal SSH plein, on attend un peu
-          delay(1);
+          // Canal SSH plein - activer le contrôle de flux
+          ch.pendingBytes += remaining;
+          if (ch.pendingBytes > bufferSize * 2) {
+            ch.flowControlPaused = true;
+            LOGF_D("SSH", "Channel %d: Flow control activated (pending: %d)", channelIndex, ch.pendingBytes);
+          }
+          
+          // Attente progressive selon le niveau de congestion
+          int waitTime = (retryCount < 5) ? 5 : (retryCount < 10) ? 10 : 20;
+          delay(waitTime);
           retryCount++;
           continue;
         } else {
@@ -557,17 +577,26 @@ void SSHTunnel::handleChannelData(int channelIndex) {
           return;
         }
       } else {
-        // written == 0, problème avec le canal
-        LOGF_W("SSH", "Channel %d: SSH write returned 0", channelIndex);
-        break;
+        // written == 0, canal peut-être fermé côté distant
+        delay(5);
+        retryCount++;
+        continue;
       }
     }
     
-    if (retryCount >= maxRetries) {
-      LOGF_W("SSH", "Channel %d: Max retries reached for SSH write", channelIndex);
-      unlockChannel(channelIndex);
-      closeChannel(channelIndex);
-      return;
+    // Ne fermer le canal que si vraiment bloqué
+    if (retryCount >= maxRetries && remaining > 0) {
+      // Dernière chance : mettre en pause temporairement au lieu de fermer
+      if (!ch.flowControlPaused) {
+        ch.flowControlPaused = true;
+        ch.pendingBytes = remaining;
+        LOGF_W("SSH", "Channel %d: Flow control pause activated due to persistent congestion", channelIndex);
+      } else {
+        LOGF_E("SSH", "Channel %d: Max retries reached for SSH write - closing channel", channelIndex);
+        unlockChannel(channelIndex);
+        closeChannel(channelIndex);
+        return;
+      }
     }
     
     if (totalWritten > 0) {
@@ -640,12 +669,26 @@ void SSHTunnel::closeChannel(int channelIndex) {
 
 void SSHTunnel::cleanupInactiveChannels() {
   unsigned long now = millis();
+  int maxChannels = config->getConnectionConfig().maxChannels;
+  int channelTimeout = config->getConnectionConfig().channelTimeoutMs;
 
-  for (int i = 0; i < MAX_CHANNELS; i++) {
-    if (channels[i].active &&
-        (now - channels[i].lastActivity > CHANNEL_TIMEOUT_MS)) {
-      LOGF_W("SSH", "Channel %d timeout, closing", i);
-      closeChannel(i);
+  for (int i = 0; i < maxChannels; i++) {
+    if (channels[i].active) {
+      // Vérifier si le contrôle de flux peut être réactivé
+      if (channels[i].flowControlPaused) {
+        // Réactiver après 100ms de pause
+        if (now - channels[i].lastActivity > 100) {
+          channels[i].flowControlPaused = false;
+          channels[i].pendingBytes = 0;
+          LOGF_D("SSH", "Channel %d: Flow control resumed", i);
+        }
+      }
+      
+      // Vérifier le timeout du canal
+      if (now - channels[i].lastActivity > channelTimeout) {
+        LOGF_W("SSH", "Channel %d timeout, closing", i);
+        closeChannel(i);
+      }
     }
   }
 }
