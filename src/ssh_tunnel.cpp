@@ -329,15 +329,39 @@ bool SSHTunnel::authenticateSSH() {
     }
     LOG_I("SSH", "Authentication by password succeeded");
   } else if (auth & AUTH_PUBLICKEY) {
-    String keyfile1_str = sshConfig.privateKeyPath + ".pub";
-    const char *keyfile1 = keyfile1_str.c_str();
-    const char *keyfile2 = sshConfig.privateKeyPath.c_str();
-    if (libssh2_userauth_publickey_fromfile(session, sshConfig.username.c_str(), keyfile1,
-                                            keyfile2, sshConfig.password.c_str())) {
-      LOG_E("SSH", "Authentication by public key failed!");
-      return false;
+    // Vérifier si nous avons les clés en mémoire
+    if (sshConfig.privateKeyData.length() > 0 && sshConfig.publicKeyData.length() > 0) {
+      // Utiliser libssh2_userauth_publickey_frommemory
+      LOGF_I("SSH", "Authenticating with keys from memory (private: %d bytes, public: %d bytes)", 
+             sshConfig.privateKeyData.length(), sshConfig.publicKeyData.length());
+      
+      const char* passphrase = sshConfig.password.length() > 0 ? sshConfig.password.c_str() : nullptr;
+      
+      if (libssh2_userauth_publickey_frommemory(session, 
+                                                sshConfig.username.c_str(),
+                                                sshConfig.username.length(),
+                                                sshConfig.publicKeyData.c_str(),
+                                                sshConfig.publicKeyData.length(),
+                                                sshConfig.privateKeyData.c_str(),
+                                                sshConfig.privateKeyData.length(),
+                                                passphrase)) {
+        LOG_E("SSH", "Authentication by public key from memory failed!");
+        return false;
+      }
+      LOG_I("SSH", "Authentication by public key from memory succeeded");
+    } else {
+      // Fallback vers la méthode par fichier (pour compatibilité)
+      LOG_W("SSH", "SSH keys not available in memory, falling back to file-based authentication");
+      String keyfile1_str = sshConfig.privateKeyPath + ".pub";
+      const char *keyfile1 = keyfile1_str.c_str();
+      const char *keyfile2 = sshConfig.privateKeyPath.c_str();
+      if (libssh2_userauth_publickey_fromfile(session, sshConfig.username.c_str(), keyfile1,
+                                              keyfile2, sshConfig.password.c_str())) {
+        LOG_E("SSH", "Authentication by public key from file failed!");
+        return false;
+      }
+      LOG_I("SSH", "Authentication by public key from file succeeded");
     }
-    LOG_I("SSH", "Authentication by public key succeeded");
   } else {
     LOG_E("SSH", "No supported authentication methods found!");
     return false;

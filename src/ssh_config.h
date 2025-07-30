@@ -12,7 +12,9 @@ struct SSHServerConfig {
     String username;
     String password;
     bool useSSHKey;
-    String privateKeyPath;
+    String privateKeyPath;  // Conservé pour compatibilité
+    String privateKeyData; // Contenu de la clé privée en mémoire
+    String publicKeyData;  // Contenu de la clé publique en mémoire
     
     // Constructeur par défaut
     SSHServerConfig() : 
@@ -21,7 +23,9 @@ struct SSHServerConfig {
         username("your_username"),
         password("your_password"),
         useSSHKey(false),
-        privateKeyPath("/ssh_key") {}
+        privateKeyPath("/ssh_key"),
+        privateKeyData(""),
+        publicKeyData("") {}
 };
 
 // Structure pour la configuration du tunnel
@@ -80,6 +84,12 @@ public:
     // Méthodes de configuration SSH
     void setSSHServer(const String& host, int port, const String& username, const String& password);
     void setSSHKeyAuth(const String& host, int port, const String& username, const String& privateKeyPath, const String& passphrase = "");
+    void setSSHKeyAuthFromMemory(const String& host, int port, const String& username, const String& privateKeyData, const String& publicKeyData, const String& passphrase = "");
+    
+    // Méthodes utilitaires pour charger les clés
+    bool loadSSHKeysFromFile(const String& privateKeyPath);
+    bool loadSSHKeysFromLittleFS(const String& privateKeyPath);
+    void setSSHKeysInMemory(const String& privateKeyData, const String& publicKeyData);
     
     // Méthodes de configuration du tunnel
     void setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort);
