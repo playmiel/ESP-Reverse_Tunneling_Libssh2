@@ -2,6 +2,8 @@
 #include <Arduino.h>
 #include "ESP-Reverse_Tunneling_Libssh2.h"
 #include <esp_heap_caps.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
 
 // Configuration WiFi
 const char* ssid = "YOUR_WIFI_SSID";
@@ -21,7 +23,7 @@ void configureSSHTunnel();
 void setup() {
   Serial.begin(115200);
   while (!Serial) {
-    delay(10);
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
 
   LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version améliorée avec configuration dynamique");
@@ -59,8 +61,8 @@ void loop() {
   // Rapport de statistiques
   reportStats();
 
-  // Petit délai pour éviter la surcharge CPU
-  delay(1);
+  // Utiliser vTaskDelay au lieu de delay pour être plus compatible FreeRTOS
+  vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 void connectWiFi() {
@@ -69,7 +71,7 @@ void connectWiFi() {
 
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
-    delay(1000);
+    vTaskDelay(pdMS_TO_TICKS(1000));
     Serial.print(".");
     attempts++;
   }
