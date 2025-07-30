@@ -32,6 +32,10 @@ Thumbs.db
 attached_assets/
 .replit
 
+# Documentation locale de développement
+OPTIMIZATIONS_ROADMAP.md
+ROADMAP.md
+
 # Submodule changes (to avoid automatic commits)
 # Note: This helps with the submodule issue mentioned by user
 examples/.pio/libdeps/*/

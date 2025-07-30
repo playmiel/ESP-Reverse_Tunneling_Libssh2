@@ -1,5 +1,6 @@
 #include "ssh_tunnel.h"
 #include "network_optimizations.h"
+#include "memory_fixes.h"
 
 SSHTunnel::SSHTunnel()
     : session(nullptr), listener(nullptr), socketfd(-1),
@@ -21,33 +22,20 @@ SSHTunnel::~SSHTunnel() {
   disconnect();
   
   // Libérer les sémaphores
-  if (tunnelMutex != NULL) {
-    vSemaphoreDelete(tunnelMutex);
-  }
-  if (statsMutex != NULL) {
-    vSemaphoreDelete(statsMutex);
-  }
+  SAFE_DELETE_SEMAPHORE(tunnelMutex);
+  SAFE_DELETE_SEMAPHORE(statsMutex);
   
   // Libérer la mémoire allouée dynamiquement
   if (channels != nullptr) {
     for (int i = 0; i < config->getConnectionConfig().maxChannels; i++) {
-      if (channels[i].readMutex != NULL) {
-        vSemaphoreDelete(channels[i].readMutex);
-      }
-      if (channels[i].writeMutex != NULL) {
-        vSemaphoreDelete(channels[i].writeMutex);
-      }
+      SAFE_DELETE_SEMAPHORE(channels[i].readMutex);
+      SAFE_DELETE_SEMAPHORE(channels[i].writeMutex);
     }
-    free(channels);
+    SAFE_FREE(channels);
   }
   
-  if (rxBuffer != nullptr) {
-    free(rxBuffer);
-  }
-  
-  if (txBuffer != nullptr) {
-    free(txBuffer);
-  }
+  SAFE_FREE(rxBuffer);
+  SAFE_FREE(txBuffer);
 }
 
 bool SSHTunnel::init() {
@@ -63,9 +51,10 @@ bool SSHTunnel::init() {
     return false;
   }
   
-  // Allouer la mémoire pour les canaux
+  // Allouer la mémoire pour les canaux avec vérification
   int maxChannels = config->getConnectionConfig().maxChannels;
-  channels = (TunnelChannel*)malloc(sizeof(TunnelChannel) * maxChannels);
+  size_t channelsSize = sizeof(TunnelChannel) * maxChannels;
+  channels = (TunnelChannel*)safeMalloc(channelsSize, "SSH_CHANNELS");
   if (channels == nullptr) {
     LOG_E("SSH", "Failed to allocate memory for channels");
     unlockTunnel();
@@ -92,10 +81,10 @@ bool SSHTunnel::init() {
     }
   }
   
-  // Allouer les buffers
+  // Allouer les buffers avec vérification
   int bufferSize = config->getConnectionConfig().bufferSize;
-  rxBuffer = (uint8_t*)malloc(bufferSize);
-  txBuffer = (uint8_t*)malloc(bufferSize);
+  rxBuffer = (uint8_t*)safeMalloc(bufferSize, "SSH_RX_BUFFER");
+  txBuffer = (uint8_t*)safeMalloc(bufferSize, "SSH_TX_BUFFER");
   
   if (rxBuffer == nullptr || txBuffer == nullptr) {
     LOG_E("SSH", "Failed to allocate memory for buffers");
@@ -124,7 +113,8 @@ bool SSHTunnel::connectSSH() {
   }
 
   unsigned long now = millis();
-  if (now - lastConnectionAttempt < RECONNECT_DELAY_MS) {
+  int reconnectDelay = config->getConnectionConfig().reconnectDelayMs;
+  if (now - lastConnectionAttempt < reconnectDelay) {
     return false; // Too soon since last attempt
   }
 
@@ -164,8 +154,10 @@ bool SSHTunnel::connectSSH() {
   reconnectAttempts = 0;
   lastKeepAlive = millis();
 
-  LOGF_I("SSH", "Reverse tunnel established: %s:%d -> %s:%d", REMOTE_BIND_HOST,
-         REMOTE_BIND_PORT, LOCAL_HOST, LOCAL_PORT);
+  TunnelConfig tunnelConf = config->getTunnelConfig();
+  LOGF_I("SSH", "Reverse tunnel established: %s:%d -> %s:%d", 
+         tunnelConf.remoteBindHost.c_str(), tunnelConf.remoteBindPort,
+         tunnelConf.localHost.c_str(), tunnelConf.localPort);
 
   return true;
 }
@@ -173,10 +165,13 @@ bool SSHTunnel::connectSSH() {
 void SSHTunnel::disconnect() {
   LOG_I("SSH", "Disconnecting SSH tunnel...");
 
-  // Close all channels
-  for (int i = 0; i < MAX_CHANNELS; i++) {
-    if (channels[i].active) {
-      closeChannel(i);
+  // Close all channels avec protection pour éviter NULL pointer
+  if (channels != nullptr) {
+    int maxChannels = config->getConnectionConfig().maxChannels;
+    for (int i = 0; i < maxChannels; i++) {
+      if (channels[i].active) {
+        closeChannel(i);
+      }
     }
   }
 
@@ -207,10 +202,14 @@ void SSHTunnel::loop() {
   }
 
   // Send keep-alive
-  if (now - lastKeepAlive > KEEPALIVE_INTERVAL_SEC * 1000) {
+  int keepAliveInterval = config->getConnectionConfig().keepAliveIntervalSec;
+  if (now - lastKeepAlive > keepAliveInterval * 1000) {
     sendKeepAlive();
     lastKeepAlive = now;
   }
+
+  // Print statistics périodiques
+  printChannelStatistics();
 
   // Handle new connections
   handleNewConnection();
@@ -226,8 +225,8 @@ void SSHTunnel::loop() {
   // Cleanup inactive channels
   cleanupInactiveChannels();
   
-  // Petit délai pour éviter de surcharger le CPU
-  delay(1);
+  // Utiliser vTaskDelay au lieu de delay pour être plus compatible FreeRTOS
+  vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 bool SSHTunnel::initializeSSH() {
@@ -329,24 +328,79 @@ bool SSHTunnel::authenticateSSH() {
     }
     LOG_I("SSH", "Authentication by password succeeded");
   } else if (auth & AUTH_PUBLICKEY) {
+    // Diagnostiquer les clés avant l'authentification
+    config->diagnoseSSHKeys();
+    
     // Vérifier si nous avons les clés en mémoire
     if (sshConfig.privateKeyData.length() > 0 && sshConfig.publicKeyData.length() > 0) {
+      // Valider les clés avant l'authentification
+      if (!config->validateSSHKeys()) {
+        LOG_E("SSH", "SSH keys validation failed");
+        return false;
+      }
+      
       // Utiliser libssh2_userauth_publickey_frommemory
       LOGF_I("SSH", "Authenticating with keys from memory (private: %d bytes, public: %d bytes)", 
              sshConfig.privateKeyData.length(), sshConfig.publicKeyData.length());
       
       const char* passphrase = sshConfig.password.length() > 0 ? sshConfig.password.c_str() : nullptr;
       
-      if (libssh2_userauth_publickey_frommemory(session, 
+      LOGF_D("SSH", "Public key first 50 chars: %.50s", sshConfig.publicKeyData.c_str());
+      LOGF_D("SSH", "Private key first 50 chars: %.50s", sshConfig.privateKeyData.c_str());
+      LOGF_D("SSH", "Using passphrase: %s", passphrase ? "yes" : "no");
+      
+      int auth_result = libssh2_userauth_publickey_frommemory(session, 
                                                 sshConfig.username.c_str(),
                                                 sshConfig.username.length(),
                                                 sshConfig.publicKeyData.c_str(),
                                                 sshConfig.publicKeyData.length(),
                                                 sshConfig.privateKeyData.c_str(),
                                                 sshConfig.privateKeyData.length(),
-                                                passphrase)) {
-        LOG_E("SSH", "Authentication by public key from memory failed!");
-        return false;
+                                                passphrase);
+      if (auth_result) {
+        char *errmsg;
+        int errlen;
+        libssh2_session_last_error(session, &errmsg, &errlen, 0);
+        LOGF_E("SSH", "Authentication by public key from memory failed! Error code: %d, Message: %s", auth_result, errmsg ? errmsg : "Unknown");
+        
+        // Tentative avec passphrase vide explicite
+        LOGF_I("SSH", "Retrying with empty passphrase...");
+        auth_result = libssh2_userauth_publickey_frommemory(session, 
+                                                  sshConfig.username.c_str(),
+                                                  sshConfig.username.length(),
+                                                  sshConfig.publicKeyData.c_str(),
+                                                  sshConfig.publicKeyData.length(),
+                                                  sshConfig.privateKeyData.c_str(),
+                                                  sshConfig.privateKeyData.length(),
+                                                  "");
+        if (auth_result) {
+          libssh2_session_last_error(session, &errmsg, &errlen, 0);
+          LOGF_E("SSH", "Retry with empty passphrase also failed! Error: %d, Message: %s", auth_result, errmsg ? errmsg : "Unknown");
+          
+          // Dernière tentative : essayer avec NULL au lieu de chaîne vide
+          LOGF_I("SSH", "Final retry with NULL passphrase...");
+          auth_result = libssh2_userauth_publickey_frommemory(session, 
+                                                    sshConfig.username.c_str(),
+                                                    sshConfig.username.length(),
+                                                    sshConfig.publicKeyData.c_str(),
+                                                    sshConfig.publicKeyData.length(),
+                                                    sshConfig.privateKeyData.c_str(),
+                                                    sshConfig.privateKeyData.length(),
+                                                    NULL);
+          if (auth_result) {
+            libssh2_session_last_error(session, &errmsg, &errlen, 0);
+            LOGF_E("SSH", "All authentication attempts failed! Final error: %d, Message: %s", auth_result, errmsg ? errmsg : "Unknown");
+            
+            // Information sur les formats supportés par libssh2
+            LOG_W("SSH", "Note: Your private key is in OpenSSH format. Consider converting to PEM format:");
+            LOG_W("SSH", "ssh-keygen -p -m PEM -f your_key");
+            return false;
+          } else {
+            LOG_I("SSH", "Authentication succeeded with NULL passphrase");
+          }
+        } else {
+          LOG_I("SSH", "Authentication succeeded with empty passphrase");
+        }
       }
       LOG_I("SSH", "Authentication by public key from memory succeeded");
     } else {
@@ -383,7 +437,7 @@ bool SSHTunnel::createReverseTunnel() {
     listener = libssh2_channel_forward_listen_ex(
         session, bind_host, ssh_port, &bound_port, maxlisten);
     if (!listener) {
-      delay(10);
+      vTaskDelay(pdMS_TO_TICKS(10));
     }
   } while (!listener);
 
@@ -419,18 +473,34 @@ bool SSHTunnel::handleNewConnection() {
     return false; // No new connection or error
   }
 
-  // Find available channel slot
+  // Find available channel slot avec réutilisation agressive
   int channelIndex = -1;
   int maxChannels = config->getConnectionConfig().maxChannels;
+  unsigned long now = millis();
+  
+  // Première passe : chercher un canal vraiment libre
   for (int i = 0; i < maxChannels; i++) {
     if (!channels[i].active) {
       channelIndex = i;
       break;
     }
   }
+  
+  // Si aucun canal libre, chercher des canaux "nettoyables" (inactifs depuis longtemps)
+  if (channelIndex == -1) {
+    for (int i = 0; i < maxChannels; i++) {
+      if (channels[i].active && (now - channels[i].lastActivity > 30000)) { // 30 secondes d'inactivité
+        LOGF_I("SSH", "Recycling inactive channel %d for new connection", i);
+        closeChannel(i); // Ferme et libère le canal
+        channelIndex = i;
+        break;
+      }
+    }
+  }
 
   if (channelIndex == -1) {
-    LOG_W("SSH", "No available channel slots, closing new connection");
+    LOGF_W("SSH", "No available channel slots (active: %d/%d), closing new connection", 
+           getActiveChannels(), maxChannels);
     libssh2_channel_close(channel);
     libssh2_channel_free(channel);
     return false;
@@ -535,7 +605,7 @@ void SSHTunnel::handleChannelData(int channelIndex) {
                 unlockChannelRead(channelIndex);
                 return;
               }
-              delay(2);
+              vTaskDelay(pdMS_TO_TICKS(2));
               retryCount++;
               continue;
             } else if (errno == ECONNRESET || errno == EPIPE) {
@@ -615,7 +685,7 @@ void SSHTunnel::handleChannelData(int channelIndex) {
                 unlockChannelWrite(channelIndex);
                 return;
               }
-              delay(5);
+              vTaskDelay(pdMS_TO_TICKS(5));
               retryCount++;
               continue;
             } else {
@@ -625,7 +695,7 @@ void SSHTunnel::handleChannelData(int channelIndex) {
               return;
             }
           } else {
-            delay(2);
+            vTaskDelay(pdMS_TO_TICKS(2));
             retryCount++;
             continue;
           }
@@ -692,6 +762,12 @@ void SSHTunnel::closeChannel(int channelIndex) {
   if (!ch.active)
     return;
 
+  unsigned long sessionDuration = millis() - ch.lastActivity;
+  
+  // Log détaillé pour le debugging
+  LOGF_I("SSH", "Closing channel %d (session: %lums, pending: %d, flow_paused: %s)", 
+         channelIndex, sessionDuration, ch.pendingBytes, ch.flowControlPaused ? "yes" : "no");
+
   if (ch.channel) {
     libssh2_channel_close(ch.channel);
     libssh2_channel_free(ch.channel);
@@ -703,26 +779,91 @@ void SSHTunnel::closeChannel(int channelIndex) {
     ch.localSocket = -1;
   }
 
+  // Reset complet de l'état du canal pour réutilisation
   ch.active = false;
   ch.lastActivity = 0;
+  ch.pendingBytes = 0;
+  ch.flowControlPaused = false;
 
-  LOGF_I("SSH", "Channel %d closed", channelIndex);
+  LOGF_I("SSH", "Channel %d closed and ready for reuse", channelIndex);
 }
 
 void SSHTunnel::cleanupInactiveChannels() {
   unsigned long now = millis();
   int maxChannels = config->getConnectionConfig().maxChannels;
   int channelTimeout = config->getConnectionConfig().channelTimeoutMs;
+  int activeBefore = getActiveChannels();
 
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
-      // Vérifier le timeout du canal (mais pas si en flow control récent)
       unsigned long timeSinceActivity = now - channels[i].lastActivity;
+      
+      // Nettoyage intelligent selon l'état du canal
+      bool shouldClose = false;
+      
+      // Timeout normal (mais pas si en flow control récent)
       if (timeSinceActivity > channelTimeout && !channels[i].flowControlPaused) {
-        LOGF_W("SSH", "Channel %d timeout, closing", i);
+        shouldClose = true;
+        LOGF_W("SSH", "Channel %d timeout after %lums, closing", i, timeSinceActivity);
+      }
+      // Canaux en flow control depuis trop longtemps (2 minutes)
+      else if (channels[i].flowControlPaused && timeSinceActivity > 120000) {
+        shouldClose = true;
+        LOGF_W("SSH", "Channel %d stuck in flow control for %lums, closing", i, timeSinceActivity);
+      }
+      // Canaux avec des erreurs persistantes (pending bytes trop élevés depuis longtemps)
+      else if (channels[i].pendingBytes > 0 && timeSinceActivity > 60000) {
+        shouldClose = true;
+        LOGF_W("SSH", "Channel %d has pending bytes (%d) for %lums, closing", i, channels[i].pendingBytes, timeSinceActivity);
+      }
+      
+      if (shouldClose) {
         closeChannel(i);
       }
     }
+  }
+  
+  // Log périodique de l'état des canaux (toutes les 30 secondes)
+  static unsigned long lastLog = 0;
+  if (now - lastLog > 30000) {
+    int activeAfter = getActiveChannels();
+    if (activeBefore != activeAfter) {
+      LOGF_I("SSH", "Channel cleanup: %d -> %d active channels", activeBefore, activeAfter);
+    }
+    lastLog = now;
+  }
+}
+
+void SSHTunnel::printChannelStatistics() {
+  static unsigned long lastStatsTime = 0;
+  unsigned long now = millis();
+  
+  // Print stats toutes les 2 minutes
+  if (now - lastStatsTime < 120000) return;
+  lastStatsTime = now;
+  
+  int activeCount = 0;
+  int flowPausedCount = 0;
+  int pendingBytesTotal = 0;
+  
+  for (int i = 0; i < config.maxChannels; i++) {
+    if (channels[i].active) {
+      activeCount++;
+      if (channels[i].flowControlPaused) flowPausedCount++;
+      pendingBytesTotal += channels[i].pendingBytes;
+    }
+  }
+  
+  LOGF_I("SSH", "Channel Stats: Active=%d/%d, FlowPaused=%d, TotalPending=%d bytes", 
+         activeCount, config.maxChannels, flowPausedCount, pendingBytesTotal);
+  
+  // Alertes spéciales
+  if (activeCount == config.maxChannels) {
+    LOGF_W("SSH", "WARNING: All channels in use - potential bottleneck");
+  }
+  if (flowPausedCount > activeCount / 2) {
+    LOGF_W("SSH", "WARNING: Many channels flow-paused (%d/%d) - network congestion", 
+           flowPausedCount, activeCount);
   }
 }
 
@@ -757,14 +898,16 @@ bool SSHTunnel::checkConnection() {
 }
 
 void SSHTunnel::handleReconnection() {
-  if (reconnectAttempts >= MAX_RECONNECT_ATTEMPTS) {
+  int maxReconnectAttempts = config->getConnectionConfig().maxReconnectAttempts;
+  if (reconnectAttempts >= maxReconnectAttempts) {
     LOG_E("SSH", "Max reconnection attempts reached");
     state = TUNNEL_ERROR;
     return;
   }
 
   unsigned long now = millis();
-  if (now - lastConnectionAttempt < RECONNECT_DELAY_MS) {
+  int reconnectDelay = config->getConnectionConfig().reconnectDelayMs;
+  if (now - lastConnectionAttempt < reconnectDelay) {
     return; // Wait before retry
   }
 
@@ -805,7 +948,8 @@ unsigned long SSHTunnel::getBytesSent() { return bytesSent; }
 
 int SSHTunnel::getActiveChannels() {
   int count = 0;
-  for (int i = 0; i < MAX_CHANNELS; i++) {
+  int maxChannels = config->getConnectionConfig().maxChannels;
+  for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active)
       count++;
   }

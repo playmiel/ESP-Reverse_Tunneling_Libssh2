@@ -1,6 +1,7 @@
 #include <WiFi.h>
 #include <Arduino.h>
 #include "ESP-Reverse_Tunneling_Libssh2.h"
+#include <esp_heap_caps.h>
 
 // Configuration WiFi
 const char* ssid = "YOUR_WIFI_SSID";
@@ -178,11 +179,18 @@ void reportStats() {
 
   lastStatsReport = now;
 
-  // Rapport de statut
-  LOGF_I("STATS", "Tunnel State: %s", tunnel.getStateString().c_str());
-  LOGF_I("STATS", "Active Channels: %d", tunnel.getActiveChannels());
-  LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
-  LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
+  // Vérification de l'état de la heap AVANT les logs
+  size_t freeHeap = ESP.getFreeHeap();
+  size_t minFreeHeap = ESP.getMinFreeHeap();
+  size_t largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+  
+  // Rapport de statut avec vérification mémoire
+  if (freeHeap > 10000) { // Seulement si on a assez de mémoire
+    LOGF_I("STATS", "Tunnel State: %s", tunnel.getStateString().c_str());
+    LOGF_I("STATS", "Active Channels: %d", tunnel.getActiveChannels());
+    LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
+    LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
+  }
 
   // Calcul du débit (approximatif)
   static unsigned long lastBytesSent = 0;
@@ -194,16 +202,28 @@ void reportStats() {
   unsigned long sentRate = (bytesSent - lastBytesSent) * 1000 / STATS_INTERVAL;
   unsigned long receivedRate = (bytesReceived - lastBytesReceived) * 1000 / STATS_INTERVAL;
 
-  LOGF_I("STATS", "Send Rate: %lu B/s", sentRate);
-  LOGF_I("STATS", "Receive Rate: %lu B/s", receivedRate);
+  if (freeHeap > 8000) { // Réduire les logs si mémoire faible
+    LOGF_I("STATS", "Send Rate: %lu B/s", sentRate);
+    LOGF_I("STATS", "Receive Rate: %lu B/s", receivedRate);
+  }
 
   lastBytesSent = bytesSent;
   lastBytesReceived = bytesReceived;
 
-  // Information WiFi
+  // Information WiFi (essentiel)
   LOGF_I("WIFI", "RSSI: %d dBm", WiFi.RSSI());
 
-  // Information mémoire
-  LOGF_I("SYSTEM", "Free Heap: %d bytes", ESP.getFreeHeap());
+  // Information mémoire (critique)
+  LOGF_I("SYSTEM", "Free Heap: %d bytes (min: %d, largest: %d)", 
+         freeHeap, minFreeHeap, largestFreeBlock);
   LOGF_I("SYSTEM", "Uptime: %lu seconds", millis() / 1000);
+  
+  // Alerte si mémoire critique
+  if (freeHeap < 50000) {
+    LOG_W("MEMORY", "LOW HEAP WARNING!");
+  }
+  
+  if (largestFreeBlock < freeHeap / 2) {
+    LOG_W("MEMORY", "HEAP FRAGMENTATION DETECTED!");
+  }
 }

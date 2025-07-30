@@ -4,6 +4,7 @@
 #include <libssh2_esp.h>
 #include "ssh_config.h"
 #include "logger.h"
+#include "memory_fixes.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -12,6 +13,7 @@
 #include "lwip/netdb.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <freertos/task.h>
 enum TunnelState {
     TUNNEL_DISCONNECTED = 0,
     TUNNEL_CONNECTING = 1,
@@ -60,6 +62,7 @@ private:
     void handleChannelData(int channelIndex);
     void closeChannel(int channelIndex);
     void cleanupInactiveChannels();
+    void printChannelStatistics();
     
     // Connection monitoring
     void sendKeepAlive();
