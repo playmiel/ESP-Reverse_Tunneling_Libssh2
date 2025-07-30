@@ -846,7 +846,8 @@ void SSHTunnel::printChannelStatistics() {
   int flowPausedCount = 0;
   int pendingBytesTotal = 0;
   
-  for (int i = 0; i < config.maxChannels; i++) {
+  int maxChannels = config->getConnectionConfig().maxChannels;
+  for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
       activeCount++;
       if (channels[i].flowControlPaused) flowPausedCount++;
@@ -855,10 +856,10 @@ void SSHTunnel::printChannelStatistics() {
   }
   
   LOGF_I("SSH", "Channel Stats: Active=%d/%d, FlowPaused=%d, TotalPending=%d bytes", 
-         activeCount, config.maxChannels, flowPausedCount, pendingBytesTotal);
+         activeCount, maxChannels, flowPausedCount, pendingBytesTotal);
   
   // Alertes spéciales
-  if (activeCount == config.maxChannels) {
+  if (activeCount == maxChannels) {
     LOGF_W("SSH", "WARNING: All channels in use - potential bottleneck");
   }
   if (flowPausedCount > activeCount / 2) {
