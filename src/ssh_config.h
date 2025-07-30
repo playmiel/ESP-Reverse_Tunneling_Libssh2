@@ -90,6 +90,8 @@ public:
     bool loadSSHKeysFromFile(const String& privateKeyPath);
     bool loadSSHKeysFromLittleFS(const String& privateKeyPath);
     void setSSHKeysInMemory(const String& privateKeyData, const String& publicKeyData);
+    bool validateSSHKeys() const;
+    void diagnoseSSHKeys() const;
     
     // Méthodes de configuration du tunnel
     void setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort);

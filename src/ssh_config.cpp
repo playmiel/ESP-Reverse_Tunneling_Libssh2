@@ -115,13 +115,132 @@ bool SSHConfiguration::loadSSHKeysFromFile(const String& privateKeyPath) {
 
 void SSHConfiguration::setSSHKeysInMemory(const String& privateKeyData, const String& publicKeyData) {
     if (lockConfig()) {
-        sshConfig.privateKeyData = privateKeyData;
-        sshConfig.publicKeyData = publicKeyData;
+        // Nettoyer et valider les clés
+        String cleanPrivateKey = privateKeyData;
+        String cleanPublicKey = publicKeyData;
+        
+        // S'assurer que les clés se terminent par un retour à la ligne
+        if (!cleanPrivateKey.endsWith("\n")) {
+            cleanPrivateKey += "\n";
+        }
+        if (!cleanPublicKey.endsWith("\n")) {
+            cleanPublicKey += "\n";
+        }
+        
+        // Remplacer les retours à la ligne Windows par Unix si nécessaire
+        cleanPrivateKey.replace("\r\n", "\n");
+        cleanPublicKey.replace("\r\n", "\n");
+        
+        sshConfig.privateKeyData = cleanPrivateKey;
+        sshConfig.publicKeyData = cleanPublicKey;
         unlockConfig();
         
         LOGF_I("CONFIG", "SSH keys set in memory (private: %d bytes, public: %d bytes)", 
-               privateKeyData.length(), publicKeyData.length());
+               cleanPrivateKey.length(), cleanPublicKey.length());
+        
+        // Validation basique des clés
+        if (cleanPrivateKey.indexOf("-----BEGIN") == -1 || cleanPrivateKey.indexOf("-----END") == -1) {
+            LOG_W("CONFIG", "Private key might not be properly formatted");
+        }
+        if (cleanPublicKey.indexOf("ssh-") != 0 && cleanPublicKey.indexOf("ecdsa-") != 0) {
+            LOG_W("CONFIG", "Public key might not be properly formatted");
+        }
     }
+}
+
+bool SSHConfiguration::validateSSHKeys() const {
+    if (!lockConfig()) {
+        return false;
+    }
+    
+    bool valid = true;
+    
+    if (sshConfig.privateKeyData.length() == 0) {
+        LOG_E("CONFIG", "Private key is empty");
+        valid = false;
+    } else {
+        if (sshConfig.privateKeyData.indexOf("-----BEGIN") == -1) {
+            LOG_E("CONFIG", "Private key missing BEGIN marker");
+            valid = false;
+        }
+        if (sshConfig.privateKeyData.indexOf("-----END") == -1) {
+            LOG_E("CONFIG", "Private key missing END marker");
+            valid = false;
+        }
+    }
+    
+    if (sshConfig.publicKeyData.length() == 0) {
+        LOG_E("CONFIG", "Public key is empty");
+        valid = false;
+    } else {
+        if (sshConfig.publicKeyData.indexOf("ssh-") != 0 && 
+            sshConfig.publicKeyData.indexOf("ecdsa-") != 0) {
+            LOG_E("CONFIG", "Public key doesn't start with proper algorithm identifier");
+            valid = false;
+        }
+    }
+    
+    unlockConfig();
+    return valid;
+}
+
+void SSHConfiguration::diagnoseSSHKeys() const {
+    if (!lockConfig()) {
+        return;
+    }
+    
+    LOG_I("CONFIG", "=== SSH Keys Diagnosis ===");
+    
+    // Analyser la clé privée
+    if (sshConfig.privateKeyData.length() > 0) {
+        LOGF_I("CONFIG", "Private key length: %d bytes", sshConfig.privateKeyData.length());
+        
+        if (sshConfig.privateKeyData.indexOf("-----BEGIN OPENSSH PRIVATE KEY-----") != -1) {
+            LOG_I("CONFIG", "Private key format: OpenSSH modern format");
+            LOG_W("CONFIG", "Note: OpenSSH format may not be fully supported by all libssh2 versions");
+        } else if (sshConfig.privateKeyData.indexOf("-----BEGIN RSA PRIVATE KEY-----") != -1) {
+            LOG_I("CONFIG", "Private key format: RSA PEM format");
+        } else if (sshConfig.privateKeyData.indexOf("-----BEGIN EC PRIVATE KEY-----") != -1) {
+            LOG_I("CONFIG", "Private key format: EC PEM format");
+        } else if (sshConfig.privateKeyData.indexOf("-----BEGIN PRIVATE KEY-----") != -1) {
+            LOG_I("CONFIG", "Private key format: PKCS#8 PEM format");
+        } else {
+            LOG_W("CONFIG", "Private key format: Unknown or invalid");
+        }
+        
+        // Vérifier les fins de ligne
+        if (sshConfig.privateKeyData.indexOf("\r\n") != -1) {
+            LOG_W("CONFIG", "Private key contains Windows line endings (CRLF)");
+        } else if (sshConfig.privateKeyData.indexOf("\n") != -1) {
+            LOG_I("CONFIG", "Private key uses Unix line endings (LF)");
+        } else {
+            LOG_W("CONFIG", "Private key might not have proper line endings");
+        }
+    }
+    
+    // Analyser la clé publique
+    if (sshConfig.publicKeyData.length() > 0) {
+        LOGF_I("CONFIG", "Public key length: %d bytes", sshConfig.publicKeyData.length());
+        
+        if (sshConfig.publicKeyData.startsWith("ssh-rsa")) {
+            LOG_I("CONFIG", "Public key type: RSA");
+        } else if (sshConfig.publicKeyData.startsWith("ssh-ed25519")) {
+            LOG_I("CONFIG", "Public key type: Ed25519");
+        } else if (sshConfig.publicKeyData.startsWith("ecdsa-sha2-")) {
+            LOG_I("CONFIG", "Public key type: ECDSA");
+        } else {
+            LOG_W("CONFIG", "Public key type: Unknown");
+        }
+        
+        // Extraire le premier mot (algorithme)
+        int spaceIndex = sshConfig.publicKeyData.indexOf(' ');
+        if (spaceIndex > 0) {
+            String algorithm = sshConfig.publicKeyData.substring(0, spaceIndex);
+            LOGF_I("CONFIG", "Public key algorithm: %s", algorithm.c_str());
+        }
+    }
+    
+    unlockConfig();
 }
 
 void SSHConfiguration::setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort) {
