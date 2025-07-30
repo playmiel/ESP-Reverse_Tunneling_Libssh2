@@ -27,10 +27,39 @@ void setup() {
     // WiFi configuration
     WiFi.begin("YOUR_SSID", "YOUR_PASSWORD");
     
-    // SSH tunnel configuration
-    // See examples/ for complete example
+    // SSH tunnel configuration with password
+    globalSSHConfig.setSSHServer("server.com", 22, "user", "password");
+    
+    // OR with SSH key from memory (recommended for LittleFS)
+    globalSSHConfig.setSSHKeyAuth("server.com", 22, "user", "/ssh_key");
+    
+    // Create and start tunnel
+    SSHTunnel tunnel;
+    tunnel.init();
+    tunnel.connectSSH();
 }
 ```
+
+### 3. SSH Key Authentication
+
+This library supports three methods for SSH key authentication:
+
+1. **Memory-based authentication** (recommended for ESP32/LittleFS):
+   ```cpp
+   globalSSHConfig.setSSHKeyAuth("server.com", 22, "user", "/ssh_key");
+   ```
+
+2. **Direct memory loading**:
+   ```cpp
+   globalSSHConfig.setSSHKeyAuthFromMemory("server.com", 22, "user", privateKey, publicKey);
+   ```
+
+3. **Manual key loading**:
+   ```cpp
+   globalSSHConfig.loadSSHKeysFromLittleFS("/ssh_key");
+   ```
+
+📖 **Detailed guide**: [SSH Keys with Memory Authentication](docs/SSH_KEYS_MEMORY.md)
 
 ### 3. Compilation
 

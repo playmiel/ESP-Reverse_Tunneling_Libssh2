@@ -86,22 +86,57 @@ void connectWiFi() {
 void configureSSHTunnel() {
   LOG_I("CONFIG", "Configuration du tunnel SSH...");
   
-  // Configuration du serveur SSH
+  // ===== MÉTHODE 1: Configuration SSH avec mot de passe =====
   globalSSHConfig.setSSHServer(
     "your-remote-server.com",  // Remplacez par votre serveur
     22,                        // Port SSH
     "your_username",           // Nom d'utilisateur
     "your_password"            // Mot de passe
   );
-  
-  // Alternative: Configuration avec clé SSH
+
+  // ===== MÉTHODE 2: Configuration SSH avec clé depuis LittleFS =====
+  // Cette méthode charge automatiquement les clés depuis LittleFS en mémoire
   // globalSSHConfig.setSSHKeyAuth(
   //   "your-remote-server.com",
   //   22,
   //   "your_username",
-  //   "/ssh_key",
-  //   ""  // Passphrase pour la clé (optionnel)
+  //   "/ssh_key",       // Chemin vers la clé privée dans LittleFS
+  //   ""                // Passphrase pour la clé (optionnel)
   // );
+
+  // ===== MÉTHODE 3: Configuration SSH avec clés directement en mémoire =====
+  // Exemple de clé privée RSA (à remplacer par votre vraie clé)
+  /*
+  String privateKey = R"(-----BEGIN OPENSSH PRIVATE KEY-----
+b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAFwAAAAdzc2gtcn
+NhAAAAAwEAAQAAAQEA... (votre clé privée ici)
+-----END OPENSSH PRIVATE KEY-----)";
+  
+  String publicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... (votre clé publique ici) user@host";
+  
+  globalSSHConfig.setSSHKeyAuthFromMemory(
+    "your-remote-server.com",
+    22,
+    "your_username",
+    privateKey,
+    publicKey,
+    ""  // Passphrase pour la clé (optionnel)
+  );
+  */
+
+  // ===== MÉTHODE 4: Charger les clés depuis LittleFS puis les utiliser en mémoire =====
+  // Initialiser LittleFS si pas encore fait
+  // if (!LittleFS.begin(true)) {
+  //   LOG_E("CONFIG", "Failed to initialize LittleFS");
+  //   return;
+  // }
+  
+  // Charger manuellement les clés depuis LittleFS
+  // if (globalSSHConfig.loadSSHKeysFromLittleFS("/ssh_key")) {
+  //   LOG_I("CONFIG", "SSH keys loaded from LittleFS and stored in memory");
+  // } else {
+  //   LOG_E("CONFIG", "Failed to load SSH keys from LittleFS");
+  // }
   
   // Configuration du tunnel
   globalSSHConfig.setTunnelConfig(
