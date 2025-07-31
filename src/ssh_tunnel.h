@@ -54,6 +54,7 @@ private:
     // SSH connection management
     bool initializeSSH();
     bool authenticateSSH();
+    bool verifyHostKey();
     bool createReverseTunnel();
     void cleanupSSH();
     

@@ -243,6 +243,41 @@ void SSHConfiguration::diagnoseSSHKeys() const {
     unlockConfig();
 }
 
+// Méthodes de configuration known hosts
+void SSHConfiguration::setHostKeyVerification(bool enable) {
+    if (lockConfig()) {
+        sshConfig.verifyHostKey = enable;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Host key verification: %s", enable ? "enabled" : "disabled");
+    }
+}
+
+void SSHConfiguration::setExpectedHostKey(const String& fingerprint, const String& keyType) {
+    if (lockConfig()) {
+        sshConfig.expectedHostKeyFingerprint = fingerprint;
+        sshConfig.hostKeyType = keyType;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Expected host key set: %s (%s)", 
+               fingerprint.c_str(), keyType.length() > 0 ? keyType.c_str() : "any type");
+    }
+}
+
+void SSHConfiguration::setHostKeyVerification(const String& fingerprint, const String& keyType, bool enable) {
+    if (lockConfig()) {
+        sshConfig.verifyHostKey = enable;
+        sshConfig.expectedHostKeyFingerprint = fingerprint;
+        sshConfig.hostKeyType = keyType;
+        unlockConfig();
+        
+        LOGF_I("CONFIG", "Host key verification configured: %s, fingerprint: %s, type: %s", 
+               enable ? "enabled" : "disabled", 
+               fingerprint.c_str(), 
+               keyType.length() > 0 ? keyType.c_str() : "any type");
+    }
+}
+
 void SSHConfiguration::setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort) {
     if (lockConfig()) {
         tunnelConfig.remoteBindHost = remoteBindHost;
