@@ -286,14 +286,111 @@ bool SSHTunnel::initializeSSH() {
 
   /* At this point we haven't yet authenticated. The first thing to do
    * is check the hostkey's fingerprint against our known hosts */
-  const char *fingerprint =
-      libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA1);
-  LOG_I("SSH", "Fingerprint:");
-  for (int i = 0; i < 20; i++) {
-    // Could log fingerprint bytes here if needed for verification
+  if (!verifyHostKey()) {
+    LOG_E("SSH", "Host key verification failed");
+    return false;
   }
 
   LOG_I("SSH", "SSH handshake completed");
+  return true;
+}
+
+bool SSHTunnel::verifyHostKey() {
+  const SSHServerConfig& sshConfig = config->getSSHConfig();
+  
+  // Si la vérification n'est pas activée, on accepte tout
+  if (!sshConfig.verifyHostKey) {
+    LOG_W("SSH", "Host key verification disabled - connection accepted without verification");
+    return true;
+  }
+  
+  // Obtenir l'empreinte du serveur
+  size_t host_key_len;
+  int host_key_type;
+  const char* host_key = libssh2_session_hostkey(session, &host_key_len, &host_key_type);
+  
+  if (!host_key) {
+    LOG_E("SSH", "Failed to get host key from server");
+    return false;
+  }
+  
+  // Obtenir l'empreinte SHA256
+  const char *fingerprint_sha256 = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256);
+  if (!fingerprint_sha256) {
+    LOG_E("SSH", "Failed to get host key fingerprint");
+    return false;
+  }
+  
+  // Convertir l'empreinte en hexadécimal
+  String currentFingerprint = "";
+  for (int i = 0; i < 32; i++) {  // SHA256 = 32 bytes
+    char hex[3];
+    sprintf(hex, "%02x", (unsigned char)fingerprint_sha256[i]);
+    currentFingerprint += hex;
+  }
+  
+  // Vérifier le type de clé si spécifié
+  String keyTypeStr = "";
+  switch (host_key_type) {
+    case LIBSSH2_HOSTKEY_TYPE_RSA:
+      keyTypeStr = "ssh-rsa";
+      break;
+    case LIBSSH2_HOSTKEY_TYPE_DSS:
+      keyTypeStr = "ssh-dss"; 
+      break;
+    case LIBSSH2_HOSTKEY_TYPE_ECDSA_256:
+      keyTypeStr = "ecdsa-sha2-nistp256";
+      break;
+    case LIBSSH2_HOSTKEY_TYPE_ECDSA_384:
+      keyTypeStr = "ecdsa-sha2-nistp384";
+      break;
+    case LIBSSH2_HOSTKEY_TYPE_ECDSA_521:
+      keyTypeStr = "ecdsa-sha2-nistp521";
+      break;
+    case LIBSSH2_HOSTKEY_TYPE_ED25519:
+      keyTypeStr = "ssh-ed25519";
+      break;
+    default:
+      keyTypeStr = "unknown";
+      break;
+  }
+  
+  LOGF_I("SSH", "Server host key: %s", keyTypeStr.c_str());
+  LOGF_I("SSH", "Server fingerprint (SHA256): %s", currentFingerprint.c_str());
+  
+  // Vérifier le type de clé si spécifié
+  if (sshConfig.hostKeyType.length() > 0 && sshConfig.hostKeyType != keyTypeStr) {
+    LOGF_E("SSH", "Host key type mismatch! Expected: %s, Got: %s", 
+           sshConfig.hostKeyType.c_str(), keyTypeStr.c_str());
+    return false;
+  }
+  
+  // Vérifier l'empreinte
+  if (sshConfig.expectedHostKeyFingerprint.length() == 0) {
+    LOG_W("SSH", "No expected fingerprint configured - accepting and storing current fingerprint");
+    LOGF_I("SSH", "Store this fingerprint in your configuration: %s", currentFingerprint.c_str());
+    return true;
+  }
+  
+  // Normaliser les empreintes (supprimer les espaces, mettre en minuscules)
+  String expectedFP = sshConfig.expectedHostKeyFingerprint;
+  expectedFP.toLowerCase();
+  expectedFP.replace(" ", "");
+  expectedFP.replace(":", "");
+  
+  String currentFP = currentFingerprint;
+  currentFP.toLowerCase();
+  
+  if (expectedFP != currentFP) {
+    LOG_E("SSH", "HOST KEY VERIFICATION FAILED!");
+    LOG_E("SSH", "This could indicate a Man-in-the-Middle attack!");
+    LOGF_E("SSH", "Expected: %s", expectedFP.c_str());
+    LOGF_E("SSH", "Got:      %s", currentFP.c_str());
+    LOGF_E("SSH", "Key type: %s", keyTypeStr.c_str());
+    return false;
+  }
+  
+  LOG_I("SSH", "Host key verification successful");
   return true;
 }
 

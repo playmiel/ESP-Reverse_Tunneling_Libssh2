@@ -16,6 +16,11 @@ struct SSHServerConfig {
     String privateKeyData; // Contenu de la clé privée en mémoire
     String publicKeyData;  // Contenu de la clé publique en mémoire
     
+    // Configuration known hosts
+    bool verifyHostKey;     // Activer/désactiver la vérification
+    String expectedHostKeyFingerprint; // Empreinte SHA256 attendue
+    String hostKeyType;     // Type de clé attendu (ssh-ed25519, ssh-rsa, etc.)
+    
     // Constructeur par défaut
     SSHServerConfig() : 
         host("your-remote-server.com"),
@@ -25,7 +30,10 @@ struct SSHServerConfig {
         useSSHKey(false),
         privateKeyPath("/ssh_key"),
         privateKeyData(""),
-        publicKeyData("") {}
+        publicKeyData(""),
+        verifyHostKey(false),
+        expectedHostKeyFingerprint(""),
+        hostKeyType("") {}
 };
 
 // Structure pour la configuration du tunnel
@@ -92,6 +100,11 @@ public:
     void setSSHKeysInMemory(const String& privateKeyData, const String& publicKeyData);
     bool validateSSHKeys() const;
     void diagnoseSSHKeys() const;
+    
+    // Méthodes de configuration known hosts
+    void setHostKeyVerification(bool enable);
+    void setExpectedHostKey(const String& fingerprint, const String& keyType = "");
+    void setHostKeyVerification(const String& fingerprint, const String& keyType = "", bool enable = true);
     
     // Méthodes de configuration du tunnel
     void setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort);

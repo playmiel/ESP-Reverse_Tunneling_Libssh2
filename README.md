@@ -61,7 +61,25 @@ This library supports three methods for SSH key authentication:
 
 📖 **Detailed guide**: [SSH Keys with Memory Authentication](docs/SSH_KEYS_MEMORY.md)
 
-### 3. Compilation
+### 4. Host Key Verification (Security)
+
+For production environments, enable host key verification to prevent Man-in-the-Middle attacks:
+
+```cpp
+// Configure SSH with host key verification
+globalSSHConfig.setSSHKeyAuthFromMemory("server.com", 22, "user", privateKey, publicKey);
+
+// Enable host key verification (recommended for production)
+globalSSHConfig.setHostKeyVerification(
+    "a1b2c3d4e5f67890123456789012345678901234567890abcdef1234567890ab",  // SHA256 fingerprint
+    "ssh-ed25519",                                                      // Key type
+    true                                                               // Enable verification
+);
+```
+
+📖 **Security guide**: [Host Key Verification Documentation](docs/HOST_KEY_VERIFICATION.md)
+
+### 5. Compilation
 
 ```bash
 pio run                    # Compilation
@@ -81,7 +99,10 @@ This project provides two example formats:
 ## 📚 Technical Documentation
 
 For more technical details:
+
 - [`examples/`](examples/) - Usage examples
+- [`docs/SSH_KEYS_MEMORY.md`](docs/SSH_KEYS_MEMORY.md) - SSH Key authentication guide
+- [`docs/HOST_KEY_VERIFICATION.md`](docs/HOST_KEY_VERIFICATION.md) - Security and host verification
 
 ## 🎯 Specifications
 
@@ -89,7 +110,9 @@ For more technical details:
 - **Framework**: Arduino
 - **Cryptographic Backend**: mbedTLS
 - **Protocol**: SSH2 with reverse tunneling
-- **Memory**: ~19% RAM, ~65% Flash
+- **Memory**: 
+- ~19% RAM (used 46252 bytes from 327680 bytes)
+- ~65% Flash (used 897321 bytes from 1310720 bytes)
 
 ## 🤝 Contributing
 
