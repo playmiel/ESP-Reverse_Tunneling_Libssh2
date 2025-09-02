@@ -5,6 +5,15 @@
 #include <freertos/task.h>
 #include <esp_system.h>
 #include <esp_heap_caps.h>
+#include "logger.h"
+
+// Niveaux de fonctionnalités (configurable via -DMEMFIX_LEVEL=<0|1|2>)
+// 0 = OFF: pas de vérif heap, pas de memset, minimal overhead
+// 1 = LIGHT: logs d'erreur si malloc échoue, pas de vérif heap ni memset
+// 2 = FULL (défaut): vérif heap périodique et memset des buffers alloués
+#ifndef MEMFIX_LEVEL
+#define MEMFIX_LEVEL 2
+#endif
 
 // Macros pour améliorer la gestion mémoire
 #define SAFE_FREE(ptr) do { \
@@ -23,48 +32,52 @@
 
 // Fonction pour vérifier l'état de la heap
 inline void checkHeapHealth() {
+#if MEMFIX_LEVEL >= 2
     size_t freeHeap = ESP.getFreeHeap();
     size_t minFreeHeap = ESP.getMinFreeHeap();
-    
-    if (freeHeap < 50000) { // Moins de 50KB disponible
-        Serial.printf("[HEAP_WARNING] Low heap: %d bytes (min: %d)\n", freeHeap, minFreeHeap);
+    if (freeHeap < 50000) {
+        LOGF_W("MEM", "Low heap: %u (min: %u)", (unsigned)freeHeap, (unsigned)minFreeHeap);
     }
-    
-    // Vérifier la fragmentation
     size_t largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
     if (largestFreeBlock < freeHeap / 2) {
-        Serial.printf("[HEAP_WARNING] Fragmentation detected: largest block %d vs free %d\n", 
-                     largestFreeBlock, freeHeap);
+        LOGF_W("MEM", "Fragmentation: largest %u vs free %u", (unsigned)largestFreeBlock, (unsigned)freeHeap);
     }
+#else
+    // No-op en mode OFF/LIGHT
+#endif
 }
 
 // Allocation sécurisée avec vérification
 inline void* safeMalloc(size_t size, const char* tag = "UNKNOWN") {
+#if MEMFIX_LEVEL >= 2
     checkHeapHealth();
-    
+#endif
     void* ptr = malloc(size);
     if (ptr == nullptr) {
-        Serial.printf("[MALLOC_ERROR] Failed to allocate %d bytes for %s\n", size, tag);
-        checkHeapHealth();
+#if MEMFIX_LEVEL >= 1
+        LOGF_E("MEM", "malloc failed (%u bytes) tag=%s", (unsigned)size, tag);
+#endif
         return nullptr;
     }
-    
-    // Initialiser à zéro pour éviter les données aléatoires
+#if MEMFIX_LEVEL >= 2
     memset(ptr, 0, size);
-    
-    Serial.printf("[MALLOC_DEBUG] Allocated %d bytes for %s at %p\n", size, tag, ptr);
+#endif
+#if MEMFIX_LEVEL >= 2
+    LOGF_D("MEM", "Allocated %u bytes for %s at %p", (unsigned)size, tag, ptr);
+#endif
     return ptr;
 }
 
 // Nettoyage périodique de la heap
 inline void performHeapMaintenance() {
-    // Forcer le compactage de la heap si disponible
+#if MEMFIX_LEVEL >= 2
     heap_caps_check_integrity_all(true);
-    
-    // Imprimer l'état de la heap
     size_t total_free = heap_caps_get_free_size(MALLOC_CAP_8BIT);
     size_t total_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
-    Serial.printf("[HEAP_MAINTENANCE] Free: %d internal, %d total\n", total_internal, total_free);
+    LOGF_D("MEM", "Free: %u internal, %u total", (unsigned)total_internal, (unsigned)total_free);
+#else
+    // No-op en mode OFF/LIGHT
+#endif
 }
 
 #endif // MEMORY_FIXES_H

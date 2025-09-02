@@ -26,10 +26,20 @@ struct TunnelChannel {
     bool active;
     int localSocket; // Local socket for this channel
     unsigned long lastActivity;
-    size_t pendingBytes; // Données en attente d'écriture
+    size_t pendingBytes; // Données en attente d'écriture (somme des spills)
     bool flowControlPaused; // Pause temporaire pour éviter la congestion
     SemaphoreHandle_t readMutex; // Protection thread-safe pour la lecture
     SemaphoreHandle_t writeMutex; // Protection thread-safe pour l'écriture
+
+    // Buffers de débordement pour éviter la perte de données sur EAGAIN/écritures partielles
+    // SSH -> Local (données à écrire vers le socket local)
+    uint8_t* spillToLocal;
+    size_t spillToLocalLen;    // nombre de bytes valides dans le spill
+    size_t spillToLocalOff;    // offset de lecture dans le spill
+    // Local -> SSH (données à écrire vers le canal SSH)
+    uint8_t* spillToSSH;
+    size_t spillToSSHLen;
+    size_t spillToSSHOff;
 };
 
 class SSHTunnel {

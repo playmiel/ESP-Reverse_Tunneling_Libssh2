@@ -69,6 +69,12 @@ bool SSHTunnel::init() {
     channels[i].lastActivity = 0;
     channels[i].pendingBytes = 0;
     channels[i].flowControlPaused = false;
+  channels[i].spillToLocal = nullptr;
+  channels[i].spillToLocalLen = 0;
+  channels[i].spillToLocalOff = 0;
+  channels[i].spillToSSH = nullptr;
+  channels[i].spillToSSHLen = 0;
+  channels[i].spillToSSHOff = 0;
     
     // Créer les deux mutex pour chaque canal
     channels[i].readMutex = xSemaphoreCreateMutex();
@@ -172,6 +178,13 @@ void SSHTunnel::disconnect() {
       if (channels[i].active) {
         closeChannel(i);
       }
+  // Toujours libérer les spills même si le canal n'était pas actif
+  SAFE_FREE(channels[i].spillToLocal);
+  channels[i].spillToLocalLen = 0;
+  channels[i].spillToLocalOff = 0;
+  SAFE_FREE(channels[i].spillToSSH);
+  channels[i].spillToSSHLen = 0;
+  channels[i].spillToSSHOff = 0;
     }
   }
 
@@ -644,6 +657,13 @@ bool SSHTunnel::handleNewConnection() {
   channels[channelIndex].lastActivity = millis();
   channels[channelIndex].pendingBytes = 0;
   channels[channelIndex].flowControlPaused = false;
+  // Reset spill buffers
+  SAFE_FREE(channels[channelIndex].spillToLocal);
+  channels[channelIndex].spillToLocalLen = 0;
+  channels[channelIndex].spillToLocalOff = 0;
+  SAFE_FREE(channels[channelIndex].spillToSSH);
+  channels[channelIndex].spillToSSHLen = 0;
+  channels[channelIndex].spillToSSHOff = 0;
 
   libssh2_channel_set_blocking(channel, 0);
 
@@ -677,6 +697,52 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   if (lockChannelRead(channelIndex)) {
     // Double vérification après acquisition du mutex
     if (ch.active && ch.channel && ch.localSocket >= 0) {
+      // 1) D'abord vider le spill SSH->Local s'il reste des données
+      if (ch.spillToLocal && ch.spillToLocalLen > ch.spillToLocalOff) {
+        ssize_t remaining = (ssize_t)(ch.spillToLocalLen - ch.spillToLocalOff);
+        int retryCount = 0;
+        const int maxRetries = 10;
+        while (remaining > 0 && retryCount < maxRetries) {
+          ssize_t written = send(ch.localSocket, ch.spillToLocal + ch.spillToLocalOff, remaining, MSG_DONTWAIT);
+          if (written > 0) {
+            ch.spillToLocalOff += written;
+            remaining -= written;
+            dataTransferred = true;
+            retryCount = 0;
+          } else if (written < 0) {
+            if (errno == EAGAIN || errno == EWOULDBLOCK) {
+              ch.pendingBytes = remaining;
+              ch.flowControlPaused = true;
+              ch.lastActivity = now;
+              LOGF_D("SSH", "Channel %d: Flow control (spill local) remaining=%d", channelIndex, (int)remaining);
+              unlockChannelRead(channelIndex);
+              return;
+            } else if (errno == ECONNRESET || errno == EPIPE) {
+              LOGF_W("SSH", "Channel %d: Connection reset while flushing spill local", channelIndex);
+              unlockChannelRead(channelIndex);
+              closeChannel(channelIndex);
+              return;
+            } else {
+              LOGF_W("SSH", "Channel %d: Error flushing spill local: %s", channelIndex, strerror(errno));
+              unlockChannelRead(channelIndex);
+              closeChannel(channelIndex);
+              return;
+            }
+          } else {
+            // 0 écrit: attendre un peu
+            vTaskDelay(pdMS_TO_TICKS(2));
+            retryCount++;
+          }
+        }
+        // Si tout a été écrit, libérer le spill
+        if (remaining <= 0) {
+          SAFE_FREE(ch.spillToLocal);
+          ch.spillToLocalLen = 0;
+          ch.spillToLocalOff = 0;
+          ch.pendingBytes = 0;
+        }
+      }
+
       ssize_t rc = libssh2_channel_read(ch.channel, (char *)rxBuffer, bufferSize);
       if (rc > 0) {
         ssize_t totalWritten = 0;
@@ -693,18 +759,25 @@ void SSHTunnel::handleChannelData(int channelIndex) {
             retryCount = 0;
           } else if (written < 0) {
             if (errno == EAGAIN || errno == EWOULDBLOCK) {
-              // Socket local plein - activer contrôle de flux
-              ch.pendingBytes += remaining;
-              if (ch.pendingBytes > bufferSize && retryCount > 3) {
-                ch.flowControlPaused = true;
-                ch.lastActivity = now;
-                LOGF_D("SSH", "Channel %d: Flow control activated for local write (pending: %d)", channelIndex, ch.pendingBytes);
+              // Socket local plein -> stocker le reste dans spillToLocal
+              ssize_t spillLen = remaining;
+              SAFE_FREE(ch.spillToLocal);
+              ch.spillToLocal = (uint8_t*)safeMalloc(spillLen, "SPILL_LOCAL");
+              if (!ch.spillToLocal) {
+                LOGF_W("SSH", "Channel %d: Failed to alloc spillToLocal (%d bytes)", channelIndex, (int)spillLen);
                 unlockChannelRead(channelIndex);
+                closeChannel(channelIndex);
                 return;
               }
-              vTaskDelay(pdMS_TO_TICKS(2));
-              retryCount++;
-              continue;
+              memcpy(ch.spillToLocal, rxBuffer + totalWritten, spillLen);
+              ch.spillToLocalLen = spillLen;
+              ch.spillToLocalOff = 0;
+              ch.pendingBytes = spillLen;
+              ch.flowControlPaused = true;
+              ch.lastActivity = now;
+              LOGF_D("SSH", "Channel %d: Stored %d spill bytes SSH->Local", channelIndex, (int)spillLen);
+              unlockChannelRead(channelIndex);
+              return;
             } else if (errno == ECONNRESET || errno == EPIPE) {
               LOGF_W("SSH", "Channel %d: Connection reset by peer during write", channelIndex);
               unlockChannelRead(channelIndex);
@@ -726,10 +799,23 @@ void SSHTunnel::handleChannelData(int channelIndex) {
         
         // Si on n'arrive toujours pas à écrire, on active le contrôle de flux au lieu de fermer
         if (retryCount >= maxRetries && remaining > 0) {
+          // Stocker le reste dans spill pour reprise ultérieure
+          ssize_t spillLen = remaining;
+          SAFE_FREE(ch.spillToLocal);
+          ch.spillToLocal = (uint8_t*)safeMalloc(spillLen, "SPILL_LOCAL_RETRY");
+          if (!ch.spillToLocal) {
+            LOGF_W("SSH", "Channel %d: Failed to alloc spillToLocal on retry (%d bytes)", channelIndex, (int)spillLen);
+            unlockChannelRead(channelIndex);
+            closeChannel(channelIndex);
+            return;
+          }
+          memcpy(ch.spillToLocal, rxBuffer + totalWritten, spillLen);
+          ch.spillToLocalLen = spillLen;
+          ch.spillToLocalOff = 0;
           ch.flowControlPaused = true;
-          ch.pendingBytes = remaining;
+          ch.pendingBytes = spillLen;
           ch.lastActivity = now;
-          LOGF_W("SSH", "Channel %d: Local write blocked - activating flow control", channelIndex);
+          LOGF_W("SSH", "Channel %d: Local write blocked - spill stored (%d bytes)", channelIndex, (int)spillLen);
           unlockChannelRead(channelIndex);
           return;
         }
@@ -757,6 +843,45 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   if (lockChannelWrite(channelIndex)) {
     // Double vérification après acquisition du mutex
     if (ch.active && ch.channel && ch.localSocket >= 0) {
+      // 1) D'abord vider le spill Local->SSH s'il reste des données
+      if (ch.spillToSSH && ch.spillToSSHLen > ch.spillToSSHOff) {
+        ssize_t remaining = (ssize_t)(ch.spillToSSHLen - ch.spillToSSHOff);
+        int retryCount = 0;
+        const int maxRetries = 10;
+        while (remaining > 0 && retryCount < maxRetries) {
+          ssize_t written = libssh2_channel_write(ch.channel, (char*)ch.spillToSSH + ch.spillToSSHOff, remaining);
+          if (written > 0) {
+            ch.spillToSSHOff += written;
+            remaining -= written;
+            dataTransferred = true;
+            retryCount = 0;
+          } else if (written < 0) {
+            if (written == LIBSSH2_ERROR_EAGAIN) {
+              ch.pendingBytes = remaining;
+              ch.flowControlPaused = true;
+              ch.lastActivity = now;
+              LOGF_D("SSH", "Channel %d: Flow control (spill ssh) remaining=%d", channelIndex, (int)remaining);
+              unlockChannelWrite(channelIndex);
+              return;
+            } else {
+              LOGF_W("SSH", "Channel %d: Error flushing spill ssh: %d", channelIndex, (int)written);
+              unlockChannelWrite(channelIndex);
+              closeChannel(channelIndex);
+              return;
+            }
+          } else {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            retryCount++;
+          }
+        }
+        if (remaining <= 0) {
+          SAFE_FREE(ch.spillToSSH);
+          ch.spillToSSHLen = 0;
+          ch.spillToSSHOff = 0;
+          ch.pendingBytes = 0;
+        }
+      }
+
       ssize_t bytesRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
       if (bytesRead > 0) {
         ssize_t totalWritten = 0;
@@ -773,18 +898,25 @@ void SSHTunnel::handleChannelData(int channelIndex) {
             retryCount = 0;
           } else if (written < 0) {
             if (written == LIBSSH2_ERROR_EAGAIN) {
-              // Canal SSH plein - activer contrôle de flux
-              ch.pendingBytes += remaining;
-              if (ch.pendingBytes > bufferSize && retryCount > 3) {
-                ch.flowControlPaused = true;
-                ch.lastActivity = now;
-                LOGF_D("SSH", "Channel %d: Flow control activated for SSH write (pending: %d)", channelIndex, ch.pendingBytes);
+              // Canal SSH plein -> stocker le reste dans spillToSSH
+              ssize_t spillLen = remaining;
+              SAFE_FREE(ch.spillToSSH);
+              ch.spillToSSH = (uint8_t*)safeMalloc(spillLen, "SPILL_SSH");
+              if (!ch.spillToSSH) {
+                LOGF_W("SSH", "Channel %d: Failed to alloc spillToSSH (%d bytes)", channelIndex, (int)spillLen);
                 unlockChannelWrite(channelIndex);
+                closeChannel(channelIndex);
                 return;
               }
-              vTaskDelay(pdMS_TO_TICKS(5));
-              retryCount++;
-              continue;
+              memcpy(ch.spillToSSH, txBuffer + totalWritten, spillLen);
+              ch.spillToSSHLen = spillLen;
+              ch.spillToSSHOff = 0;
+              ch.pendingBytes = spillLen;
+              ch.flowControlPaused = true;
+              ch.lastActivity = now;
+              LOGF_D("SSH", "Channel %d: Stored %d spill bytes Local->SSH", channelIndex, (int)spillLen);
+              unlockChannelWrite(channelIndex);
+              return;
             } else {
               LOGF_W("SSH", "Channel %d write error: %d", channelIndex, written);
               unlockChannelWrite(channelIndex);
@@ -800,10 +932,23 @@ void SSHTunnel::handleChannelData(int channelIndex) {
         
         // Si on n'arrive toujours pas à écrire, on active le contrôle de flux au lieu de fermer
         if (retryCount >= maxRetries && remaining > 0) {
+          // Stocker le reste dans un spill pour reprise ultérieure
+          ssize_t spillLen = remaining;
+          SAFE_FREE(ch.spillToSSH);
+          ch.spillToSSH = (uint8_t*)safeMalloc(spillLen, "SPILL_SSH_RETRY");
+          if (!ch.spillToSSH) {
+            LOGF_W("SSH", "Channel %d: Failed to alloc spillToSSH on retry (%d bytes)", channelIndex, (int)spillLen);
+            unlockChannelWrite(channelIndex);
+            closeChannel(channelIndex);
+            return;
+          }
+          memcpy(ch.spillToSSH, txBuffer + totalWritten, spillLen);
+          ch.spillToSSHLen = spillLen;
+          ch.spillToSSHOff = 0;
           ch.flowControlPaused = true;
-          ch.pendingBytes = remaining;
+          ch.pendingBytes = spillLen;
           ch.lastActivity = now;
-          LOGF_W("SSH", "Channel %d: SSH write blocked - activating flow control", channelIndex);
+          LOGF_W("SSH", "Channel %d: SSH write blocked - spill stored (%d bytes)", channelIndex, (int)spillLen);
           unlockChannelWrite(channelIndex);
           return;
         }
@@ -881,6 +1026,13 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.lastActivity = 0;
   ch.pendingBytes = 0;
   ch.flowControlPaused = false;
+  // Libérer les spills
+  SAFE_FREE(ch.spillToLocal);
+  ch.spillToLocalLen = 0;
+  ch.spillToLocalOff = 0;
+  SAFE_FREE(ch.spillToSSH);
+  ch.spillToSSHLen = 0;
+  ch.spillToSSHOff = 0;
 
   LOGF_I("SSH", "Channel %d closed and ready for reuse", channelIndex);
 }
