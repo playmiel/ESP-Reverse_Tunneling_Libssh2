@@ -67,7 +67,23 @@ inline void* safeMalloc(size_t size, const char* tag = "UNKNOWN") {
 #endif
     return ptr;
 }
-
+// Réallocation sécurisée avec vérification
+inline void* safeRealloc(void* ptr, size_t size, const char* tag = "UNKNOWN") {
+#if MEMFIX_LEVEL >= 2
+    checkHeapHealth();
+#endif
+    void* newPtr = realloc(ptr, size);
+    if (newPtr == nullptr && size > 0) {
+#if MEMFIX_LEVEL >= 1
+        LOGF_E("MEM", "realloc failed (%u bytes) tag=%s", (unsigned)size, tag);
+#endif
+        return nullptr;
+    }
+#if MEMFIX_LEVEL >= 2
+    LOGF_D("MEM", "Reallocated %u bytes for %s at %p (was %p)", (unsigned)size, tag, newPtr, ptr);
+#endif
+    return newPtr;
+}
 // Nettoyage périodique de la heap
 inline void performHeapMaintenance() {
 #if MEMFIX_LEVEL >= 2
