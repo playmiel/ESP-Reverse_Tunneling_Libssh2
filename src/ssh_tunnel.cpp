@@ -1623,3 +1623,29 @@ size_t SSHTunnel::getOptimalBufferSize(int channelIndex) {
   
   return baseSize;
 }
+
+bool SSHTunnel::isSocketReadable(int sockfd, int timeoutMs) {
+  if (sockfd < 0) return false;
+  fd_set rfds;
+  FD_ZERO(&rfds);
+  FD_SET(sockfd, &rfds);
+  struct timeval tv;
+  tv.tv_sec  = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+  int r = lwip_select(sockfd + 1, &rfds, nullptr, nullptr, (timeoutMs >= 0 ? &tv : nullptr));
+  if (r <= 0) return false;
+  return FD_ISSET(sockfd, &rfds);
+}
+
+bool SSHTunnel::isSocketWritable(int sockfd, int timeoutMs) {
+  if (sockfd < 0) return false;
+  fd_set wfds;
+  FD_ZERO(&wfds);
+  FD_SET(sockfd, &wfds);
+  struct timeval tv;
+  tv.tv_sec  = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+  int r = lwip_select(sockfd + 1, nullptr, &wfds, nullptr, (timeoutMs >= 0 ? &tv : nullptr));
+  if (r <= 0) return false;
+  return FD_ISSET(sockfd, &wfds);
+}
