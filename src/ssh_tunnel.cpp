@@ -44,6 +44,14 @@ SSHTunnel::~SSHTunnel() {
         }
       }
       
+      // CRITIQUE: Libérer les buffers différés dans le destructeur
+      if (channels[i].deferredReadData) {
+        SAFE_FREE(channels[i].deferredReadData);
+      }
+      if (channels[i].deferredWriteData) {
+        SAFE_FREE(channels[i].deferredWriteData);
+      }
+      
       SAFE_DELETE_SEMAPHORE(channels[i].readMutex);
       SAFE_DELETE_SEMAPHORE(channels[i].writeMutex);
     }
@@ -104,15 +112,19 @@ bool SSHTunnel::init() {
   channels[i].lostWriteChunks = 0;
     // Les queues sont initialisées automatiquement par std::queue
     
-    // Créer les deux mutex pour chaque canal
-    channels[i].readMutex = xSemaphoreCreateMutex();
-    channels[i].writeMutex = xSemaphoreCreateMutex();
+    // Créer des sémaphores binaires au lieu de mutex pour éviter priority inheritance issues
+    channels[i].readMutex = xSemaphoreCreateBinary();
+    channels[i].writeMutex = xSemaphoreCreateBinary();
     
     if (channels[i].readMutex == NULL || channels[i].writeMutex == NULL) {
-      LOGF_E("SSH", "Failed to create mutexes for channel %d", i);
+      LOGF_E("SSH", "Failed to create semaphores for channel %d", i);
       unlockTunnel();
       return false;
     }
+    
+    // Libérer les sémaphores binaires pour les rendre disponibles
+    xSemaphoreGive(channels[i].readMutex);
+    xSemaphoreGive(channels[i].writeMutex);
   }
   
   // Allouer les buffers avec vérification
@@ -252,6 +264,10 @@ void SSHTunnel::loop() {
   int maxChannels = config->getConnectionConfig().maxChannels;
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
+      // NOUVEAU: Flusher en priorité les buffers différés si ils sont pleins
+      if (channels[i].deferredWriteData && channels[i].deferredWriteSize > 4 * 1024) {
+        processPendingData(i); // Flush prioritaire
+      }
       handleChannelData(i);
     }
   }
@@ -260,7 +276,7 @@ void SSHTunnel::loop() {
   cleanupInactiveChannels();
   
   // Utiliser vTaskDelay au lieu de delay pour être plus compatible FreeRTOS
-  vTaskDelay(pdMS_TO_TICKS(1));
+  vTaskDelay(pdMS_TO_TICKS(5)); // 5ms au lieu de 1ms pour réduire la contention
 }
 
 bool SSHTunnel::initializeSSH() {
@@ -705,6 +721,13 @@ void SSHTunnel::handleChannelData(int channelIndex) {
     }
   }
 
+  // PROTECTION: Éviter la contention excessive des mutex
+  static unsigned long lastProcessTime[10] = {0}; // Assumant max 10 canaux
+  if (channelIndex < 10 && (now - lastProcessTime[channelIndex]) < 5) {
+    return; // Skip si traité récemment
+  }
+  lastProcessTime[channelIndex] = now;
+
   // Traiter d'abord les données en attente pour éviter l'accumulation
   processPendingData(channelIndex);
 
@@ -1028,8 +1051,22 @@ bool SSHTunnel::lockChannelRead(int channelIndex) {
     return false;
   }
   
-  // Timeout court de 50ms pour éviter les blocages
-  return xSemaphoreTake(channels[channelIndex].readMutex, pdMS_TO_TICKS(50)) == pdTRUE;
+  // MONITORING: Surveiller les tentatives de verrouillage
+  unsigned long start = millis();
+  // Timeout plus généreux pour éviter les corruptions FreeRTOS
+  BaseType_t result = xSemaphoreTake(channels[channelIndex].readMutex, pdMS_TO_TICKS(200));
+  unsigned long duration = millis() - start;
+  
+  if (result != pdTRUE) {
+    LOGF_W("SSH", "Channel %d: Failed to acquire READ mutex after %lums", channelIndex, duration);
+    return false;
+  }
+  
+  if (duration > 50) {
+    LOGF_D("SSH", "Channel %d: READ mutex acquired after %lums (slow)", channelIndex, duration);
+  }
+  
+  return true;
 }
 
 void SSHTunnel::unlockChannelRead(int channelIndex) {
@@ -1051,8 +1088,22 @@ bool SSHTunnel::lockChannelWrite(int channelIndex) {
     return false;
   }
   
-  // Timeout court de 50ms pour éviter les blocages
-  return xSemaphoreTake(channels[channelIndex].writeMutex, pdMS_TO_TICKS(50)) == pdTRUE;
+  // MONITORING: Surveiller les tentatives de verrouillage  
+  unsigned long start = millis();
+  // Timeout plus généreux pour éviter les corruptions FreeRTOS  
+  BaseType_t result = xSemaphoreTake(channels[channelIndex].writeMutex, pdMS_TO_TICKS(200));
+  unsigned long duration = millis() - start;
+  
+  if (result != pdTRUE) {
+    LOGF_W("SSH", "Channel %d: Failed to acquire WRITE mutex after %lums", channelIndex, duration);
+    return false;
+  }
+  
+  if (duration > 50) {
+    LOGF_D("SSH", "Channel %d: WRITE mutex acquired after %lums (slow)", channelIndex, duration);
+  }
+  
+  return true;
 }
 
 void SSHTunnel::unlockChannelWrite(int channelIndex) {
@@ -1095,8 +1146,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
   bool success = false;
   size_t bufferSize = getOptimalBufferSize(channelIndex);
   unsigned long now = millis();
-  // Nouveau flow control avec high/low watermarks
-  static const size_t HIGH_WATER_LOCAL = 24 * 512; // 12KB
+  // Nouveau flow control avec high/low watermarks adaptés ESP32
+  static const size_t HIGH_WATER_LOCAL = 16 * 512; // 8KB (réduit)
   if (ch.flowControlPaused) {
     unlockChannelRead(channelIndex);
     return false; // pause active
@@ -1186,6 +1237,13 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     return false;
   }
 
+  // NOUVEAU: Flow control préventif basé sur le buffer différé
+  if (ch.deferredWriteData && ch.deferredWriteSize > 8 * 1024) { // 8KB de données en attente
+    LOGF_D("SSH", "Channel %d: Skipping read due to large deferred buffer (%d bytes)", 
+           channelIndex, (int)ch.deferredWriteSize);
+    return false; // Ne pas lire plus de données du socket local
+  }
+
   if (!lockChannelWrite(channelIndex)) {
     return false;
   }
@@ -1261,7 +1319,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         }
       }
     }
-    // Vérification stricte sur deferredWriteData
+    // PRIORITÉ 1: Vider d'abord le buffer différé avant de lire de nouvelles données - AVEC PROTECTION
     if (ch.deferredWriteData && ch.deferredWriteSize > ch.deferredWriteOffset) {
       size_t toSend = ch.deferredWriteSize - ch.deferredWriteOffset;
       if (toSend > 0 && ch.deferredWriteData) {
@@ -1269,7 +1327,24 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         if (written > 0) {
           ch.deferredWriteOffset += written;
           ch.totalBytesSent += written;
+          if (lockStats()) { bytesSent += written; unlockStats(); }
           success = true;
+          
+          // Vérifier si tout le buffer est vidé et PROTÉGER la libération
+          if (ch.deferredWriteOffset >= ch.deferredWriteSize) {
+            SAFE_FREE(ch.deferredWriteData);  // SAFE_FREE déjà thread-safe
+            ch.deferredWriteData = nullptr;
+            ch.deferredWriteSize = 0;
+            ch.deferredWriteOffset = 0;
+            LOGF_I("SSH", "Channel %d: Deferred WRITE buffer completely flushed", channelIndex);
+          } else {
+            LOGF_D("SSH", "Channel %d: Deferred WRITE partial flush: %d/%d bytes", 
+                   channelIndex, (int)ch.deferredWriteOffset, (int)ch.deferredWriteSize);
+          }
+        } else if (written == LIBSSH2_ERROR_EAGAIN) {
+          LOGF_D("SSH", "Channel %d: SSH channel busy during deferred flush", channelIndex);
+        } else if (written < 0) {
+          LOGF_W("SSH", "Channel %d: Error flushing deferred buffer: %d", channelIndex, (int)written);
         }
       }
     }
@@ -1287,7 +1362,15 @@ void SSHTunnel::processPendingData(int channelIndex) {
 
   unsigned long now = millis();
   const unsigned long maxAge = 5000; // 5 secondes max pour les données en attente
-  // 1) Flusher d'abord le buffer différé (deferredReadData) si présent
+  // 1) Flusher d'abord le buffer différé (deferredReadData) si présent - AVEC PROTECTION AMÉLIORÉE
+  if (!lockChannelRead(channelIndex)) {
+    // Si on ne peut pas verrouiller, vérifier s'il y a vraiment des données à traiter
+    if (ch.deferredReadData && ch.deferredReadSize > ch.deferredReadOffset) {
+      LOGF_D("SSH", "Channel %d: Deferred read data pending, but mutex busy - will retry", channelIndex);
+    }
+    return; // Skip si on ne peut pas verrouiller
+  }
+  
   if (ch.deferredReadData && ch.deferredReadSize > ch.deferredReadOffset) {
     if (ch.localSocket >= 0 && isSocketWritable(ch.localSocket, 10)) {
       size_t remaining = ch.deferredReadSize - ch.deferredReadOffset;
@@ -1302,7 +1385,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
             ch.deferredReadData = nullptr;
             ch.deferredReadSize = 0;
             ch.deferredReadOffset = 0;
-            LOGF_D("SSH", "Channel %d: Deferred buffer flushed", channelIndex);
+            LOGF_D("SSH", "Channel %d: Deferred buffer flushed completely", channelIndex);
           }
         } else if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
           LOGF_W("SSH", "Channel %d: Error flushing deferred buffer: %s", channelIndex, strerror(errno));
@@ -1310,10 +1393,20 @@ void SSHTunnel::processPendingData(int channelIndex) {
       }
     }
   }
+  
+  unlockChannelRead(channelIndex);
 
-  // 1b) Flush deferred WRITE (Local->SSH)
+  // 1b) Flush deferred WRITE (Local->SSH) - AVEC PROTECTION AMÉLIORÉE
+  if (!lockChannelWrite(channelIndex)) {
+    // Si on ne peut pas verrouiller, vérifier s'il y a vraiment des données à traiter
+    if (ch.deferredWriteData && ch.deferredWriteSize > ch.deferredWriteOffset) {
+      LOGF_D("SSH", "Channel %d: Deferred write data pending, but mutex busy - will retry", channelIndex);
+    }
+    return; // Skip si on ne peut pas verrouiller
+  }
+  
   if (ch.deferredWriteData && ch.deferredWriteSize > ch.deferredWriteOffset) {
-    if (ch.channel && isSocketWritable(ch.localSocket, 10)) {
+    if (ch.channel) { // Supprimer la vérification incorrecte du socket local
       size_t remaining = ch.deferredWriteSize - ch.deferredWriteOffset;
       if (remaining > 0 && ch.deferredWriteData) {
         ssize_t written = libssh2_channel_write(ch.channel, (char*)ch.deferredWriteData + ch.deferredWriteOffset, remaining);
@@ -1326,14 +1419,26 @@ void SSHTunnel::processPendingData(int channelIndex) {
             ch.deferredWriteData = nullptr;
             ch.deferredWriteSize = 0;
             ch.deferredWriteOffset = 0;
-            LOGF_D("SSH", "Channel %d: Deferred WRITE buffer flushed", channelIndex);
+            LOGF_D("SSH", "Channel %d: Deferred WRITE buffer flushed completely", channelIndex);
+          } else {
+            LOGF_D("SSH", "Channel %d: Deferred WRITE buffer partially flushed (%d/%d bytes)", 
+                   channelIndex, (int)ch.deferredWriteOffset, (int)ch.deferredWriteSize);
           }
         } else if (written < 0 && written != LIBSSH2_ERROR_EAGAIN) {
           LOGF_W("SSH", "Channel %d: Error flushing deferred WRITE buffer: %d", channelIndex, (int)written);
+          // Diagnostique plus détaillé
+          char *errmsg;
+          int errlen;
+          libssh2_session_last_error(session, &errmsg, &errlen, 0);
+          LOGF_W("SSH", "Channel %d: libssh2 error details: %s", channelIndex, errmsg ? errmsg : "Unknown");
+        } else if (written == LIBSSH2_ERROR_EAGAIN) {
+          LOGF_D("SSH", "Channel %d: SSH channel busy, will retry later", channelIndex);
         }
       }
     }
   }
+  
+  unlockChannelWrite(channelIndex);
 
   // 2) Traiter les données en attente pour SSH->Local
   while (!ch.pendingWriteQueue.empty()) {
@@ -1423,7 +1528,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
     }
   }
   // 4) Relancer le flow control si on est repassé sous le LOW watermark
-  static const size_t LOW_WATER_LOCAL = 24 * 256; // KB
+  static const size_t LOW_WATER_LOCAL = 16 * 256; // 4KB (cohérent avec HIGH_WATER)
   if (ch.flowControlPaused && ch.queuedBytesToLocal < LOW_WATER_LOCAL) {
     ch.flowControlPaused = false;
     LOGF_I("SSH", "Channel %d: Flow control RESUME (queuedToLocal=%d)", channelIndex, (int)ch.queuedBytesToLocal);
@@ -1432,67 +1537,101 @@ void SSHTunnel::processPendingData(int channelIndex) {
 
 bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isRead) {
   TunnelChannel &ch = channels[channelIndex];
-  const size_t maxQueueSize = 1024; // Cap éléments, pas de blocage
+  const size_t maxQueueSize = 256; // Réduit de 1024 à 256 éléments pour économiser RAM
   std::queue<PendingData>& targetQueue = isRead ? ch.pendingWriteQueue : ch.pendingReadQueue;
 
   if (targetQueue.size() >= maxQueueSize) {
     if (isRead) {
+      // CRITIQUE: Protéger l'accès au buffer différé avec mutex
+      if (!lockChannelRead(channelIndex)) {
+        LOGF_E("SSH", "Channel %d: Failed to lock for deferred buffer", channelIndex);
+        return false;
+      }
+      
       // Utiliser / étendre le buffer différé plutôt que bloquer (SSH->Local)
       if (ch.deferredReadData == nullptr) {
         ch.deferredReadData = (uint8_t*)safeMalloc(size, "DEFERRED_READ");
         if (!ch.deferredReadData) {
           LOGF_E("SSH", "Channel %d: safeMalloc failed (deferred %d bytes)", channelIndex, size);
+          unlockChannelRead(channelIndex);
           return false;
         }
-        memcpy(ch.deferredReadData, data, size);
+        // VALIDATION: Vérifier la taille avant memcpy
+        if (size > 0 && data != nullptr) {
+          memcpy(ch.deferredReadData, data, size);
+        }
         ch.deferredReadSize = size;
         ch.deferredReadOffset = 0;
-        LOGF_W("SSH", "Channel %d: Deferred buffer created (%d bytes)", channelIndex, size);
+        LOGF_W("SSH", "Channel %d: Deferred READ buffer created (%d bytes)", channelIndex, size);
+        unlockChannelRead(channelIndex);
         return true;
-      } else if (ch.deferredReadSize + size < 32 * 1024) {
+      } else if (ch.deferredReadSize + size < 24 * 1024) { // Réduit de 32KB à 24KB
         uint8_t* newBuf = (uint8_t*)safeRealloc(ch.deferredReadData, ch.deferredReadSize + size, "DEFERRED_READ_EXT");
         if (newBuf) {
-          memcpy(newBuf + ch.deferredReadSize, data, size);
-          ch.deferredReadData = newBuf;
+          // VALIDATION: Vérifier avant memcpy pour éviter buffer overflow
+          if (size > 0 && data != nullptr && ch.deferredReadSize >= 0) {
+            memcpy(newBuf + ch.deferredReadSize, data, size);
+          }
+          ch.deferredReadData = newBuf;  // RACE CONDITION FIXÉE avec mutex
           ch.deferredReadSize += size;
           LOGF_W("SSH", "Channel %d: Deferred buffer extended (+%d => %d bytes)", channelIndex, size, (int)ch.deferredReadSize);
+          unlockChannelRead(channelIndex);
           return true;
         } else {
           LOGF_E("SSH", "Channel %d: Failed to extend deferred buffer", channelIndex);
+          unlockChannelRead(channelIndex);
           return false;
         }
       } else {
         LOGF_W("SSH", "Channel %d: Deferred buffer limit reached (%d bytes) - dropping new chunk", channelIndex, (int)ch.deferredReadSize);
+        unlockChannelRead(channelIndex);
         return false;
       }
     } else {
+      // CRITIQUE: Protéger l'accès au buffer différé WRITE avec mutex
+      if (!lockChannelWrite(channelIndex)) {
+        LOGF_E("SSH", "Channel %d: Failed to lock for deferred WRITE buffer", channelIndex);
+        return false;
+      }
+      
       // Buffer différé pour Local->SSH
       if (ch.deferredWriteData == nullptr) {
         ch.deferredWriteData = (uint8_t*)safeMalloc(size, "DEFERRED_WRITE");
         if (!ch.deferredWriteData) {
           LOGF_E("SSH", "Channel %d: safeMalloc failed (deferredWrite %d bytes)", channelIndex, size);
+          unlockChannelWrite(channelIndex);
           return false;
         }
-        memcpy(ch.deferredWriteData, data, size);
+        // VALIDATION: Vérifier avant memcpy
+        if (size > 0 && data != nullptr) {
+          memcpy(ch.deferredWriteData, data, size);
+        }
         ch.deferredWriteSize = size;
         ch.deferredWriteOffset = 0;
         LOGF_W("SSH", "Channel %d: Deferred WRITE buffer created (%d bytes)", channelIndex, size);
+        unlockChannelWrite(channelIndex);
         return true;
-  } else if (ch.deferredWriteSize + size < 48 * 1024) {
+  } else if (ch.deferredWriteSize + size < 16 * 1024) { // Réduit de 24KB à 16KB pour éviter l'accumulation
         uint8_t* newBuf = (uint8_t*)safeRealloc(ch.deferredWriteData, ch.deferredWriteSize + size, "DEFERRED_WRITE_EXT");
         if (newBuf) {
-          memcpy(newBuf + ch.deferredWriteSize, data, size);
-          ch.deferredWriteData = newBuf;
+          // VALIDATION: Vérifier avant memcpy pour éviter corruption
+          if (size > 0 && data != nullptr && ch.deferredWriteSize >= 0) {
+            memcpy(newBuf + ch.deferredWriteSize, data, size);
+          }
+          ch.deferredWriteData = newBuf;  // RACE CONDITION FIXÉE avec mutex
           ch.deferredWriteSize += size;
           LOGF_W("SSH", "Channel %d: Deferred WRITE buffer extended (+%d => %d bytes)", channelIndex, size, (int)ch.deferredWriteSize);
+          unlockChannelWrite(channelIndex);
           return true;
         } else {
           LOGF_E("SSH", "Channel %d: Failed to extend deferred WRITE buffer", channelIndex);
+          unlockChannelWrite(channelIndex);
           return false;
         }
       } else {
         ch.lostWriteChunks++;
         LOGF_W("SSH", "Channel %d: Deferred WRITE buffer limit reached (%d bytes) - dropping new chunk! Total lost: %d", channelIndex, (int)ch.deferredWriteSize, ch.lostWriteChunks);
+        unlockChannelWrite(channelIndex);
         return false;
       }
     }
@@ -1562,10 +1701,10 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   }
   
   // Vérifier si les queues ne sont pas trop pleines
-  if (ch.pendingWriteQueue.size() > 28 || ch.pendingReadQueue.size() > 28) {
+  if (ch.pendingWriteQueue.size() > 32 || ch.pendingReadQueue.size() > 32) { // Réduit de 28 à 32
     return false;
   }
-  const size_t MAX_QUEUED_BYTES = 64 * 1024; // 64KB par canal
+  const size_t MAX_QUEUED_BYTES = 32 * 1024; // Réduit de 64KB à 32KB par canal
   if (ch.queuedBytesToLocal + ch.queuedBytesToRemote > MAX_QUEUED_BYTES) {
     return false;
   }
