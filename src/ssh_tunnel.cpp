@@ -1096,7 +1096,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
   size_t bufferSize = getOptimalBufferSize(channelIndex);
   unsigned long now = millis();
   // Nouveau flow control avec high/low watermarks
-  static const size_t HIGH_WATER_LOCAL = 96 * 1024; // 96KB
+  static const size_t HIGH_WATER_LOCAL = 24 * 512; // 12KB
   if (ch.flowControlPaused) {
     unlockChannelRead(channelIndex);
     return false; // pause active
@@ -1423,7 +1423,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
     }
   }
   // 4) Relancer le flow control si on est repassé sous le LOW watermark
-  static const size_t LOW_WATER_LOCAL = 48 * 1024; // 48KB
+  static const size_t LOW_WATER_LOCAL = 24 * 256; // KB
   if (ch.flowControlPaused && ch.queuedBytesToLocal < LOW_WATER_LOCAL) {
     ch.flowControlPaused = false;
     LOGF_I("SSH", "Channel %d: Flow control RESUME (queuedToLocal=%d)", channelIndex, (int)ch.queuedBytesToLocal);
@@ -1449,7 +1449,7 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
         ch.deferredReadOffset = 0;
         LOGF_W("SSH", "Channel %d: Deferred buffer created (%d bytes)", channelIndex, size);
         return true;
-      } else if (ch.deferredReadSize + size < 128 * 1024) {
+      } else if (ch.deferredReadSize + size < 32 * 1024) {
         uint8_t* newBuf = (uint8_t*)safeRealloc(ch.deferredReadData, ch.deferredReadSize + size, "DEFERRED_READ_EXT");
         if (newBuf) {
           memcpy(newBuf + ch.deferredReadSize, data, size);
@@ -1478,7 +1478,7 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
         ch.deferredWriteOffset = 0;
         LOGF_W("SSH", "Channel %d: Deferred WRITE buffer created (%d bytes)", channelIndex, size);
         return true;
-  } else if (ch.deferredWriteSize + size < 256 * 1024) {
+  } else if (ch.deferredWriteSize + size < 48 * 1024) {
         uint8_t* newBuf = (uint8_t*)safeRealloc(ch.deferredWriteData, ch.deferredWriteSize + size, "DEFERRED_WRITE_EXT");
         if (newBuf) {
           memcpy(newBuf + ch.deferredWriteSize, data, size);
