@@ -5,6 +5,7 @@
 #include <freertos/semphr.h>
 #include "memory_fixes.h"
 #include "logger.h"
+#include <cstring>
 
 // Structure pour les données en attente (compatible avec l'existant)
 struct PendingData {
@@ -54,10 +55,10 @@ public:
             xSemaphoreGive(mutex);
             return false; // Buffer plein
         }
-        
         buffer[writePos] = item;
         writePos = (writePos + 1) % capacity;
-        count++;
+        count = count + 1;
+        
         
         xSemaphoreGive(mutex);
         return true;
@@ -72,10 +73,10 @@ public:
             xSemaphoreGive(mutex);
             return false; // Buffer vide
         }
-        
         item = buffer[readPos];
         readPos = (readPos + 1) % capacity;
-        count--;
+        count = count - 1;
+        
         
         xSemaphoreGive(mutex);
         return true;
@@ -163,8 +164,8 @@ public:
             memcpy(buffer + writePos, data, firstChunk);
             memcpy(buffer, data + firstChunk, toWrite - firstChunk);
         }
-        
         writePos = (writePos + toWrite) % capacity;
+        count = count + toWrite;
         count += toWrite;
         
         xSemaphoreGive(mutex);
@@ -190,8 +191,8 @@ public:
             memcpy(data, buffer + readPos, firstChunk);
             memcpy(data + firstChunk, buffer, toRead - firstChunk);
         }
-        
         readPos = (readPos + toRead) % capacity;
+        count = count - toRead;
         count -= toRead;
         
         xSemaphoreGive(mutex);
