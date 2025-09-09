@@ -182,6 +182,9 @@ private:
     // Méthodes de compatibilité (deprecated)
     bool lockChannel(int channelIndex);
     void unlockChannel(int channelIndex);
+    
+    // NOUVEAU: Méthode pour forcer la libération des mutex bloqués
+    void forceMutexRelease(int channelIndex);
 };
 
 #endif
