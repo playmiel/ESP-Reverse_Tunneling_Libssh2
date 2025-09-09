@@ -5,6 +5,7 @@
 #include "ssh_config.h"
 #include "logger.h"
 #include "memory_fixes.h"
+#include "ring_buffer.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -14,21 +15,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
-#include <queue>
+#include <vector>
 
 enum TunnelState {
     TUNNEL_DISCONNECTED = 0,
     TUNNEL_CONNECTING = 1,
     TUNNEL_CONNECTED = 2,
     TUNNEL_ERROR = 3
-};
-
-// Structure pour les données en attente
-struct PendingData {
-    uint8_t* data;
-    size_t size;
-    size_t offset; // Position actuelle dans les données
-    unsigned long timestamp; // Pour timeout
 };
 
 struct TunnelChannel {
@@ -43,9 +36,13 @@ struct TunnelChannel {
     SemaphoreHandle_t readMutex; // Protection thread-safe pour la lecture
     SemaphoreHandle_t writeMutex; // Protection thread-safe pour l'écriture
     
-    // Nouvelles structures pour améliorer la fiabilité
-    std::queue<PendingData> pendingWriteQueue; // Queue pour données SSH->Local
-    std::queue<PendingData> pendingReadQueue;  // Queue pour données Local->SSH
+    // NOUVEAU: Ring buffers remplacent les std::queue et buffers différés
+    PendingDataRing* writeRing;     // SSH->Local (remplace pendingWriteQueue)
+    PendingDataRing* readRing;      // Local->SSH (remplace pendingReadQueue)
+    DataRingBuffer* deferredWriteRing; // Buffer continu Local->SSH
+    DataRingBuffer* deferredReadRing;  // Buffer continu SSH->Local
+    
+    // Statistiques et contrôle
     size_t totalBytesReceived; // Statistiques par canal
     size_t totalBytesSent;
     unsigned long lastSuccessfulWrite; // Dernière écriture réussie
@@ -53,16 +50,14 @@ struct TunnelChannel {
     bool gracefulClosing; // Fermeture en cours mais avec données restantes
     int consecutiveErrors; // Nombre d'erreurs consécutives
     // Compteurs supplémentaires pour gestion fine du flow control
-    size_t queuedBytesToLocal;   // Somme des bytes dans pendingWriteQueue
-    size_t queuedBytesToRemote;  // Somme des bytes dans pendingReadQueue
-    // Buffer pour données SSH->Local non encore mises en queue (éviter blocage)
-    uint8_t* deferredReadData;
-    size_t deferredReadSize;
-    size_t deferredReadOffset;
-    // Buffer différé pour données Local->SSH (éviter perte si queue pleine)
-    uint8_t* deferredWriteData;
-    size_t deferredWriteSize;
-    size_t deferredWriteOffset;
+    size_t queuedBytesToLocal;   // Somme des bytes dans writeRing
+    size_t queuedBytesToRemote;  // Somme des bytes dans readRing
+    
+    // NOUVEAU: Détection des gros transferts
+    bool largeTransferInProgress; // Transfert de gros fichier en cours
+    unsigned long transferStartTime; // Début du transfert actuel
+    size_t transferredBytes;      // Bytes transférés dans ce transfert
+    size_t peakBytesPerSecond;    // Pic de débit pour ce canal
 };
 
 class SSHTunnel {
@@ -107,6 +102,18 @@ private:
     bool isChannelHealthy(int channelIndex);
     void recoverChannel(int channelIndex);
     size_t getOptimalBufferSize(int channelIndex);
+    void checkAndRecoverDeadlocks(); // NOUVEAU: Détection et récupération des deadlocks
+    
+    // NOUVEAU: Diagnostic de duplication de données
+    void printDataTransferStats(int channelIndex);
+    
+    // NOUVEAU: Gestion des gros transferts et file d'attente des connexions
+    bool isLargeTransferActive();
+    void detectLargeTransfer(int channelIndex);
+    bool shouldAcceptNewConnection();
+    void queuePendingConnection(LIBSSH2_CHANNEL* channel);
+    bool processPendingConnections();
+    bool processQueuedConnection(LIBSSH2_CHANNEL* channel);
 
     // Poll helpers
     bool isSocketWritable(int sockfd, int timeoutMs = 0);
@@ -146,6 +153,19 @@ private:
 
     // Configuration reference
     SSHConfiguration* config;
+    
+    // NOUVEAU: File d'attente pour les connexions en attente pendant les gros transferts
+    struct PendingConnection {
+        LIBSSH2_CHANNEL* channel;
+        unsigned long timestamp;
+    };
+    std::vector<PendingConnection> pendingConnections;
+    SemaphoreHandle_t pendingConnectionsMutex;
+    
+    // NOUVEAU: Seuils pour la détection des gros transferts
+    static const size_t LARGE_TRANSFER_THRESHOLD = 100 * 1024;  // 100KB (augmenté de 50KB)
+    static const size_t LARGE_TRANSFER_RATE_THRESHOLD = 15 * 1024; // 15KB/s (augmenté de 10KB/s)
+    static const unsigned long LARGE_TRANSFER_TIME_THRESHOLD = 3000; // 3 secondes (réduit de 5s)
 
     // Méthodes de protection
     bool lockTunnel();
