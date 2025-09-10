@@ -41,3 +41,7 @@ ROADMAP.md
 examples/.pio/libdeps/*/
 examples/.pio/
 *.piopm
+
+# Fichiers à exclure du suivi Git
+CRITICAL_FIX_DRAINAGE.cpp
+SSH_PERFORMANCE_FIXES.md
