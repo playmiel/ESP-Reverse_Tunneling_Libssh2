@@ -5,6 +5,7 @@
 #include "ssh_config.h"
 #include "logger.h"
 #include "memory_fixes.h"
+#include "ring_buffer.h"
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
@@ -14,21 +15,13 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <freertos/task.h>
-#include <queue>
+#include <vector>
 
 enum TunnelState {
     TUNNEL_DISCONNECTED = 0,
     TUNNEL_CONNECTING = 1,
     TUNNEL_CONNECTED = 2,
     TUNNEL_ERROR = 3
-};
-
-// Structure pour les données en attente
-struct PendingData {
-    uint8_t* data;
-    size_t size;
-    size_t offset; // Position actuelle dans les données
-    unsigned long timestamp; // Pour timeout
 };
 
 struct TunnelChannel {
@@ -40,29 +33,31 @@ struct TunnelChannel {
     unsigned long lastActivity;
     size_t pendingBytes; // Données en attente d'écriture
     bool flowControlPaused; // Pause temporaire pour éviter la congestion
-    SemaphoreHandle_t readMutex; // Protection thread-safe pour la lecture
-    SemaphoreHandle_t writeMutex; // Protection thread-safe pour l'écriture
+    SemaphoreHandle_t readMutex; // Protection thread-safe pour la lecture (mutex)
+    SemaphoreHandle_t writeMutex; // Protection thread-safe pour l'écriture (mutex)
     
-    // Nouvelles structures pour améliorer la fiabilité
-    std::queue<PendingData> pendingWriteQueue; // Queue pour données SSH->Local
-    std::queue<PendingData> pendingReadQueue;  // Queue pour données Local->SSH
+    // OPTIMISÉ: Un seul buffer circulaire par direction (supprime duplication ring+deferred)
+    DataRingBuffer* sshToLocalBuffer;   // SSH->Local (unifié)
+    DataRingBuffer* localToSshBuffer;   // Local->SSH (unifié)
+    
+    // Statistiques et contrôle
     size_t totalBytesReceived; // Statistiques par canal
     size_t totalBytesSent;
     unsigned long lastSuccessfulWrite; // Dernière écriture réussie
     unsigned long lastSuccessfulRead;  // Dernière lecture réussie
     bool gracefulClosing; // Fermeture en cours mais avec données restantes
     int consecutiveErrors; // Nombre d'erreurs consécutives
+    int eagainErrors; // NOUVEAU: Compteur séparé pour erreurs EAGAIN
+    
     // Compteurs supplémentaires pour gestion fine du flow control
-    size_t queuedBytesToLocal;   // Somme des bytes dans pendingWriteQueue
-    size_t queuedBytesToRemote;  // Somme des bytes dans pendingReadQueue
-    // Buffer pour données SSH->Local non encore mises en queue (éviter blocage)
-    uint8_t* deferredReadData;
-    size_t deferredReadSize;
-    size_t deferredReadOffset;
-    // Buffer différé pour données Local->SSH (éviter perte si queue pleine)
-    uint8_t* deferredWriteData;
-    size_t deferredWriteSize;
-    size_t deferredWriteOffset;
+    size_t queuedBytesToLocal;   // Bytes dans sshToLocalBuffer
+    size_t queuedBytesToRemote;  // Bytes dans localToSshBuffer
+    
+    // NOUVEAU: Détection des gros transferts
+    bool largeTransferInProgress; // Transfert de gros fichier en cours
+    unsigned long transferStartTime; // Début du transfert actuel
+    size_t transferredBytes;      // Bytes transférés dans ce transfert
+    size_t peakBytesPerSecond;    // Pic de débit pour ce canal
 };
 
 class SSHTunnel {
@@ -106,7 +101,26 @@ private:
     void flushPendingData(int channelIndex);
     bool isChannelHealthy(int channelIndex);
     void recoverChannel(int channelIndex);
+    void gracefulRecoverChannel(int channelIndex); // NOUVEAU: Récupération sans effacer les buffers
     size_t getOptimalBufferSize(int channelIndex);
+    void checkAndRecoverDeadlocks(); // NOUVEAU: Détection et récupération des deadlocks
+    
+    // NOUVEAU: Tâche dédiée pour traitement des données (pattern producer/consumer)
+    static void dataProcessingTaskWrapper(void* parameter);
+    void dataProcessingTaskFunction();
+    bool startDataProcessingTask();
+    void stopDataProcessingTask();
+    
+    // NOUVEAU: Diagnostic de duplication de données
+    void printDataTransferStats(int channelIndex);
+    
+    // NOUVEAU: Gestion des gros transferts et file d'attente des connexions
+    bool isLargeTransferActive();
+    void detectLargeTransfer(int channelIndex);
+    bool shouldAcceptNewConnection();
+    void queuePendingConnection(LIBSSH2_CHANNEL* channel);
+    bool processPendingConnections();
+    bool processQueuedConnection(LIBSSH2_CHANNEL* channel);
 
     // Poll helpers
     bool isSocketWritable(int sockfd, int timeoutMs = 0);
@@ -146,6 +160,29 @@ private:
 
     // Configuration reference
     SSHConfiguration* config;
+    
+    // NOUVEAU: File d'attente pour les connexions en attente pendant les gros transferts
+    struct PendingConnection {
+        LIBSSH2_CHANNEL* channel;
+        unsigned long timestamp;
+    };
+    std::vector<PendingConnection> pendingConnections;
+    SemaphoreHandle_t pendingConnectionsMutex;
+    
+    // OPTIMISÉ: Seuils pour la détection des gros transferts et flow control
+    static const size_t LARGE_TRANSFER_THRESHOLD = 100 * 1024;  // 100KB
+    static const size_t LARGE_TRANSFER_RATE_THRESHOLD = 15 * 1024; // 15KB/s
+    static const unsigned long LARGE_TRANSFER_TIME_THRESHOLD = 3000; // 3 secondes
+    
+    // OPTIMISÉ: Nouveaux seuils de flow control plus élevés
+    static const size_t HIGH_WATER_LOCAL = 28 * 1024;  // 28KB (augmenté)
+    static const size_t LOW_WATER_LOCAL = 14 * 1024;   // 14KB (50% de HIGH_WATER)
+    static const size_t FIXED_BUFFER_SIZE = 8 * 1024;  // Buffer fixe 8KB
+    
+    // NOUVEAU: Tâche dédiée pour le traitement des données
+    TaskHandle_t dataProcessingTask;
+    SemaphoreHandle_t dataProcessingSemaphore;
+    bool dataProcessingTaskRunning;
 
     // Méthodes de protection
     bool lockTunnel();
@@ -162,6 +199,9 @@ private:
     // Méthodes de compatibilité (deprecated)
     bool lockChannel(int channelIndex);
     void unlockChannel(int channelIndex);
+    
+    // NOUVEAU: Méthode pour forcer la libération des mutex bloqués
+    void forceMutexRelease(int channelIndex);
 };
 
 #endif
