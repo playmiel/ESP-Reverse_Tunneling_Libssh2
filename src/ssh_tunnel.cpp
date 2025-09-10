@@ -1752,7 +1752,7 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
   // Vérifier fenêtre SSH avant d'enfiler pour direction Local->SSH
   if (!isRead && ch.channel) {
     size_t winSize = 0, winUsed = 0;
-  // Contrôle fenêtre désactivé (incompat signature) → TODO réactiver après vérification headers
+  // Window control disabled (incompatible signature) → TODO re-enable after header verification
   }
 
   // Écrire dans le buffer unifié
