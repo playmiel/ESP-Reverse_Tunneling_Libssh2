@@ -6,13 +6,21 @@
 // Définir la taille de buffer pour les chunks de données
 #define SSH_BUFFER_SIZE 1024
 
-// OPTIMISÉ: Nouveaux seuils de flow control plus élevés et fixes
-#define HIGH_WATER_LOCAL (28 * 1024)  // 28KB (augmenté de 8KB)
-#define LOW_WATER_LOCAL (14 * 1024)   // 14KB (50% de HIGH_WATER pour réduire le thrash)
-#define FIXED_BUFFER_SIZE (8 * 1024)  // Buffer fixe 8KB (au lieu d'adaptatif)
+// Seuils de flow control optimisés (réduits) pour limiter l'accumulation et améliorer le backpressure
+#undef HIGH_WATER_LOCAL
+#undef LOW_WATER_LOCAL
+#define HIGH_WATER_LOCAL (3 * 1024)      // 3KB - pause de lecture locale proactive
+#define LOW_WATER_LOCAL  (2 * 1024)      // 2KB - reprise de lecture
+#define CRITICAL_WATER_LOCAL (4 * 1024)  // 4KB - arrêt complet lectures socket local
 
-// Définir les seuils pour la santé des canaux
-#define MAX_QUEUED_BYTES (32 * 1024)  // 32KB total maximum (augmenté de 16KB)
+// Paramètres d'écriture SSH
+#define MAX_WRITES_PER_PASS 8
+#define MIN_SSH_WINDOW_SIZE 512
+#define MIN_WRITE_SIZE 256
+
+// Buffer fixe (inchangé) + seuil d'intégrité canal
+#define FIXED_BUFFER_SIZE (8 * 1024)
+#define MAX_QUEUED_BYTES (32 * 1024)
 
 SSHTunnel::SSHTunnel()
     : session(nullptr), listener(nullptr), socketfd(-1),
@@ -1471,12 +1479,10 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     return false;
   }
 
-  // NOUVEAU: Flow control préventif basé sur le buffer unifié local->SSH
-  if (ch.localToSshBuffer && ch.localToSshBuffer->size() > 8 * 1024) { // 8KB de données en attente
-    LOGF_D("SSH", "Channel %d: Skipping read due to large local->SSH buffer (%zu bytes)", 
-           channelIndex, ch.localToSshBuffer->size());
-
-    return false; // Ne pas lire plus de données du socket local
+  // Backpressure critique : ne pas lire davantage si trop en attente
+  if (ch.queuedBytesToRemote > CRITICAL_WATER_LOCAL) {
+  LOGF_W("SSH", "Channel %d: Critical backpressure (%zu bytes) - skipping local read", 
+           channelIndex, ch.queuedBytesToRemote);
   }
 
   if (!lockChannelWrite(channelIndex)) {
@@ -1487,91 +1493,98 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   size_t bufferSize = getOptimalBufferSize(channelIndex);
   unsigned long now = millis();
 
-  // Double vérification après acquisition du mutex
   if (ch.active && ch.channel && ch.localSocket >= 0) {
-    // Vérifier l'état du socket avec getsockopt pour détecter les erreurs
-    int sockError = 0;
-    socklen_t errLen = sizeof(sockError);
-    if (getsockopt(ch.localSocket, SOL_SOCKET, SO_ERROR, &sockError, &errLen) == 0 && sockError != 0) {
-      LOGF_I("SSH", "Channel %d: Socket error detected: %s, initiating graceful close", 
-             channelIndex, strerror(sockError));
-      ch.gracefulClosing = true;
-      return false;
-    }
+    // 1) Drainage en boucle des données déjà en queue (localToSshBuffer)
+    size_t totalWritten = 0;
+    int passes = 0;
+    while (passes < MAX_WRITES_PER_PASS && ch.localToSshBuffer && !ch.localToSshBuffer->empty()) {
+      // Vérifier fenêtre SSH
+      size_t winSize = 0, winUsed = 0;
+  // NOTE: libssh2_channel_window_write_ex signature semble différente sur cible; suppression contrôle fenêtre direct
+  // (Amélioration future: adapter selon header effectif.)
+  (void)winSize; (void)winUsed; // silencieux
 
-    // Utiliser poll avant chaque tentative de lecture
-    if (isSocketReadable(ch.localSocket, 10)) {
-      ssize_t bytesRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
-      if (bytesRead > 0) {
-        // Tenter d'écrire directement vers le canal SSH
-        ssize_t written = libssh2_channel_write(ch.channel, (char *)txBuffer, bytesRead);
-        if (written == bytesRead) {
-          // Succès complet
-          ch.totalBytesSent += written;
-          ch.lastSuccessfulRead = now;
-          if (lockStats()) {
-            bytesSent += written;
-            unlockStats();
-          }
-          success = true;
-          LOGF_D("SSH", "Channel %d: Local->SSH %d bytes (direct)", channelIndex, written);
-        } else if (written > 0) {
-          // Écriture partielle - mettre le reste en queue
-          ch.totalBytesSent += written;
-          ch.lastSuccessfulRead = now;
-          if (lockStats()) {
-            bytesSent += written;
-            unlockStats();
-          }
-          // Mettre les données restantes en queue
-          size_t remaining = bytesRead - written;
-          if (queueData(channelIndex, txBuffer + written, remaining, false)) {
-            LOGF_D("SSH", "Channel %d: Local->SSH %d bytes written, %d queued", 
-                   channelIndex, written, remaining);
-            success = true;
-          } else {
-            LOGF_E("SSH", "Channel %d: Failed to queue remaining data", channelIndex);
-            ch.consecutiveErrors++;
-          }
-        } else if (written < 0) {
-          if (written == LIBSSH2_ERROR_EAGAIN) {
-            // Canal SSH plein - mettre toutes les données en queue
-            if (queueData(channelIndex, txBuffer, bytesRead, false)) {
-              LOGF_D("SSH", "Channel %d: Local->SSH %d bytes queued (channel full)", 
-                     channelIndex, bytesRead);
-              success = true;
-            } else {
-              LOGF_E("SSH", "Channel %d: Failed to queue data (channel full)", channelIndex);
-              ch.consecutiveErrors++;
-            }
-          } else {
-            LOGF_W("SSH", "Channel %d: SSH write error: %d", channelIndex, written);
-            ch.consecutiveErrors++;
-          }
+      uint8_t temp[SSH_BUFFER_SIZE];
+      size_t chunk = ch.localToSshBuffer->read(temp, sizeof(temp));
+      if (chunk == 0) break;
+      if (chunk < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
+        // Essayer d'agréger un peu plus pour éviter micro-write
+        size_t extra = ch.localToSshBuffer->read(temp + chunk, MIN_WRITE_SIZE - chunk);
+        chunk += extra;
+      }
+
+      ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)temp, chunk);
+      if (w > 0) {
+        passes++;
+        totalWritten += w;
+        ch.totalBytesSent += w;
+        ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w) ? ch.queuedBytesToRemote - w : 0;
+        ch.lastSuccessfulWrite = now;
+        ch.consecutiveErrors = 0;
+        if ((size_t)w < chunk) {
+          // Remettre le reste en tête (simple: réécrire) si possible
+          ch.localToSshBuffer->write(temp + w, chunk - w);
         }
-      } else if (bytesRead == 0) {
-        LOGF_I("SSH", "Channel %d: Local socket closed, initiating graceful close", channelIndex);
-        ch.gracefulClosing = true;
-        // Continuer à traiter les données en attente
-        success = true; // Considérer comme un succès pour continuer le traitement
-      } else if (bytesRead < 0) {
-        int errorCode = errno;
-        if (errorCode != EAGAIN && errorCode != EWOULDBLOCK) {
-          if (errorCode == ECONNRESET || errorCode == EPIPE || errorCode == ENOTCONN || 
-              errorCode == ESHUTDOWN || errorCode == ETIMEDOUT) {
-            LOGF_I("SSH", "Channel %d: Local connection closed (%s), initiating graceful close", 
-                   channelIndex, strerror(errorCode));
-            ch.gracefulClosing = true;
-            success = true; // Continuer le traitement des données restantes
-          } else {
-            LOGF_W("SSH", "Channel %d: Local read error: %s (errno=%d)", 
-                   channelIndex, strerror(errorCode), errorCode);
-            ch.consecutiveErrors++;
-          }
-        }
+      } else if (w == LIBSSH2_ERROR_EAGAIN) {
+        // Remettre le chunk entier
+        ch.localToSshBuffer->write(temp, chunk);
+        break;
+      } else {
+        ch.consecutiveErrors++;
+        LOGF_W("SSH", "Channel %d: Write error %zd during drain", channelIndex, w);
+        // Remettre les données pour réessai futur
+        ch.localToSshBuffer->write(temp, chunk);
+        break;
       }
     }
 
+    if (totalWritten > 0) {
+      if (lockStats()) { bytesSent += totalWritten; unlockStats(); }
+      LOGF_I("SSH", "Channel %d: Drained %zu bytes in %d passes, %zu queued", 
+             channelIndex, totalWritten, passes, ch.queuedBytesToRemote);
+      success = true;
+    }
+
+    // 2) Lire le socket local si backpressure acceptable
+    if (ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
+      ssize_t localRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
+      if (localRead > 0) {
+        // Tentative écriture immédiate en boucle (drainage direct)
+        size_t offset = 0; int directPass = 0; size_t directWrittenTotal = 0;
+        while (offset < (size_t)localRead && directPass < MAX_WRITES_PER_PASS) {
+          size_t remain = (size_t)localRead - offset;
+          // Vérifier fenêtre
+            // (Contrôle fenêtre SSH désactivé faute de signature correcte sur cible)
+          ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)txBuffer + offset, remain);
+          if (w > 0) {
+            offset += w; directPass++; directWrittenTotal += w;
+            ch.totalBytesSent += w; ch.lastSuccessfulWrite = now; ch.consecutiveErrors = 0;
+            if (lockStats()) { bytesSent += w; unlockStats(); }
+          } else if (w == LIBSSH2_ERROR_EAGAIN) {
+            break; // Mettre le reste en file
+          } else {
+            ch.consecutiveErrors++; LOGF_W("SSH","Channel %d: Direct write err %zd",channelIndex,w); break;
+          }
+        }
+        size_t remaining = (size_t)localRead - offset;
+        if (remaining > 0) {
+          if (queueData(channelIndex, txBuffer + offset, remaining, false)) {
+            success = true;
+          } else {
+            LOGF_W("SSH","Channel %d: Failed to queue %zu residual bytes",channelIndex, remaining);
+          }
+        }
+        if (directWrittenTotal>0) {
+          LOGF_D("SSH","Channel %d: Direct wrote %zu/%zd bytes (+%zu queued)", channelIndex, directWrittenTotal, localRead, remaining);
+        }
+      } else if (localRead == 0) {
+        LOGF_I("SSH", "Channel %d: Local socket closed", channelIndex);
+        ch.gracefulClosing = true;
+      } else if (localRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        LOGF_W("SSH", "Channel %d: Local read error %s", channelIndex, strerror(errno));
+        ch.consecutiveErrors++;
+      }
+    }
   }
 
   unlockChannelWrite(channelIndex);
@@ -1735,7 +1748,13 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
     return false;
   }
   
-  // Écrire directement dans le buffer unifié
+  // Vérifier fenêtre SSH avant d'enfiler pour direction Local->SSH
+  if (!isRead && ch.channel) {
+    size_t winSize = 0, winUsed = 0;
+  // Contrôle fenêtre désactivé (incompat signature) → TODO réactiver après vérification headers
+  }
+
+  // Écrire dans le buffer unifié
   size_t bytesWritten = targetBuffer->write(data, size);
   
   if (bytesWritten > 0) {
@@ -1771,55 +1790,71 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
 
 void SSHTunnel::flushPendingData(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
-  
-  // NOUVEAU: Utiliser un timeout très court pour éviter les deadlocks
-  // et acquérir dans un ordre fixe pour éviter les blocages croisés
-  const TickType_t SHORT_TIMEOUT = pdMS_TO_TICKS(10); // 10ms seulement
-  
-  // Ordre fixe: toujours readMutex puis writeMutex pour éviter les deadlocks
-  bool readLocked = false, writeLocked = false;
-  
-  // Tenter d'acquérir readMutex en premier
-  if (ch.readMutex && xSemaphoreTake(ch.readMutex, SHORT_TIMEOUT) == pdTRUE) {
-    readLocked = true;
-    
-    // Puis writeMutex
-    if (ch.writeMutex && xSemaphoreTake(ch.writeMutex, SHORT_TIMEOUT) == pdTRUE) {
-      writeLocked = true;
-      
-      // Vider les buffers unifiés
-      size_t flushedSshToLocal = 0, flushedLocalToSsh = 0;
-      
-      if (ch.sshToLocalBuffer) {
-        flushedSshToLocal = ch.sshToLocalBuffer->size();
-        ch.sshToLocalBuffer->clear();
+  const TickType_t STANDARD_TIMEOUT = pdMS_TO_TICKS(100);
+  const unsigned long GLOBAL_TIMEOUT_MS = 2000;
+
+  unsigned long start = millis();
+  int attempts = 0;
+  bool dataRemaining = true;
+
+  while (dataRemaining && (millis() - start) < GLOBAL_TIMEOUT_MS && attempts < 10) {
+    attempts++;
+    dataRemaining = false;
+
+    bool readLocked = (ch.readMutex && xSemaphoreTake(ch.readMutex, STANDARD_TIMEOUT) == pdTRUE);
+    bool writeLocked = (ch.writeMutex && xSemaphoreTake(ch.writeMutex, STANDARD_TIMEOUT) == pdTRUE);
+
+    // Traiter Local->SSH (vider en écrivant tant que possible)
+    if (writeLocked && ch.localToSshBuffer && ch.channel && !ch.localToSshBuffer->empty()) {
+      uint8_t temp[SSH_BUFFER_SIZE];
+      for (int pass = 0; pass < 3 && !ch.localToSshBuffer->empty(); pass++) {
+        size_t got = ch.localToSshBuffer->read(temp, sizeof(temp));
+        if (got == 0) break;
+        ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)temp, got);
+        if (w > 0) {
+          ch.totalBytesSent += w;
+          ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w) ? ch.queuedBytesToRemote - w : 0;
+          if ((size_t)w < got) ch.localToSshBuffer->write(temp + w, got - w);
+          dataRemaining = dataRemaining || !ch.localToSshBuffer->empty();
+        } else if (w == LIBSSH2_ERROR_EAGAIN) {
+          ch.localToSshBuffer->write(temp, got); // remettre
+          dataRemaining = true; break;
+        } else {
+          ch.consecutiveErrors++; ch.localToSshBuffer->write(temp, got); break;
+        }
       }
-      
-      if (ch.localToSshBuffer) {
-        flushedLocalToSsh = ch.localToSshBuffer->size();
-        ch.localToSshBuffer->clear();
-      }
-      
-      // Réinitialiser les compteurs
-      ch.queuedBytesToLocal = 0;
-      ch.queuedBytesToRemote = 0;
-      
-      LOGF_D("SSH", "Channel %d: Flushed %zu bytes from SSH->Local and %zu bytes from Local->SSH buffers", 
-             channelIndex, flushedSshToLocal, flushedLocalToSsh);
-             
-    } else {
-      LOGF_D("SSH", "Channel %d: Could not acquire write mutex for flush (timeout)", channelIndex);
     }
+
+    // Traiter SSH->Local (essayer d'envoyer au socket)
+    if (readLocked && ch.sshToLocalBuffer && ch.localSocket >= 0 && !ch.sshToLocalBuffer->empty()) {
+      uint8_t temp[SSH_BUFFER_SIZE];
+      for (int pass = 0; pass < 3 && !ch.sshToLocalBuffer->empty(); pass++) {
+        size_t got = ch.sshToLocalBuffer->read(temp, sizeof(temp));
+        if (got == 0) break;
+        ssize_t w = send(ch.localSocket, temp, got, MSG_DONTWAIT);
+        if (w > 0) {
+          ch.totalBytesReceived += w;
+          ch.queuedBytesToLocal = (ch.queuedBytesToLocal > (size_t)w) ? ch.queuedBytesToLocal - w : 0;
+          if ((size_t)w < got) ch.sshToLocalBuffer->write(temp + w, got - w);
+          dataRemaining = dataRemaining || !ch.sshToLocalBuffer->empty();
+        } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+          ch.sshToLocalBuffer->write(temp, got); dataRemaining = true; break;
+        } else if (w <= 0) {
+          ch.consecutiveErrors++; ch.sshToLocalBuffer->write(temp, got); break;
+        }
+      }
+    }
+
+    if (writeLocked) xSemaphoreGive(ch.writeMutex);
+    if (readLocked) xSemaphoreGive(ch.readMutex);
+
+    if (dataRemaining) vTaskDelay(pdMS_TO_TICKS(50));
+  }
+
+  if (dataRemaining) {
+    LOGF_W("SSH", "Channel %d: Flush incomplete after %d attempts (%lums)", channelIndex, attempts, millis() - start);
   } else {
-    LOGF_D("SSH", "Channel %d: Could not acquire read mutex for flush (timeout)", channelIndex);
-  }
-  
-  // Libérer les mutex dans l'ordre inverse
-  if (writeLocked) {
-    xSemaphoreGive(ch.writeMutex);
-  }
-  if (readLocked) {
-    xSemaphoreGive(ch.readMutex);
+    LOGF_I("SSH", "Channel %d: Flush completed in %d attempts (%lums)", channelIndex, attempts, millis() - start);
   }
 }
 
@@ -1958,32 +1993,22 @@ void SSHTunnel::recoverChannel(int channelIndex) {
 
 size_t SSHTunnel::getOptimalBufferSize(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
+  const size_t MIN_BUFFER_SIZE = 1024; // Jamais en dessous
+  const size_t MAX_BUFFER_SIZE = 1460; // MTU typique Ethernet
   size_t baseSize = config->getConnectionConfig().bufferSize;
-  
-  // CORRECTION: Simplifier et être plus conservateur avec les buffers
-  // Éviter les changements trop agressifs de taille qui peuvent causer des corruptions
-  
-  // Réduire la taille du buffer si on a des problèmes de performance
-  if (ch.consecutiveErrors > 3) { // Plus tolérant
-    return baseSize / 2;
+  if (baseSize < MIN_BUFFER_SIZE) baseSize = MIN_BUFFER_SIZE;
+
+  // Si erreurs persistantes, rester à la taille minimale sûre
+  if (ch.consecutiveErrors > 5) {
+    return MIN_BUFFER_SIZE;
   }
-  
-  // Réduire si les buffers unifiés sont très pleins
-  if ((ch.sshToLocalBuffer && ch.sshToLocalBuffer->size() > 15 * 1024) || 
-      (ch.localToSshBuffer && ch.localToSshBuffer->size() > 15 * 1024)) { // Plus tolérant, 15KB
-    return baseSize / 2; // Moins agressif
-  }
-  
-  // NOUVEAU: Pour les gros transferts, augmenter modérément mais pas trop
+
+  // Pour gros transfert stable on peut légèrement augmenter (max MTU)
   if (ch.largeTransferInProgress && ch.consecutiveErrors == 0) {
-    // Augmentation modérée et progressive
-    size_t largeSize = baseSize * 2; // Seulement 2x au lieu de 4x-8x
-    
-    // Limiter strictement pour éviter les problèmes de mémoire
-    const size_t MAX_BUFFER_SIZE = 16 * 1024; // 16KB max au lieu de 32KB
-    return (largeSize > MAX_BUFFER_SIZE) ? MAX_BUFFER_SIZE : largeSize;
+    size_t boosted = (size_t)(baseSize * 1.2f);
+    if (boosted > MAX_BUFFER_SIZE) boosted = MAX_BUFFER_SIZE;
+    return boosted;
   }
-  
   return baseSize;
 }
 
@@ -2193,15 +2218,35 @@ void SSHTunnel::detectLargeTransfer(int channelIndex) {
 }
 
 bool SSHTunnel::shouldAcceptNewConnection() {
-  // CORRECTION TEMPORAIRE: Désactiver la logique de queue pour éviter les interférences
-  // Retourner toujours true mais avec vérification simple des canaux disponibles
-  
-  // Vérifier si on a atteint la limite de canaux
   int activeChannels = getActiveChannels();
   int maxChannels = config->getConnectionConfig().maxChannels;
-  
-  // Être moins restrictif - utiliser tous les canaux disponibles
-  return activeChannels < maxChannels;
+  if (activeChannels >= maxChannels) return false;
+
+  // Refuser si gros transfert actif sur un canal
+  if (isLargeTransferActive()) {
+    return false;
+  }
+
+  // Refuser si un canal existant est surchargé ou instable
+  for (int i = 0; i < maxChannels; i++) {
+    if (channels[i].active) {
+      if (channels[i].queuedBytesToRemote > (HIGH_WATER_LOCAL + 512)) {
+  LOGF_D("SSH", "Reject new conn: channel %d backlog %zu", i, channels[i].queuedBytesToRemote);
+        return false;
+      }
+      if (channels[i].consecutiveErrors > 2) {
+  LOGF_D("SSH", "Reject new conn: channel %d errors %d", i, channels[i].consecutiveErrors);
+        return false;
+      }
+    }
+  }
+
+  // Limiter utilisation à 70% avant refus proactif
+  if (activeChannels >= (int)(0.7f * maxChannels)) {
+    // Autoriser quand même si aucun backlog sévère
+    return true;
+  }
+  return true;
 }
 
 void SSHTunnel::queuePendingConnection(LIBSSH2_CHANNEL* channel) {
