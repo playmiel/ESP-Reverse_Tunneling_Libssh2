@@ -1554,8 +1554,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         size_t offset = 0; int directPass = 0; size_t directWrittenTotal = 0;
         while (offset < (size_t)localRead && directPass < MAX_WRITES_PER_PASS) {
           size_t remain = (size_t)localRead - offset;
-          // Vérifier fenêtre
-            // (Contrôle fenêtre SSH désactivé faute de signature correcte sur cible)
+          // Check window
+            // (SSH window control disabled due to incorrect signature on target)
           ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)txBuffer + offset, remain);
           if (w > 0) {
             offset += w; directPass++; directWrittenTotal += w;
