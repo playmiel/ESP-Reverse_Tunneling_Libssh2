@@ -2232,11 +2232,11 @@ bool SSHTunnel::shouldAcceptNewConnection() {
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
       if (channels[i].queuedBytesToRemote > (HIGH_WATER_LOCAL + 512)) {
-  LOGF_D("SSH", "Reject new conn: channel %d backlog %zu", i, channels[i].queuedBytesToRemote);
+        LOGF_D("SSH", "Reject new conn: channel %d backlog %zu", i, channels[i].queuedBytesToRemote);
         return false;
       }
       if (channels[i].consecutiveErrors > 2) {
-  LOGF_D("SSH", "Reject new conn: channel %d errors %d", i, channels[i].consecutiveErrors);
+        LOGF_D("SSH", "Reject new conn: channel %d errors %d", i, channels[i].consecutiveErrors);
         return false;
       }
     }
