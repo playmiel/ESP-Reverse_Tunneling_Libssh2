@@ -1502,7 +1502,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       // Vérifier fenêtre SSH
       size_t winSize = 0, winUsed = 0;
   // NOTE: libssh2_channel_window_write_ex signature semble différente sur cible; suppression contrôle fenêtre direct
-  // (Amélioration future: adapter selon header effectif.)
+  // (Future improvement: adapt according to actual header.)
   (void)winSize; (void)winUsed; // silencieux
 
       uint8_t temp[SSH_BUFFER_SIZE];
