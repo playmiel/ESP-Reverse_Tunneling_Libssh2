@@ -1483,6 +1483,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   if (ch.queuedBytesToRemote > CRITICAL_WATER_LOCAL) {
   LOGF_W("SSH", "Channel %d: Critical backpressure (%zu bytes) - skipping local read", 
            channelIndex, ch.queuedBytesToRemote);
+    return false;
   }
 
   if (!lockChannelWrite(channelIndex)) {
