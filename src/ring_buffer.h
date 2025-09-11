@@ -7,16 +7,16 @@
 #include "logger.h"
 #include <cstring>
 
-// Structure pour les données en attente (compatible avec l'existant)
+// Structure for pending data (compatible with existing logic)
 struct PendingData {
-    uint8_t data[1024];  // Buffer statique au lieu d'un pointeur pour éviter les allocations
+    uint8_t data[1024];  // Static buffer instead of pointer to avoid dynamic allocations
     size_t size;
     size_t offset;
     unsigned long timestamp;
-    uint32_t checksum; // NOUVEAU: Checksum simple pour détecter les duplications
+    uint32_t checksum; // NEW: Simple checksum to detect duplication
 };
 
-// Ring buffer générique thread-safe
+// Generic thread-safe ring buffer
 template<typename T>
 class RingBuffer {
 private:
@@ -39,7 +39,7 @@ public:
     }
     
     ~RingBuffer() {
-        // Nettoyer les données PendingData si c'est le bon type
+    // Clear pending data objects if applicable
         clear();
         SAFE_FREE(buffer);
         SAFE_DELETE_SEMAPHORE(mutex);
@@ -53,7 +53,7 @@ public:
         
         if (count >= capacity) {
             xSemaphoreGive(mutex);
-            return false; // Buffer plein
+            return false; // Buffer full
         }
         buffer[writePos] = item;
         writePos = (writePos + 1) % capacity;
@@ -71,7 +71,7 @@ public:
         
         if (count == 0) {
             xSemaphoreGive(mutex);
-            return false; // Buffer vide
+            return false; // Buffer empty
         }
         item = buffer[readPos];
         readPos = (readPos + 1) % capacity;
@@ -102,7 +102,7 @@ public:
             return;
         }
         
-        // Réinitialiser les positions et le compteur
+    // Reset indexes and counter
         writePos = 0;
         readPos = 0;
         count = 0;
@@ -117,7 +117,7 @@ public:
     float usage() const { return (float)count / capacity * 100.0f; }
 };
 
-// Ring buffer spécialisé pour les données brutes
+// Specialized ring buffer for raw byte data
 class DataRingBuffer {
 private:
     uint8_t* buffer;
@@ -154,19 +154,18 @@ public:
         size_t available = capacity - count;
         size_t toWrite = (len > available) ? available : len;
         
-        // Écriture optimisée en tenant compte du wrap-around
+    // Optimized write handling wrap-around
         size_t firstChunk = capacity - writePos;
         if (toWrite <= firstChunk) {
-            // Pas de wrap-around
+            // No wrap-around
             memcpy(buffer + writePos, data, toWrite);
         } else {
-            // Wrap-around nécessaire
+            // Wrap-around required
             memcpy(buffer + writePos, data, firstChunk);
             memcpy(buffer, data + firstChunk, toWrite - firstChunk);
         }
         writePos = (writePos + toWrite) % capacity;
-        count = count + toWrite;
-        count += toWrite;
+    count = count + toWrite; // (une seule fois)
         
         xSemaphoreGive(mutex);
         return toWrite;
@@ -181,19 +180,18 @@ public:
         
         size_t toRead = (len > count) ? count : len;
         
-        // Lecture optimisée en tenant compte du wrap-around
+    // Optimized read handling wrap-around
         size_t firstChunk = capacity - readPos;
         if (toRead <= firstChunk) {
-            // Pas de wrap-around
+            // No wrap-around
             memcpy(data, buffer + readPos, toRead);
         } else {
-            // Wrap-around nécessaire
+            // Wrap-around required
             memcpy(data, buffer + readPos, firstChunk);
             memcpy(data + firstChunk, buffer, toRead - firstChunk);
         }
         readPos = (readPos + toRead) % capacity;
-        count = count - toRead;
-        count -= toRead;
+    count = count - toRead; // (une seule fois)
         
         xSemaphoreGive(mutex);
         return toRead;
@@ -208,7 +206,7 @@ public:
         
         size_t toRead = (len > count) ? count : len;
         
-        // Lecture sans modification des pointeurs
+    // Read without modifying indices
         size_t firstChunk = capacity - readPos;
         if (toRead <= firstChunk) {
             memcpy(data, buffer + readPos, toRead);
@@ -239,12 +237,12 @@ public:
     bool full() const { return count >= capacity; }
     float usage() const { return (float)count / capacity * 100.0f; }
     
-    // Diagnostiques
+    // Diagnostics
     void printStats() const {
         LOGF_I("RING", "%s: %d/%d bytes (%.1f%%), rPos=%d, wPos=%d", 
                tag, count, capacity, usage(), readPos, writePos);
     }
 };
 
-// Template specialization pour PendingData
+// Template specialization for PendingData
 typedef RingBuffer<PendingData> PendingDataRing;

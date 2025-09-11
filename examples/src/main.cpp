@@ -5,16 +5,16 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
-// Configuration WiFi
+// WiFi configuration
 const char* ssid = "YOUR_WIFI_SSID";
 const char* password = "YOUR_WIFI_PASSWORD";
 
-// Instance du tunnel SSH
+// SSH tunnel instance
 SSHTunnel tunnel;
 
-// Variables pour le monitoring
+// Monitoring variables
 unsigned long lastStatsReport = 0;
-const unsigned long STATS_INTERVAL = 10000; // 10 secondes
+const unsigned long STATS_INTERVAL = 10000; // 10 seconds
 
 void connectWiFi();
 void reportStats();
@@ -28,19 +28,19 @@ void setup() {
 
   LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version améliorée avec configuration dynamique");
 
-  // Configuration du tunnel SSH
+  // SSH tunnel configuration
   configureSSHTunnel();
 
-  // Connexion WiFi
+  // WiFi connection
   connectWiFi();
 
-  // Initialisation du tunnel SSH
+  // SSH tunnel initialization
   if (!tunnel.init()) {
     LOG_E("MAIN", "Failed to initialize SSH tunnel");
     return;
   }
 
-  // Démarrage de la connexion SSH
+  // Start SSH connection
   if (!tunnel.connectSSH()) {
     LOG_E("MAIN", "Failed to connect SSH tunnel");
   }
@@ -49,19 +49,19 @@ void setup() {
 }
 
 void loop() {
-  // Vérifier la connexion WiFi
+  // Check WiFi connection
   if (WiFi.status() != WL_CONNECTED) {
     LOG_W("MAIN", "WiFi disconnected, reconnecting...");
     connectWiFi();
   }
 
-  // Traitement du tunnel SSH
+  // SSH tunnel processing
   tunnel.loop();
 
-  // Rapport de statistiques
+  // Statistics report
   reportStats();
 
-  // Utiliser vTaskDelay au lieu de delay pour être plus compatible FreeRTOS
+  // Use vTaskDelay instead of delay for better FreeRTOS compatibility
   vTaskDelay(pdMS_TO_TICKS(1));
 }
 
@@ -87,90 +87,85 @@ void connectWiFi() {
 }
 
 void configureSSHTunnel() {
-  LOG_I("CONFIG", "Configuration du tunnel SSH...");
+  LOG_I("CONFIG", "Configuring SSH tunnel...");
   
-  // ===== MÉTHODE 1: Configuration SSH avec mot de passe =====
+  // ===== METHOD 1: SSH configuration with password =====
   globalSSHConfig.setSSHServer(
-    "your-remote-server.com",  // Remplacez par votre serveur
-    22,                        // Port SSH
-    "your_username",           // Nom d'utilisateur
-    "your_password"            // Mot de passe
+  "your-remote-server.com",  // Replace with your server
+  22,                        // SSH port
+  "your_username",           // Username
+  "your_password"            // Password
   );
 
-  // ===== MÉTHODE 2: Configuration SSH avec clé depuis LittleFS =====
-  // Cette méthode charge automatiquement les clés depuis LittleFS en mémoire
+  // ===== METHOD 2: SSH configuration with key from LittleFS =====
+  // This method automatically loads keys from LittleFS into memory
   // globalSSHConfig.setSSHKeyAuth(
   //   "your-remote-server.com",
   //   22,
   //   "your_username",
-  //   "/ssh_key",       // Chemin vers la clé privée dans LittleFS
-  //   ""                // Passphrase pour la clé (optionnel)
+  //   "/ssh_key",       // Path to private key in LittleFS
+  //   ""                // Passphrase for the key (optional)
   // );
 
-  // ===== MÉTHODE 3: Configuration SSH avec clés directement en mémoire =====
-  // Exemple de clé privée RSA (à remplacer par votre vraie clé)
+  // ===== METHOD 3: SSH configuration with keys directly in memory =====
+  // Example RSA private/public key placeholders (DO NOT USE IN PRODUCTION)
   /*
-  String privateKey = R"(-----BEGIN OPENSSH PRIVATE KEY-----
-b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAFwAAAAdzc2gtcn
-NhAAAAAwEAAQAAAQEA... (votre clé privée ici)
------END OPENSSH PRIVATE KEY-----)";
-  
-  String publicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... (votre clé publique ici) user@host";
-  
+  String privateKey = "PLACEHOLDER_PRIVATE_KEY_EXAMPLE_DO_NOT_USE";
+  String publicKey  = "ssh-rsa PLACEHOLDER_PUBLIC_KEY_EXAMPLE_DO_NOT_USE user@host"; // Minimal illustrative form
   globalSSHConfig.setSSHKeyAuthFromMemory(
     "your-remote-server.com",
     22,
     "your_username",
     privateKey,
     publicKey,
-    ""  // Passphrase pour la clé (optionnel)
+    ""  // Passphrase for the key (optional)
   );
   */
 
-  // ===== MÉTHODE 4: Charger les clés depuis LittleFS puis les utiliser en mémoire =====
-  // Initialiser LittleFS si pas encore fait
+  // ===== METHOD 4: Load keys from LittleFS then use them in memory =====
+  // Initialize LittleFS if not already done
   // if (!LittleFS.begin(true)) {
   //   LOG_E("CONFIG", "Failed to initialize LittleFS");
   //   return;
   // }
   
-  // Charger manuellement les clés depuis LittleFS
+  // Manually load keys from LittleFS
   // if (globalSSHConfig.loadSSHKeysFromLittleFS("/ssh_key")) {
   //   LOG_I("CONFIG", "SSH keys loaded from LittleFS and stored in memory");
   // } else {
   //   LOG_E("CONFIG", "Failed to load SSH keys from LittleFS");
   // }
   
-  // Configuration du tunnel
+  // Tunnel configuration
   globalSSHConfig.setTunnelConfig(
-    "0.0.0.0",        // Adresse de bind sur le serveur distant
-    8080,             // Port de bind sur le serveur distant
-    "192.168.1.100",  // Adresse locale à tunneler
-    80                // Port local à tunneler
+  "0.0.0.0",        // Bind address on remote server
+  8080,             // Bind port on remote server
+  "192.168.1.100",  // Local address to tunnel
+  80                // Local port to tunnel
   );
   
-  // Configuration de la connexion
+  // Connection configuration
   globalSSHConfig.setConnectionConfig(
-    30,    // Intervalle keep-alive (secondes)
-    5000,  // Délai de reconnexion (ms)
-    5,     // Nombre max de tentatives de reconnexion
-    30     // Timeout de connexion (secondes)
+  30,    // Keep-alive interval (seconds)
+  5000,  // Reconnection delay (ms)
+  5,     // Max reconnection attempts
+  30     // Connection timeout (seconds)
   );
   
-  // Configuration des buffers
+  // Buffer configuration
   globalSSHConfig.setBufferConfig(
-    8192,    // Taille des buffers
-    5,       // Nombre max de canaux
-    1800000  // Timeout des canaux (ms) - 30 minutes
+  8192,    // Buffer size
+  5,       // Max number of channels
+  1800000  // Channel timeout (ms) - 30 minutes
   );
   
-  // Configuration du debug
+  // Debug configuration
   globalSSHConfig.setDebugConfig(
-    true,   // Debug activé
-    115200  // Baud rate série
+  true,   // Debug enabled
+  115200  // Serial baud rate
   );
   
-  LOG_I("CONFIG", "Configuration terminée");
+  LOG_I("CONFIG", "Configuration complete");
 }
 
 void reportStats() {
@@ -181,20 +176,20 @@ void reportStats() {
 
   lastStatsReport = now;
 
-  // Vérification de l'état de la heap AVANT les logs
+  // Check heap state BEFORE logs
   size_t freeHeap = ESP.getFreeHeap();
   size_t minFreeHeap = ESP.getMinFreeHeap();
   size_t largestFreeBlock = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
   
-  // Rapport de statut avec vérification mémoire
-  if (freeHeap > 10000) { // Seulement si on a assez de mémoire
+  // Status report with memory verification
+  if (freeHeap > 10000) { // Only if we have enough memory
     LOGF_I("STATS", "Tunnel State: %s", tunnel.getStateString().c_str());
     LOGF_I("STATS", "Active Channels: %d", tunnel.getActiveChannels());
     LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
     LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
   }
 
-  // Calcul du débit (approximatif)
+  // Throughput calculation (approximate)
   static unsigned long lastBytesSent = 0;
   static unsigned long lastBytesReceived = 0;
 
@@ -204,7 +199,7 @@ void reportStats() {
   unsigned long sentRate = (bytesSent - lastBytesSent) * 1000 / STATS_INTERVAL;
   unsigned long receivedRate = (bytesReceived - lastBytesReceived) * 1000 / STATS_INTERVAL;
 
-  if (freeHeap > 8000) { // Réduire les logs si mémoire faible
+  if (freeHeap > 8000) { // Reduce logs if low memory
     LOGF_I("STATS", "Send Rate: %lu B/s", sentRate);
     LOGF_I("STATS", "Receive Rate: %lu B/s", receivedRate);
   }
@@ -212,15 +207,15 @@ void reportStats() {
   lastBytesSent = bytesSent;
   lastBytesReceived = bytesReceived;
 
-  // Information WiFi (essentiel)
+  // WiFi info (essential)
   LOGF_I("WIFI", "RSSI: %d dBm", WiFi.RSSI());
 
-  // Information mémoire (critique)
+  // Memory info (critical)
   LOGF_I("SYSTEM", "Free Heap: %d bytes (min: %d, largest: %d)", 
          freeHeap, minFreeHeap, largestFreeBlock);
   LOGF_I("SYSTEM", "Uptime: %lu seconds", millis() / 1000);
   
-  // Alerte si mémoire critique
+  // Alert if critical memory
   if (freeHeap < 50000) {
     LOG_W("MEMORY", "LOW HEAP WARNING!");
   }
