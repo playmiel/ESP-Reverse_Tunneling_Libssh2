@@ -7,15 +7,15 @@
 #include <esp_heap_caps.h>
 #include "logger.h"
 
-// Niveaux de fonctionnalités (configurable via -DMEMFIX_LEVEL=<0|1|2>)
-// 0 = OFF: pas de vérif heap, pas de memset, minimal overhead
-// 1 = LIGHT: logs d'erreur si malloc échoue, pas de vérif heap ni memset
-// 2 = FULL (défaut): vérif heap périodique et memset des buffers alloués
+// Feature levels (configurable via -DMEMFIX_LEVEL=<0|1|2>)
+// 0 = OFF: no heap check, no memset, minimal overhead
+// 1 = LIGHT: error logs if malloc fails, no heap check or memset
+// 2 = FULL (default): periodic heap check and memset of allocated buffers
 #ifndef MEMFIX_LEVEL
 #define MEMFIX_LEVEL 0
 #endif
 
-// Macros pour améliorer la gestion mémoire
+// Macros to improve memory management
 #define SAFE_FREE(ptr) do { \
     if ((ptr) != nullptr) { \
         free(ptr); \
@@ -30,7 +30,7 @@
     } \
 } while(0)
 
-// Fonction pour vérifier l'état de la heap
+// Function to check heap health
 inline void checkHeapHealth() {
 #if MEMFIX_LEVEL >= 2
     size_t freeHeap = ESP.getFreeHeap();
@@ -43,11 +43,11 @@ inline void checkHeapHealth() {
         LOGF_W("MEM", "Fragmentation: largest %u vs free %u", (unsigned)largestFreeBlock, (unsigned)freeHeap);
     }
 #else
-    // No-op en mode OFF/LIGHT
+    // No-op in OFF/LIGHT modes
 #endif
 }
 
-// Allocation sécurisée avec vérification
+// Safe allocation with verification
 inline void* safeMalloc(size_t size, const char* tag = "UNKNOWN") {
 #if MEMFIX_LEVEL >= 2
     checkHeapHealth();
@@ -55,7 +55,7 @@ inline void* safeMalloc(size_t size, const char* tag = "UNKNOWN") {
     void* ptr = malloc(size);
     if (ptr == nullptr) {
 #if MEMFIX_LEVEL >= 1
-        LOGF_E("MEM", "malloc failed (%u bytes) tag=%s", (unsigned)size, tag);
+    LOGF_E("MEM", "malloc failed (%u bytes) tag=%s", (unsigned)size, tag);
 #endif
         return nullptr;
     }
@@ -67,7 +67,7 @@ inline void* safeMalloc(size_t size, const char* tag = "UNKNOWN") {
 #endif
     return ptr;
 }
-// Réallocation sécurisée avec vérification
+// Safe reallocation with verification
 inline void* safeRealloc(void* ptr, size_t size, const char* tag = "UNKNOWN") {
 #if MEMFIX_LEVEL >= 2
     checkHeapHealth();
@@ -84,7 +84,7 @@ inline void* safeRealloc(void* ptr, size_t size, const char* tag = "UNKNOWN") {
 #endif
     return newPtr;
 }
-// Nettoyage périodique de la heap
+// Periodic heap maintenance
 inline void performHeapMaintenance() {
 #if MEMFIX_LEVEL >= 2
     heap_caps_check_integrity_all(true);
@@ -92,7 +92,7 @@ inline void performHeapMaintenance() {
     size_t total_internal = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     LOGF_D("MEM", "Free: %u internal, %u total", (unsigned)total_internal, (unsigned)total_free);
 #else
-    // No-op en mode OFF/LIGHT
+    // No-op in OFF/LIGHT modes
 #endif
 }
 
