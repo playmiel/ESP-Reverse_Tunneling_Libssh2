@@ -31,10 +31,9 @@ private:
 public:
     RingBuffer(size_t size, const char* tagName = "RING_BUFFER") : capacity(size), writePos(0), readPos(0), count(0), tag(tagName) {
         buffer = (T*)safeMalloc(sizeof(T) * capacity, tag);
-        mutex = xSemaphoreCreateBinary();
-        if (mutex) {
-            xSemaphoreGive(mutex);
-        }
+        // Use a real mutex to benefit from priority inheritance and avoid
+        // FreeRTOS assertion in vTaskPriorityDisinheritAfterTimeout
+        mutex = xSemaphoreCreateMutex();
         LOGF_I("RING", "Created %s: capacity=%d, size=%d bytes", tag, capacity, sizeof(T) * capacity);
     }
     
@@ -131,10 +130,8 @@ private:
 public:
     DataRingBuffer(size_t size, const char* tagName = "DATA_RING_BUFFER") : capacity(size), writePos(0), readPos(0), count(0), tag(tagName) {
         buffer = (uint8_t*)safeMalloc(capacity, tag);
-        mutex = xSemaphoreCreateBinary();
-        if (mutex) {
-            xSemaphoreGive(mutex);
-        }
+        // Use a real mutex here as well (not a binary semaphore)
+        mutex = xSemaphoreCreateMutex();
         LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
     }
     

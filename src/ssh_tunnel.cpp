@@ -1216,6 +1216,7 @@ void SSHTunnel::unlockChannelRead(int channelIndex) {
   }
   
   if (channels[channelIndex].readMutex != NULL) {
+    // Defensive: try to give; if it fails in future, convert to counting log
     xSemaphoreGive(channels[channelIndex].readMutex);
   }
 }
@@ -1734,13 +1735,16 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
   // OPTIMIZED: Use new unified buffers based on direction
   DataRingBuffer* targetBuffer = isRead ? ch.sshToLocalBuffer : ch.localToSshBuffer;
   
-  // Select proper mutex for synchronization
+  // Select proper mutex for synchronization. Important: queueData can be called
+  // from contexts where the corresponding channel mutex is already held
+  // (e.g., processChannelWrite holds writeMutex). To avoid re-entrant deadlocks
+  // and FreeRTOS asserts (vTaskPriorityDisinheritAfterTimeout), we attempt a
+  // non-blocking lock; if unavailable, we proceed relying on DataRingBuffer's
+  // own internal mutex for thread-safety.
   SemaphoreHandle_t mutex = isRead ? ch.readMutex : ch.writeMutex;
-  
-  // Protect access with mutex (reduced 50ms timeout)
-  if (xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-    ch.eagainErrors++; // Compter comme erreur EAGAIN
-    return false;
+  bool locked = false;
+  if (mutex != NULL) {
+    locked = (xSemaphoreTake(mutex, 0) == pdTRUE); // try-lock only
   }
   
   // Check SSH window before enqueuing for Local->SSH direction
@@ -1771,7 +1775,9 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t* data, size_t size, bool isR
   }
 
   ch.lastActivity = millis();
-  xSemaphoreGive(mutex);
+  if (locked) {
+    xSemaphoreGive(mutex);
+  }
 
   if (totalQueued == 0) {
     ch.lostWriteChunks++;
