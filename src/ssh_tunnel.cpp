@@ -22,6 +22,17 @@
 #define FIXED_BUFFER_SIZE (8 * 1024)
 #define MAX_QUEUED_BYTES (32 * 1024)
 
+// Health/recovery tuning (reduce noisy recoveries and WARN spam)
+#ifndef HEALTH_UNHEALTHY_THRESHOLD
+#define HEALTH_UNHEALTHY_THRESHOLD 3     // consecutive unhealthy checks before hard recovery
+#endif
+#ifndef RECOVERY_COOLDOWN_MS
+#define RECOVERY_COOLDOWN_MS 3000        // min delay between hard recoveries per channel
+#endif
+#ifndef HEALTH_WARN_THROTTLE_MS
+#define HEALTH_WARN_THROTTLE_MS 5000     // rate-limit health WARN logs per channel
+#endif
+
 SSHTunnel::SSHTunnel()
     : session(nullptr), listener(nullptr), socketfd(-1),
       state(TUNNEL_DISCONNECTED), lastKeepAlive(0), lastConnectionAttempt(0),
@@ -775,6 +786,11 @@ bool SSHTunnel::handleNewConnection() {
   channels[channelIndex].transferredBytes = 0;
   channels[channelIndex].peakBytesPerSecond = 0;
 
+  // Health tracking init
+  channels[channelIndex].healthUnhealthyCount = 0;
+  channels[channelIndex].lastHardRecoveryMs = 0;
+  channels[channelIndex].lastHealthWarnMs = 0;
+
   libssh2_channel_set_blocking(channel, 0);
 
   LOGF_I("SSH", "New tunnel connection established (channel %d)", channelIndex);
@@ -789,19 +805,45 @@ void SSHTunnel::handleChannelData(int channelIndex) {
 
   unsigned long now = millis();
 
-  // Check channel health before processing data
+  // Check channel health before processing data (with hysteresis and cooldown)
   if (!isChannelHealthy(channelIndex)) {
-  // FIX: Immediate recovery of stuck mutexes instead of waiting for multiple errors
-    LOGF_W("SSH", "Channel %d: Unhealthy detected, forcing immediate recovery", channelIndex);
-    recoverChannel(channelIndex);
-    
-  // Verify if recovery succeeded
+    ch.healthUnhealthyCount++;
+    // Prefer a gentle approach first
+    if (ch.healthUnhealthyCount < HEALTH_UNHEALTHY_THRESHOLD) {
+      if (now - ch.lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+        LOGF_D("SSH", "Channel %d: Unhealthy #%d -> attempting graceful recovery",
+               channelIndex, ch.healthUnhealthyCount);
+        ch.lastHealthWarnMs = now;
+      }
+      gracefulRecoverChannel(channelIndex);
+    } else {
+      // Only allow a hard recovery after cooldown
+      if (now - ch.lastHardRecoveryMs > RECOVERY_COOLDOWN_MS) {
+        if (now - ch.lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+          LOGF_W("SSH", "Channel %d: Unhealthy threshold reached -> hard recovery", channelIndex);
+          ch.lastHealthWarnMs = now;
+        }
+        recoverChannel(channelIndex);
+        ch.lastHardRecoveryMs = now;
+        ch.healthUnhealthyCount = 0; // reset after a hard attempt
+      } else {
+        if (now - ch.lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+          LOGF_I("SSH", "Channel %d: Skipping hard recovery (cooldown)", channelIndex);
+          ch.lastHealthWarnMs = now;
+        }
+      }
+    }
+
+    // Verify if recovery succeeded
     if (!isChannelHealthy(channelIndex)) {
       LOGF_E("SSH", "Channel %d: Recovery failed, closing channel", channelIndex);
       closeChannel(channelIndex);
       return;
     } else {
-      LOGF_I("SSH", "Channel %d: Recovery successful, continuing", channelIndex);
+      if (now - ch.lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+        LOGF_I("SSH", "Channel %d: Recovery successful, continuing", channelIndex);
+        ch.lastHealthWarnMs = now;
+      }
     }
   }
 
@@ -829,7 +871,8 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   // Update activity & reset errors on successful traffic
   if (readSuccess || writeSuccess) {
     ch.lastActivity = now;
-  ch.consecutiveErrors = 0; // Reset errors after success
+    ch.consecutiveErrors = 0; // Reset errors after success
+    ch.healthUnhealthyCount = 0; // Healthy traffic observed
   }
 
   // Check if channel should be gracefully closed
@@ -908,6 +951,9 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.transferredBytes = 0;
   ch.peakBytesPerSecond = 0;
   ch.eagainErrors = 0;
+  ch.healthUnhealthyCount = 0;
+  ch.lastHardRecoveryMs = 0;
+  ch.lastHealthWarnMs = 0;
   
   // OPTIMIZED: Clear unified buffers
   if (ch.sshToLocalBuffer) {
@@ -934,11 +980,25 @@ void SSHTunnel::cleanupInactiveChannels() {
     if (channels[i].active) {
       unsigned long timeSinceActivity = now - channels[i].lastActivity;
       
-      // NEW: Detect & repair stuck mutexes BEFORE other checks (prevents indefinite block after connection reset)
+      // NEW: Detect & repair with hysteresis/cooldown to avoid noisy recoveries
       if (!isChannelHealthy(i)) {
-        LOGF_W("SSH", "Channel %d detected as unhealthy, attempting recovery", i);
-        recoverChannel(i);
-  // Give the recovered channel a chance
+        channels[i].healthUnhealthyCount++;
+        if (channels[i].healthUnhealthyCount < HEALTH_UNHEALTHY_THRESHOLD) {
+          if (now - channels[i].lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+            LOGF_D("SSH", "Channel %d unhealthy (%d) -> graceful recover", i, channels[i].healthUnhealthyCount);
+            channels[i].lastHealthWarnMs = now;
+          }
+          gracefulRecoverChannel(i);
+        } else if (now - channels[i].lastHardRecoveryMs > RECOVERY_COOLDOWN_MS) {
+          if (now - channels[i].lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+            LOGF_W("SSH", "Channel %d unhealthy threshold -> hard recover", i);
+            channels[i].lastHealthWarnMs = now;
+          }
+          recoverChannel(i);
+          channels[i].lastHardRecoveryMs = now;
+          channels[i].healthUnhealthyCount = 0;
+        }
+        // Give the recovered channel a chance
         continue;
       }
       

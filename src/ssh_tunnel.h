@@ -58,6 +58,11 @@ struct TunnelChannel {
     unsigned long transferStartTime; // Start time of current transfer
     size_t transferredBytes;      // Bytes transferred in this transfer
     size_t peakBytesPerSecond;    // Peak throughput for this channel
+
+    // NEW: Health tracking to avoid aggressive recoveries/log spam
+    int healthUnhealthyCount;           // consecutive unhealthy detections
+    unsigned long lastHardRecoveryMs;   // last time a hard recovery was performed
+    unsigned long lastHealthWarnMs;     // last time we logged a WARN for health
 };
 
 class SSHTunnel {
