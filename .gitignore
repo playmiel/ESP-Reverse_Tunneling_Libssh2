@@ -6,6 +6,7 @@
 .vscode/ipch
 /.pio
 /.vscode
+/.github/copilot-instructions.md
 /logs
 # Build artifacts
 *.bin
