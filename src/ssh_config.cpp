@@ -2,11 +2,11 @@
 #include "logger.h"
 #include "LittleFS.h"
 
-// Instance globale de configuration
+// Global configuration instance
 SSHConfiguration globalSSHConfig;
 
 SSHConfiguration::SSHConfiguration() {
-    // Créer le sémaphore pour la protection thread-safe
+    // Create semaphore for thread-safe protection
     configMutex = xSemaphoreCreateMutex();
     if (configMutex == NULL) {
         LOG_E("CONFIG", "Failed to create configuration mutex");
@@ -38,10 +38,10 @@ void SSHConfiguration::setSSHKeyAuth(const String& host, int port, const String&
         sshConfig.port = port;
         sshConfig.username = username;
         sshConfig.privateKeyPath = privateKeyPath;
-        sshConfig.password = passphrase; // Utilisé comme passphrase pour la clé
+    sshConfig.password = passphrase; // Used as passphrase for the key
         sshConfig.useSSHKey = true;
         
-        // Essayer de charger les clés depuis LittleFS
+    // Try to load keys from LittleFS
         if (!loadSSHKeysFromLittleFS(privateKeyPath)) {
             LOGF_W("CONFIG", "Could not load SSH keys from LittleFS: %s", privateKeyPath.c_str());
         }
@@ -60,7 +60,7 @@ void SSHConfiguration::setSSHKeyAuthFromMemory(const String& host, int port, con
         sshConfig.username = username;
         sshConfig.privateKeyData = privateKeyData;
         sshConfig.publicKeyData = publicKeyData;
-        sshConfig.password = passphrase; // Utilisé comme passphrase pour la clé
+    sshConfig.password = passphrase; // Used as passphrase for the key
         sshConfig.useSSHKey = true;
         unlockConfig();
         
@@ -70,7 +70,7 @@ void SSHConfiguration::setSSHKeyAuthFromMemory(const String& host, int port, con
 }
 
 bool SSHConfiguration::loadSSHKeysFromLittleFS(const String& privateKeyPath) {
-    // Charger la clé privée
+    // Load private key
     File privateKeyFile = LittleFS.open(privateKeyPath, "r");
     if (!privateKeyFile) {
         LOGF_E("CONFIG", "Cannot open private key file: %s", privateKeyPath.c_str());
@@ -85,7 +85,7 @@ bool SSHConfiguration::loadSSHKeysFromLittleFS(const String& privateKeyPath) {
         return false;
     }
     
-    // Charger la clé publique (généralement .pub)
+    // Load public key (usually .pub)
     String publicKeyPath = privateKeyPath + ".pub";
     File publicKeyFile = LittleFS.open(publicKeyPath, "r");
     if (!publicKeyFile) {
@@ -108,18 +108,18 @@ bool SSHConfiguration::loadSSHKeysFromLittleFS(const String& privateKeyPath) {
 }
 
 bool SSHConfiguration::loadSSHKeysFromFile(const String& privateKeyPath) {
-    // Cette méthode peut être utilisée pour d'autres systèmes de fichiers
-    // Pour l'instant, on utilise LittleFS
+    // This method can be used for other file systems
+    // For now, we use LittleFS
     return loadSSHKeysFromLittleFS(privateKeyPath);
 }
 
 void SSHConfiguration::setSSHKeysInMemory(const String& privateKeyData, const String& publicKeyData) {
     if (lockConfig()) {
-        // Nettoyer et valider les clés
+    // Clean and validate keys
         String cleanPrivateKey = privateKeyData;
         String cleanPublicKey = publicKeyData;
         
-        // S'assurer que les clés se terminent par un retour à la ligne
+    // Ensure keys end with a newline
         if (!cleanPrivateKey.endsWith("\n")) {
             cleanPrivateKey += "\n";
         }
@@ -127,7 +127,7 @@ void SSHConfiguration::setSSHKeysInMemory(const String& privateKeyData, const St
             cleanPublicKey += "\n";
         }
         
-        // Remplacer les retours à la ligne Windows par Unix si nécessaire
+    // Replace Windows line endings with Unix if needed
         cleanPrivateKey.replace("\r\n", "\n");
         cleanPublicKey.replace("\r\n", "\n");
         
@@ -138,7 +138,7 @@ void SSHConfiguration::setSSHKeysInMemory(const String& privateKeyData, const St
         LOGF_I("CONFIG", "SSH keys set in memory (private: %d bytes, public: %d bytes)", 
                cleanPrivateKey.length(), cleanPublicKey.length());
         
-        // Validation basique des clés
+    // Basic key validation
         if (cleanPrivateKey.indexOf("-----BEGIN") == -1 || cleanPrivateKey.indexOf("-----END") == -1) {
             LOG_W("CONFIG", "Private key might not be properly formatted");
         }
@@ -191,7 +191,7 @@ void SSHConfiguration::diagnoseSSHKeys() const {
     
     LOG_I("CONFIG", "=== SSH Keys Diagnosis ===");
     
-    // Analyser la clé privée
+    // Analyze private key
     if (sshConfig.privateKeyData.length() > 0) {
         LOGF_I("CONFIG", "Private key length: %d bytes", sshConfig.privateKeyData.length());
         
@@ -208,7 +208,7 @@ void SSHConfiguration::diagnoseSSHKeys() const {
             LOG_W("CONFIG", "Private key format: Unknown or invalid");
         }
         
-        // Vérifier les fins de ligne
+    // Check line endings
         if (sshConfig.privateKeyData.indexOf("\r\n") != -1) {
             LOG_W("CONFIG", "Private key contains Windows line endings (CRLF)");
         } else if (sshConfig.privateKeyData.indexOf("\n") != -1) {
@@ -218,7 +218,7 @@ void SSHConfiguration::diagnoseSSHKeys() const {
         }
     }
     
-    // Analyser la clé publique
+    // Analyze public key
     if (sshConfig.publicKeyData.length() > 0) {
         LOGF_I("CONFIG", "Public key length: %d bytes", sshConfig.publicKeyData.length());
         
@@ -232,7 +232,7 @@ void SSHConfiguration::diagnoseSSHKeys() const {
             LOG_W("CONFIG", "Public key type: Unknown");
         }
         
-        // Extraire le premier mot (algorithme)
+    // Extract the first word (algorithm)
         int spaceIndex = sshConfig.publicKeyData.indexOf(' ');
         if (spaceIndex > 0) {
             String algorithm = sshConfig.publicKeyData.substring(0, spaceIndex);
@@ -243,7 +243,7 @@ void SSHConfiguration::diagnoseSSHKeys() const {
     unlockConfig();
 }
 
-// Méthodes de configuration known hosts
+// Known hosts configuration methods
 void SSHConfiguration::setHostKeyVerification(bool enable) {
     if (lockConfig()) {
         sshConfig.verifyHostKey = enable;
@@ -402,13 +402,13 @@ bool SSHConfiguration::validateSSHConfig() const {
     }
     
     if (sshConfig.useSSHKey) {
-        // Vérifier si nous avons les clés en mémoire
+    // Check if we have keys in memory
         if (sshConfig.privateKeyData.length() > 0 && sshConfig.publicKeyData.length() > 0) {
             LOG_I("CONFIG", "SSH keys available in memory");
             return true;
         }
         
-        // Sinon, vérifier le chemin du fichier
+    // Otherwise, check the file path
         if (sshConfig.privateKeyPath.length() == 0) {
             LOG_E("CONFIG", "SSH private key path cannot be empty when using key auth and keys not in memory");
             return false;

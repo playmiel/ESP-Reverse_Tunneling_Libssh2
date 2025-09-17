@@ -5,23 +5,23 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 
-// Structure pour la configuration SSH
+// Structure for SSH configuration
 struct SSHServerConfig {
     String host;
     int port;
     String username;
     String password;
     bool useSSHKey;
-    String privateKeyPath;  // Conservé pour compatibilité
-    String privateKeyData; // Contenu de la clé privée en mémoire
-    String publicKeyData;  // Contenu de la clé publique en mémoire
+    String privateKeyPath;  // Kept for compatibility
+    String privateKeyData; // Private key content in memory
+    String publicKeyData;  // Public key content in memory
     
     // Configuration known hosts
-    bool verifyHostKey;     // Activer/désactiver la vérification
-    String expectedHostKeyFingerprint; // Empreinte SHA256 attendue
-    String hostKeyType;     // Type de clé attendu (ssh-ed25519, ssh-rsa, etc.)
+    bool verifyHostKey;     // Enable/disable verification
+    String expectedHostKeyFingerprint; // Expected SHA256 fingerprint
+    String hostKeyType;     // Expected key type (ssh-ed25519, ssh-rsa, etc.)
     
-    // Constructeur par défaut
+    // Default constructor
     SSHServerConfig() : 
         host("your-remote-server.com"),
         port(22),
@@ -36,14 +36,14 @@ struct SSHServerConfig {
         hostKeyType("") {}
 };
 
-// Structure pour la configuration du tunnel
+// Structure for tunnel configuration
 struct TunnelConfig {
     String remoteBindHost;
     int remoteBindPort;
     String localHost;
     int localPort;
     
-    // Constructeur par défaut
+    // Default constructor
     TunnelConfig() :
         remoteBindHost("0.0.0.0"),
         remoteBindPort(8080),
@@ -51,7 +51,7 @@ struct TunnelConfig {
         localPort(80) {}
 };
 
-// Structure pour la gestion des connexions
+// Structure for connection management
 struct ConnectionConfig {
     int keepAliveIntervalSec;
     int reconnectDelayMs;
@@ -61,72 +61,72 @@ struct ConnectionConfig {
     int maxChannels;
     int channelTimeoutMs;
     
-    // Constructeur par défaut
+    // Default constructor
     ConnectionConfig() :
         keepAliveIntervalSec(30),
         reconnectDelayMs(5000),
         maxReconnectAttempts(5),
         connectionTimeoutSec(30),
         bufferSize(8192),
-        maxChannels(10),  // Augmenté de 5 à 10 pour les gros transferts
+    maxChannels(10),  // Increased from 5 to 10 for large transfers
         channelTimeoutMs(1800000) {}
 };
 
-// Structure pour la configuration de debug
+// Structure for debug configuration
 struct DebugConfig {
     bool debugEnabled;
     int serialBaudRate;
     
-    // Constructeur par défaut
+    // Default constructor
     DebugConfig() :
         debugEnabled(true),
         serialBaudRate(115200) {}
 };
 
-// Classe principale de configuration
+// Main configuration class
 class SSHConfiguration {
 public:
     SSHConfiguration();
     ~SSHConfiguration();
     
-    // Méthodes de configuration SSH
+    // SSH configuration methods
     void setSSHServer(const String& host, int port, const String& username, const String& password);
     void setSSHKeyAuth(const String& host, int port, const String& username, const String& privateKeyPath, const String& passphrase = "");
     void setSSHKeyAuthFromMemory(const String& host, int port, const String& username, const String& privateKeyData, const String& publicKeyData, const String& passphrase = "");
     
-    // Méthodes utilitaires pour charger les clés
+    // Utility methods to load keys
     bool loadSSHKeysFromFile(const String& privateKeyPath);
     bool loadSSHKeysFromLittleFS(const String& privateKeyPath);
     void setSSHKeysInMemory(const String& privateKeyData, const String& publicKeyData);
     bool validateSSHKeys() const;
     void diagnoseSSHKeys() const;
     
-    // Méthodes de configuration known hosts
+    // Known hosts configuration methods
     void setHostKeyVerification(bool enable);
     void setExpectedHostKey(const String& fingerprint, const String& keyType = "");
     void setHostKeyVerification(const String& fingerprint, const String& keyType = "", bool enable = true);
     
-    // Méthodes de configuration du tunnel
+    // Tunnel configuration methods
     void setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort);
     
-    // Méthodes de configuration de connexion
+    // Connection configuration methods
     void setConnectionConfig(int keepAliveInterval, int reconnectDelay, int maxReconnectAttempts, int connectionTimeout);
     void setBufferConfig(int bufferSize, int maxChannels, int channelTimeout);
     
-    // Méthodes de configuration debug
+    // Debug configuration methods
     void setDebugConfig(bool enabled, int baudRate);
     
-    // Getters pour accéder aux configurations
+    // Getters to access configurations
     const SSHServerConfig& getSSHConfig() const { return sshConfig; }
     const TunnelConfig& getTunnelConfig() const { return tunnelConfig; }
     const ConnectionConfig& getConnectionConfig() const { return connectionConfig; }
     const DebugConfig& getDebugConfig() const { return debugConfig; }
     
-    // Méthodes de validation
+    // Validation methods
     bool validateConfiguration() const;
     void printConfiguration() const;
     
-    // Protection thread-safe
+    // Thread-safe protection
     bool lockConfig() const;
     void unlockConfig() const;
 
@@ -136,19 +136,19 @@ private:
     ConnectionConfig connectionConfig;
     DebugConfig debugConfig;
     
-    // Sémaphore pour la protection thread-safe
+    // Semaphore for thread-safe protection
     SemaphoreHandle_t configMutex;
     
-    // Méthodes de validation privées
+    // Private validation methods
     bool validateSSHConfig() const;
     bool validateTunnelConfig() const;
     bool validateConnectionConfig() const;
 };
 
-// Instance globale de configuration
+// Global configuration instance
 extern SSHConfiguration globalSSHConfig;
 
-// Macros de compatibilité pour l'ancien code (optionnel)
+// Compatibility macros for legacy code (optional)
 #define SSH_HOST globalSSHConfig.getSSHConfig().host.c_str()
 #define SSH_PORT globalSSHConfig.getSSHConfig().port
 #define SSH_USERNAME globalSSHConfig.getSSHConfig().username.c_str()

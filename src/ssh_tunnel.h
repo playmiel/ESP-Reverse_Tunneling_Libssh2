@@ -25,39 +25,44 @@ enum TunnelState {
 };
 
 struct TunnelChannel {
-    // Compteur de chunks perdus côté Local->SSH (diagnostic)
+    // Lost write chunks counter on Local->SSH side (diagnostic)
     int lostWriteChunks;
     LIBSSH2_CHANNEL* channel;
     bool active;
     int localSocket; // Local socket for this channel
     unsigned long lastActivity;
-    size_t pendingBytes; // Données en attente d'écriture
-    bool flowControlPaused; // Pause temporaire pour éviter la congestion
-    SemaphoreHandle_t readMutex; // Protection thread-safe pour la lecture (mutex)
-    SemaphoreHandle_t writeMutex; // Protection thread-safe pour l'écriture (mutex)
+    size_t pendingBytes; // Pending bytes waiting to be written
+    bool flowControlPaused; // Temporary pause to avoid congestion
+    SemaphoreHandle_t readMutex; // Thread-safe protection for read (mutex)
+    SemaphoreHandle_t writeMutex; // Thread-safe protection for write (mutex)
     
-    // OPTIMISÉ: Un seul buffer circulaire par direction (supprime duplication ring+deferred)
-    DataRingBuffer* sshToLocalBuffer;   // SSH->Local (unifié)
-    DataRingBuffer* localToSshBuffer;   // Local->SSH (unifié)
+    // OPTIMIZED: Single circular buffer per direction (removes duplication ring+deferred)
+    DataRingBuffer* sshToLocalBuffer;   // SSH->Local (unified)
+    DataRingBuffer* localToSshBuffer;   // Local->SSH (unified)
     
-    // Statistiques et contrôle
-    size_t totalBytesReceived; // Statistiques par canal
+    // Statistics and control
+    size_t totalBytesReceived; // Per-channel statistics
     size_t totalBytesSent;
-    unsigned long lastSuccessfulWrite; // Dernière écriture réussie
-    unsigned long lastSuccessfulRead;  // Dernière lecture réussie
-    bool gracefulClosing; // Fermeture en cours mais avec données restantes
-    int consecutiveErrors; // Nombre d'erreurs consécutives
-    int eagainErrors; // NOUVEAU: Compteur séparé pour erreurs EAGAIN
+    unsigned long lastSuccessfulWrite; // Last successful write
+    unsigned long lastSuccessfulRead;  // Last successful read
+    bool gracefulClosing; // Closing in progress but with remaining data
+    int consecutiveErrors; // Number of consecutive errors
+    int eagainErrors; // NEW: Separate counter for EAGAIN errors
     
-    // Compteurs supplémentaires pour gestion fine du flow control
-    size_t queuedBytesToLocal;   // Bytes dans sshToLocalBuffer
-    size_t queuedBytesToRemote;  // Bytes dans localToSshBuffer
+    // Additional counters for fine-grained flow control
+    size_t queuedBytesToLocal;   // Bytes in sshToLocalBuffer
+    size_t queuedBytesToRemote;  // Bytes in localToSshBuffer
     
-    // NOUVEAU: Détection des gros transferts
-    bool largeTransferInProgress; // Transfert de gros fichier en cours
-    unsigned long transferStartTime; // Début du transfert actuel
-    size_t transferredBytes;      // Bytes transférés dans ce transfert
-    size_t peakBytesPerSecond;    // Pic de débit pour ce canal
+    // NEW: Large transfer detection
+    bool largeTransferInProgress; // Large file transfer in progress
+    unsigned long transferStartTime; // Start time of current transfer
+    size_t transferredBytes;      // Bytes transferred in this transfer
+    size_t peakBytesPerSecond;    // Peak throughput for this channel
+
+    // NEW: Health tracking to avoid aggressive recoveries/log spam
+    int healthUnhealthyCount;           // consecutive unhealthy detections
+    unsigned long lastHardRecoveryMs;   // last time a hard recovery was performed
+    unsigned long lastHealthWarnMs;     // last time we logged a WARN for health
 };
 
 class SSHTunnel {
@@ -93,28 +98,28 @@ private:
     void cleanupInactiveChannels();
     void printChannelStatistics();
 
-    // Nouvelles méthodes pour améliorer la fiabilité
+    // New methods to improve reliability
     bool processChannelRead(int channelIndex);  // SSH -> Local
-    bool processChannelWrite(int channelIndex); // Local -> SSH (poll pour écriture)
-    void processPendingData(int channelIndex);  // Traiter les données en attente (poll pour lecture/écriture)
+    bool processChannelWrite(int channelIndex); // Local -> SSH (poll for write)
+    void processPendingData(int channelIndex);  // Process pending data (poll for read/write)
     bool queueData(int channelIndex, uint8_t* data, size_t size, bool isRead);
     void flushPendingData(int channelIndex);
     bool isChannelHealthy(int channelIndex);
     void recoverChannel(int channelIndex);
-    void gracefulRecoverChannel(int channelIndex); // NOUVEAU: Récupération sans effacer les buffers
+    void gracefulRecoverChannel(int channelIndex); // NEW: Recovery without clearing buffers
     size_t getOptimalBufferSize(int channelIndex);
-    void checkAndRecoverDeadlocks(); // NOUVEAU: Détection et récupération des deadlocks
+    void checkAndRecoverDeadlocks(); // NEW: Deadlock detection and recovery
     
-    // NOUVEAU: Tâche dédiée pour traitement des données (pattern producer/consumer)
+    // NEW: Dedicated task for data processing (producer/consumer pattern)
     static void dataProcessingTaskWrapper(void* parameter);
     void dataProcessingTaskFunction();
     bool startDataProcessingTask();
     void stopDataProcessingTask();
     
-    // NOUVEAU: Diagnostic de duplication de données
+    // NEW: Data duplication diagnostic
     void printDataTransferStats(int channelIndex);
     
-    // NOUVEAU: Gestion des gros transferts et file d'attente des connexions
+    // NEW: Large transfer management and pending connections queue
     bool isLargeTransferActive();
     void detectLargeTransfer(int channelIndex);
     bool shouldAcceptNewConnection();
@@ -139,7 +144,7 @@ private:
     LIBSSH2_LISTENER* listener;
     int socketfd;
 
-    TunnelChannel* channels; // Allocation dynamique basée sur la config
+    TunnelChannel* channels; // Dynamic allocation based on config
 
     TunnelState state;
     unsigned long lastKeepAlive;
@@ -150,18 +155,18 @@ private:
     unsigned long bytesReceived;
     unsigned long bytesSent;
 
-    // Buffers (allocation dynamique basée sur la config)
+    // Buffers (dynamic allocation based on config)
     uint8_t* rxBuffer;
     uint8_t* txBuffer;
 
-    // Protection thread-safe
+    // Thread-safe protection
     SemaphoreHandle_t tunnelMutex;
     SemaphoreHandle_t statsMutex;
 
     // Configuration reference
     SSHConfiguration* config;
     
-    // NOUVEAU: File d'attente pour les connexions en attente pendant les gros transferts
+    // NEW: Queue for pending connections during large transfers
     struct PendingConnection {
         LIBSSH2_CHANNEL* channel;
         unsigned long timestamp;
@@ -169,38 +174,38 @@ private:
     std::vector<PendingConnection> pendingConnections;
     SemaphoreHandle_t pendingConnectionsMutex;
     
-    // OPTIMISÉ: Seuils pour la détection des gros transferts et flow control
+    // OPTIMIZED: Thresholds for large transfer detection and flow control
     static const size_t LARGE_TRANSFER_THRESHOLD = 100 * 1024;  // 100KB
     static const size_t LARGE_TRANSFER_RATE_THRESHOLD = 15 * 1024; // 15KB/s
-    static const unsigned long LARGE_TRANSFER_TIME_THRESHOLD = 3000; // 3 secondes
+    static const unsigned long LARGE_TRANSFER_TIME_THRESHOLD = 3000; // 3 seconds
     
-    // OPTIMISÉ: Nouveaux seuils de flow control plus élevés
-    static const size_t HIGH_WATER_LOCAL = 28 * 1024;  // 28KB (augmenté)
-    static const size_t LOW_WATER_LOCAL = 14 * 1024;   // 14KB (50% de HIGH_WATER)
-    static const size_t FIXED_BUFFER_SIZE = 8 * 1024;  // Buffer fixe 8KB
+    // OPTIMIZED: Higher flow control thresholds
+    static const size_t HIGH_WATER_LOCAL = 28 * 1024;  // 28KB (increased)
+    static const size_t LOW_WATER_LOCAL = 14 * 1024;   // 14KB (50% of HIGH_WATER)
+    static const size_t FIXED_BUFFER_SIZE = 8 * 1024;  // Fixed 8KB buffer
     
-    // NOUVEAU: Tâche dédiée pour le traitement des données
+    // NEW: Dedicated task for data processing
     TaskHandle_t dataProcessingTask;
     SemaphoreHandle_t dataProcessingSemaphore;
     bool dataProcessingTaskRunning;
 
-    // Méthodes de protection
+    // Protection methods
     bool lockTunnel();
     void unlockTunnel();
     bool lockStats();
     void unlockStats();
 
-    // Méthodes de protection par canal avec mutex séparés
+    // Per-channel protection methods with separate mutexes
     bool lockChannelRead(int channelIndex);
     void unlockChannelRead(int channelIndex);
     bool lockChannelWrite(int channelIndex);
     void unlockChannelWrite(int channelIndex);
 
-    // Méthodes de compatibilité (deprecated)
+    // Compatibility methods (deprecated)
     bool lockChannel(int channelIndex);
     void unlockChannel(int channelIndex);
     
-    // NOUVEAU: Méthode pour forcer la libération des mutex bloqués
+    // NEW: Method to force release of blocked mutexes
     void forceMutexRelease(int channelIndex);
 };
 

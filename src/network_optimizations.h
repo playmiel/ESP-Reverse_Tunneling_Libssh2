@@ -7,17 +7,17 @@
 #include <string.h>
 #include <logger.h>
 
-// Optimisations réseau pour améliorer les performances du tunnel
+// Network optimizations to improve tunnel performance
 class NetworkOptimizer {
 public:
     static bool optimizeSocket(int socket_fd) {
-        // Sur ESP32/lwIP, tous les setsockopt ne sont pas supportés.
-        // On considère l'opération "réussie" si AU MOINS une optimisation est appliquée,
-        // pour éviter de spammer les logs quand certaines options ne sont pas dispo.
+    // On ESP32/lwIP, not all setsockopt options are supported.
+    // Consider the operation 'successful' if at least one optimization is applied
+    // to avoid log spam when some options are unavailable.
         int attempted = 0;
         int applied = 0;
 
-        // Activer TCP_NODELAY pour réduire la latence
+    // Enable TCP_NODELAY to reduce latency
         int nodelay = 1;
         attempted++;
         if (setsockopt(socket_fd, IPPROTO_TCP, TCP_NODELAY, &nodelay, sizeof(nodelay)) == 0) {
@@ -26,7 +26,7 @@ public:
             LOGF_W("SSH", "Failed to set TCP_NODELAY: %s", strerror(errno));
         }
 
-        // Augmenter les buffers de réception et d'envoi
+    // Increase receive and send buffer sizes
         int rcvbuf = 65536;  // 64KB
         int sndbuf = 65536;  // 64KB
 
@@ -99,13 +99,13 @@ public:
     }
 
     static bool optimizeSSHSocket(int socket_fd) {
-        // Optimisations spécifiques pour les connexions SSH
+    // Specific optimizations for SSH connections
         bool success = optimizeSocket(socket_fd);
 
-        // Paramètres TCP keepalive pour SSH
-        int keepidle = 60;     // Commencer les keepalives après 60s
-        int keepintvl = 10;    // Intervalle entre keepalives
-        int keepcnt = 6;       // Nombre de keepalives avant timeout
+    // TCP keepalive parameters for SSH
+    int keepidle = 60;     // Start keepalives after 60s
+    int keepintvl = 10;    // Interval between keepalives
+    int keepcnt = 6;       // Number of keepalives before timeout
 
 #ifdef TCP_KEEPIDLE
         if (setsockopt(socket_fd, IPPROTO_TCP, TCP_KEEPIDLE, &keepidle, sizeof(keepidle)) < 0) {
