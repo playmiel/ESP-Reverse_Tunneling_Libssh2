@@ -156,6 +156,8 @@ private:
     void queuePendingConnection(LIBSSH2_CHANNEL* channel);
     bool processPendingConnections();
     bool processQueuedConnection(LIBSSH2_CHANNEL* channel);
+    void closeLibssh2Channel(LIBSSH2_CHANNEL* channel);
+    bool channelEofLocked(LIBSSH2_CHANNEL* channel);
 
     // Poll helpers
     bool isSocketWritable(int sockfd, int timeoutMs = 0);
@@ -193,6 +195,7 @@ private:
     // Thread-safe protection
     SemaphoreHandle_t tunnelMutex;
     SemaphoreHandle_t statsMutex;
+    SemaphoreHandle_t sessionMutex;
 
     // Configuration reference
     SSHConfiguration* config;
@@ -225,6 +228,8 @@ private:
     void unlockTunnel();
     bool lockStats();
     void unlockStats();
+    bool lockSession(TickType_t ticks = portMAX_DELAY);
+    void unlockSession();
 
     // Per-channel protection methods with separate mutexes
     bool lockChannelRead(int channelIndex);
