@@ -146,6 +146,10 @@ bool SSHTunnel::init() {
     channels[i].transferStartTime = 0;
     channels[i].transferredBytes = 0;
     channels[i].peakBytesPerSecond = 0;
+  channels[i].socketRecvErrors = 0;
+  channels[i].fatalCryptoErrors = 0;
+  channels[i].lastWriteErrorMs = 0;
+  channels[i].lastErrorDetailLogMs = 0;
     
   // OPTIMIZED: Create unified buffers (simpler & efficient)
     char ringName[32];
@@ -1601,6 +1605,12 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     return false;
   }
 
+  // Backoff: if we recently had an error and are still accumulating, skip this cycle
+  unsigned long nowPre = millis();
+  if (ch.consecutiveErrors > 0 && (nowPre - ch.lastWriteErrorMs) < 40) {
+    return false;
+  }
+
   // Avant nouvelle lecture socket local, tenter de ré-enfiler résidus Local->SSH
   if (ch.deferredToRemote && ch.deferredToRemoteOffset < ch.deferredToRemoteSize) {
     size_t remain = ch.deferredToRemoteSize - ch.deferredToRemoteOffset;
@@ -1664,8 +1674,19 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         break;
       } else {
         ch.consecutiveErrors++;
-        LOGF_W("SSH", "Channel %d: Write error %zd during drain", channelIndex, w);
-  // Put data back for future retry
+        ch.lastWriteErrorMs = now;
+        if (w == LIBSSH2_ERROR_SOCKET_RECV) {
+          ch.socketRecvErrors++;
+        } else if (w == LIBSSH2_ERROR_DECRYPT) {
+          ch.fatalCryptoErrors++;
+          ch.gracefulClosing = true;
+        }
+        if (now - ch.lastErrorDetailLogMs > 2000) {
+          ch.lastErrorDetailLogMs = now;
+          LOGF_W("SSH", "Channel %d: Write error %zd during drain cons=%d sockRecv=%d crypt=%d qRemote=%zu", 
+                 channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, ch.queuedBytesToRemote);
+        }
+        // Put data back for future retry then exit loop
         ch.localToSshBuffer->write(temp, chunk);
         break;
       }
@@ -1696,7 +1717,16 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           } else if (w == LIBSSH2_ERROR_EAGAIN) {
             break; // Queue the remainder
           } else {
-            ch.consecutiveErrors++; LOGF_W("SSH","Channel %d: Direct write err %zd",channelIndex,w); break;
+            ch.consecutiveErrors++; 
+            ch.lastWriteErrorMs = now;
+            if (w == LIBSSH2_ERROR_SOCKET_RECV) ch.socketRecvErrors++;
+            else if (w == LIBSSH2_ERROR_DECRYPT) { ch.fatalCryptoErrors++; ch.gracefulClosing = true; }
+            if (now - ch.lastErrorDetailLogMs > 2000) {
+              ch.lastErrorDetailLogMs = now;
+              LOGF_W("SSH","Channel %d: Direct write err %zd cons=%d sockRecv=%d crypt=%d remain=%zu", 
+                     channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, (size_t)localRead - offset);
+            }
+            break;
           }
         }
         size_t remaining = (size_t)localRead - offset;
@@ -1721,7 +1751,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                 ch.deferredToRemote = newBuf;
                 ch.deferredToRemoteSize = existingRemain + leftover;
                 ch.deferredToRemoteOffset = 0;
-                LOGF_W("SSH", "Channel %d: Deferred %zu bytes (Local->SSH)", channelIndex, leftover);
+      LOGF_W("SSH", "Channel %d: Deferred %zu bytes (Local->SSH) qRemote=%zu cons=%d", 
+        channelIndex, leftover, ch.queuedBytesToRemote, ch.consecutiveErrors);
               } else {
                 LOGF_E("SSH", "Channel %d: Allocation failed deferring %zu bytes (drop)", channelIndex, leftover);
                 ch.lostWriteChunks++;
@@ -1969,8 +2000,28 @@ void SSHTunnel::flushPendingData(int channelIndex) {
           uint8_t dump[SSH_BUFFER_SIZE];
             ch.localToSshBuffer->read(dump, (size_t)w);
             ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w) ? ch.queuedBytesToRemote - (size_t)w : 0;
-        } else if (w != LIBSSH2_ERROR_EAGAIN && w < 0) {
-          LOGF_W("SSH", "Channel %d: flushPendingData SSH write err %zd", channelIndex, w);
+          ch.lastSuccessfulWrite = millis();
+          ch.consecutiveErrors = 0;
+        } else if (w == LIBSSH2_ERROR_EAGAIN) {
+          // benign, try later
+        } else if (w < 0) {
+          unsigned long nowMs = millis();
+          ch.consecutiveErrors++;
+          ch.lastWriteErrorMs = nowMs;
+          if (w == LIBSSH2_ERROR_SOCKET_RECV) {
+            ch.socketRecvErrors++;
+          } else if (w == LIBSSH2_ERROR_DECRYPT) {
+            ch.fatalCryptoErrors++;
+            ch.gracefulClosing = true; // Force channel to wind down
+          }
+          // Throttled detailed log (every 2000ms if still erroring)
+          if (nowMs - ch.lastErrorDetailLogMs > 2000) {
+            ch.lastErrorDetailLogMs = nowMs;
+            LOGF_W("SSH", "Channel %d: flushPendingData SSH write err %zd cons=%d sockRecv=%d crypt=%d qRemote=%zu defRem=%zu", 
+                   channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors,
+                   ch.queuedBytesToRemote,
+                   (size_t)(ch.deferredToRemote ? (ch.deferredToRemoteSize - ch.deferredToRemoteOffset) : 0));
+          }
         }
       }
       unlockChannelWrite(channelIndex);
@@ -1986,6 +2037,16 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   
   unsigned long now = millis();
   
+  // Fatal crypto error -> immediately unhealthy
+  if (ch.fatalCryptoErrors > 0) {
+    LOGF_D("SSH", "Channel %d: Unhealthy (fatal crypto errors=%d)", channelIndex, ch.fatalCryptoErrors);
+    return false;
+  }
+  // Socket recv errors escalation
+  if (ch.socketRecvErrors > 4) {
+    LOGF_D("SSH", "Channel %d: Unhealthy (socketRecvErrors=%d)", channelIndex, ch.socketRecvErrors);
+    return false;
+  }
   // Vérifier les erreurs consécutives
   if (ch.consecutiveErrors > 3) {
     LOGF_D("SSH", "Channel %d: Unhealthy due to %d consecutive errors", channelIndex, ch.consecutiveErrors);
