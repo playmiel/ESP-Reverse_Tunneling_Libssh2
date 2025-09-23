@@ -13,6 +13,10 @@
 #define LOW_WATER_LOCAL  (2 * 1024)      // 2KB - resume local socket reads
 #define CRITICAL_WATER_LOCAL (4 * 1024)  // 4KB - hard stop local socket reads
 
+#ifndef STUCK_PROBE_THRESHOLD
+#define STUCK_PROBE_THRESHOLD 8   // consecutive failed probes before gracefulClosing
+#endif
+
 // SSH write parameters now defined as static constexpr members of SSHTunnel (see header)
 
 // Fixed buffer (unchanged) + channel integrity threshold
@@ -150,6 +154,7 @@ bool SSHTunnel::init() {
   channels[i].fatalCryptoErrors = 0;
   channels[i].lastWriteErrorMs = 0;
   channels[i].lastErrorDetailLogMs = 0;
+  channels[i].stuckProbeCount = 0;
     
   // OPTIMIZED: Create unified buffers (simpler & efficient)
     char ringName[32];
@@ -920,8 +925,7 @@ void SSHTunnel::closeChannel(int channelIndex) {
   LOGF_I("SSH", "Closing channel %d (session: %lums, rx: %d bytes, tx: %d bytes, errors: %d)", 
          channelIndex, sessionDuration, ch.totalBytesReceived, ch.totalBytesSent, ch.consecutiveErrors);
 
-  // FIX: Force release of stuck mutexes BEFORE clearing buffers (avoids indefinite block after connection reset)
-  safeRetryMutexAccess(channelIndex); // FIXED: Use safe version instead
+  // Removed blocking/stuck probe here to avoid priority inheritance assert.
 
   // Flush pending data before closing
   flushPendingData(channelIndex);
@@ -966,6 +970,11 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.healthUnhealthyCount = 0;
   ch.lastHardRecoveryMs = 0;
   ch.lastHealthWarnMs = 0;
+  ch.socketRecvErrors = 0;
+  ch.fatalCryptoErrors = 0;
+  ch.lastWriteErrorMs = 0;
+  ch.lastErrorDetailLogMs = 0;
+  ch.stuckProbeCount = 0;
   
   // OPTIMIZED: Clear unified buffers
   if (ch.sshToLocalBuffer) {
@@ -1369,35 +1378,46 @@ void SSHTunnel::safeRetryMutexAccess(int channelIndex) {
   }
   
   TunnelChannel &ch = channels[channelIndex];
-  
-  // SAFE: Try to acquire without forcing deletion
-  bool readOk = false, writeOk = false;
-  
+  if (!ch.active) return; // Ignore inactive slots
+  if (ch.gracefulClosing) return; // Already closing, no probe
+
+  bool readOk = true;
+  bool writeOk = true;
+
+  // Non-blocking probe (0 tick) to avoid priority inheritance complications
   if (ch.readMutex) {
-    if (xSemaphoreTake(ch.readMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (xSemaphoreTake(ch.readMutex, 0) == pdTRUE) {
       xSemaphoreGive(ch.readMutex);
-      readOk = true;
+    } else {
+      readOk = false;
     }
   }
-  
   if (ch.writeMutex) {
-    if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
+    if (xSemaphoreTake(ch.writeMutex, 0) == pdTRUE) {
       xSemaphoreGive(ch.writeMutex);
-      writeOk = true;
+    } else {
+      writeOk = false;
     }
   }
-  
+
   if (!readOk || !writeOk) {
-    // Gentle approach: mark channel as problematic
-    ch.consecutiveErrors++;
-    LOGF_W("SSH", "Channel %d: Mutex access issues detected (read=%s, write=%s)", 
-           channelIndex, readOk ? "OK" : "STUCK", writeOk ? "OK" : "STUCK");
-    
-    // If really stuck, close channel gracefully instead of forcing
-    if (ch.consecutiveErrors > 10) {
-      LOGF_E("SSH", "Channel %d: Too many mutex issues, scheduling graceful close", channelIndex);
-      ch.gracefulClosing = true; // Graceful close instead of force
+    unsigned long now = millis();
+    // Throttle WARN to every 5000 ms, DEBUG otherwise
+    if (now - ch.lastHealthWarnMs > 5000) {
+      ch.lastHealthWarnMs = now;
+      LOGF_W("SSH", "Channel %d: Mutex probe stuck (read=%s, write=%s)", channelIndex, readOk ? "OK" : "STUCK", writeOk ? "OK" : "STUCK");
+    } else {
+      LOGF_D("SSH", "Channel %d: Mutex probe (read=%s, write=%s)", channelIndex, readOk ? "OK" : "STUCK", writeOk ? "OK" : "STUCK");
     }
+    // Escalate with dedicated counter (does NOT touch consecutiveErrors)
+    ch.stuckProbeCount++;
+    if (ch.stuckProbeCount >= STUCK_PROBE_THRESHOLD) {
+      LOGF_W("SSH", "Channel %d: Stuck mutex threshold reached (%d) -> graceful closing", channelIndex, ch.stuckProbeCount);
+      ch.gracefulClosing = true;
+    }
+  } else {
+    // Reset probe counter on success
+    if (ch.stuckProbeCount) ch.stuckProbeCount = 0;
   }
 }
 

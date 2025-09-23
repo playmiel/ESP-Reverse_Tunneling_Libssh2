@@ -72,6 +72,7 @@ struct TunnelChannel {
     int fatalCryptoErrors;
     unsigned long lastWriteErrorMs;
     unsigned long lastErrorDetailLogMs;
+    int stuckProbeCount;                // consecutive non-blocking mutex probe failures
 
     // NEW (partial enqueue protection): deferred buffers for residual data that
     // n'a pas pu être placé dans les ring buffers (évitant toute perte).
