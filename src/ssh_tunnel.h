@@ -67,6 +67,11 @@ struct TunnelChannel {
     int healthUnhealthyCount;           // consecutive unhealthy detections
     unsigned long lastHardRecoveryMs;   // last time a hard recovery was performed
     unsigned long lastHealthWarnMs;     // last time we logged a WARN for health
+    // Error classification & backoff
+    int socketRecvErrors;
+    int fatalCryptoErrors;
+    unsigned long lastWriteErrorMs;
+    unsigned long lastErrorDetailLogMs;
 
     // NEW (partial enqueue protection): deferred buffers for residual data that
     // n'a pas pu être placé dans les ring buffers (évitant toute perte).
