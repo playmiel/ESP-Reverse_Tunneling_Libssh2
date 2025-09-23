@@ -63,6 +63,18 @@ struct TunnelChannel {
     int healthUnhealthyCount;           // consecutive unhealthy detections
     unsigned long lastHardRecoveryMs;   // last time a hard recovery was performed
     unsigned long lastHealthWarnMs;     // last time we logged a WARN for health
+
+    // NEW (partial enqueue protection): deferred buffers for residual data that
+    // n'a pas pu être placé dans les ring buffers (évitant toute perte).
+    uint8_t* deferredToLocal;      // SSH->Local résidu en attente d'enqueue
+    size_t deferredToLocalSize;    // taille totale du résidu
+    size_t deferredToLocalOffset;  // offset déjà enqueue
+    uint8_t* deferredToRemote;     // Local->SSH résidu en attente
+    size_t deferredToRemoteSize;
+    size_t deferredToRemoteOffset;
+
+    // NEW: Metrics for dropped bytes (only when we truly drop data)
+    size_t bytesDropped;          // Per-channel dropped bytes counter
 };
 
 class SSHTunnel {
@@ -81,6 +93,7 @@ public:
     // Statistics
     unsigned long getBytesReceived();
     unsigned long getBytesSent();
+    unsigned long getBytesDropped();
     int getActiveChannels();
 
 private:
@@ -103,6 +116,10 @@ private:
     bool processChannelWrite(int channelIndex); // Local -> SSH (poll for write)
     void processPendingData(int channelIndex);  // Process pending data (poll for read/write)
     bool queueData(int channelIndex, uint8_t* data, size_t size, bool isRead);
+    // Nouvelle version: retourne le nombre d'octets effectivement enfilés dans
+    // le ring buffer (0..size). Aucune perte: si retour < size, le code appelant
+    // doit stocker le reste dans un buffer différé.
+    size_t queueData(int channelIndex, const uint8_t* data, size_t size, bool isRead);
     void flushPendingData(int channelIndex);
     bool isChannelHealthy(int channelIndex);
     void recoverChannel(int channelIndex);
@@ -154,6 +171,7 @@ private:
     // Statistics
     unsigned long bytesReceived;
     unsigned long bytesSent;
+    unsigned long droppedBytes; // NEW: Global dropped bytes (sum of channels)
 
     // Buffers (dynamic allocation based on config)
     uint8_t* rxBuffer;
