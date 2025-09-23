@@ -120,9 +120,8 @@ private:
     bool processChannelWrite(int channelIndex); // Local -> SSH (poll for write)
     void processPendingData(int channelIndex);  // Process pending data (poll for read/write)
     bool queueData(int channelIndex, uint8_t* data, size_t size, bool isRead);
-    // Nouvelle version: retourne le nombre d'octets effectivement enfilés dans
-    // le ring buffer (0..size). Aucune perte: si retour < size, le code appelant
-    // doit stocker le reste dans un buffer différé.
+    // New version: returns number of bytes actually enqueued into the ring buffer (0..size).
+    // No silent loss: if return < size, caller must store the remainder in deferred buffer.
     size_t queueData(int channelIndex, const uint8_t* data, size_t size, bool isRead);
     void flushPendingData(int channelIndex);
     bool isChannelHealthy(int channelIndex);
@@ -229,6 +228,11 @@ private:
     
     // NEW: Method to force release of blocked mutexes
     void safeRetryMutexAccess(int channelIndex); // FIXED: Safe version instead of forceMutexRelease
+
+    // SSH write/drain tuning parameters
+    static constexpr int SSH_MAX_WRITES_PER_PASS = 8;      // Max drain iterations per loop
+    static constexpr int MIN_SSH_WINDOW_SIZE = 512;        // Minimum assumed remote window (advisory)
+    static constexpr int MIN_WRITE_SIZE = 256;             // Aggregate small chunks to at least this size
 };
 
 #endif
