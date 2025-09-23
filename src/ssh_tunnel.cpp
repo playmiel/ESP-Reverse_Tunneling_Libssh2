@@ -991,7 +991,7 @@ bool SSHTunnel::handleNewConnection() {
     libssh2_channel_set_blocking(channel, 0);
     unlockSession();
   } else {
-    LOG_W("SSH", "Channel %d: Unable to switch to non-blocking mode (lock timeout)", channelIndex);
+    LOGF_W("SSH", "Channel %d: Unable to switch to non-blocking mode (lock timeout)", channelIndex);
   }
 
   LOGF_I("SSH", "New tunnel connection established (channel %d)", channelIndex);
@@ -2980,7 +2980,7 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL* channel) {
     libssh2_channel_set_blocking(channel, 0);
     unlockSession();
   } else {
-    LOG_W("SSH", "Queued channel %d: Unable to switch to non-blocking mode", channelIndex);
+    LOGF_W("SSH", "Queued channel %d: Unable to switch to non-blocking mode", channelIndex);
   }
 
   LOGF_I("SSH", "Queued tunnel connection established (channel %d)", channelIndex);
