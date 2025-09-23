@@ -137,6 +137,8 @@ bool SSHTunnel::init() {
     channels[i].gracefulClosing = false;
     channels[i].consecutiveErrors = 0;
   channels[i].eagainErrors = 0; // NEW: Separate counter for EAGAIN
+    channels[i].readMutexFailures = 0; // FIXED: Initialize new failure counters
+    channels[i].writeMutexFailures = 0;
     channels[i].queuedBytesToLocal = 0;
     channels[i].queuedBytesToRemote = 0;
     channels[i].lostWriteChunks = 0;
@@ -918,7 +920,7 @@ void SSHTunnel::closeChannel(int channelIndex) {
          channelIndex, sessionDuration, ch.totalBytesReceived, ch.totalBytesSent, ch.consecutiveErrors);
 
   // FIX: Force release of stuck mutexes BEFORE clearing buffers (avoids indefinite block after connection reset)
-  forceMutexRelease(channelIndex);
+  safeRetryMutexAccess(channelIndex); // FIXED: Use safe version instead
 
   // Flush pending data before closing
   flushPendingData(channelIndex);
@@ -1269,19 +1271,22 @@ bool SSHTunnel::lockChannelRead(int channelIndex) {
   // MONITORING: Surveiller les tentatives de verrouillage
   unsigned long start = millis();
 
-  // Reduced timeout to avoid deadlocks (100ms instead of 200ms)
+  // Timeout restored to stable v1.3 value (100ms)
   BaseType_t result = xSemaphoreTake(channels[channelIndex].readMutex, pdMS_TO_TICKS(100));
   unsigned long duration = millis() - start;
   
   if (result != pdTRUE) {
-  // Use LOG_D instead of LOG_W to reduce log spam
-    LOGF_D("SSH", "Channel %d: Could not acquire READ mutex after %lums", channelIndex, duration);
+    // Don't log as WARNING to avoid spam - just count
+    channels[channelIndex].readMutexFailures++;
+    if (channels[channelIndex].readMutexFailures % 50 == 1) { // Log only every 50 times
+      LOGF_D("SSH", "Channel %d: Read mutex timeout after %lums (failures=%d)", 
+             channelIndex, duration, channels[channelIndex].readMutexFailures);
+    }
     return false;
   }
   
-  if (duration > 25) { // Reduced from 50ms to 25ms
-
-    LOGF_D("SSH", "Channel %d: READ mutex acquired after %lums (slow)", channelIndex, duration);
+  if (duration > 50) { // Warning threshold increased from 25ms to 50ms
+    LOGF_V("SSH", "Channel %d: READ mutex acquired after %lums (slow)", channelIndex, duration);
   }
   
   return true;
@@ -1310,19 +1315,22 @@ bool SSHTunnel::lockChannelWrite(int channelIndex) {
   // MONITORING: Surveiller les tentatives de verrouillage  
   unsigned long start = millis();
 
-  // Reduced timeout to avoid deadlocks (100ms instead of 200ms)  
+  // Timeout restored to stable v1.3 value (100ms)
   BaseType_t result = xSemaphoreTake(channels[channelIndex].writeMutex, pdMS_TO_TICKS(100));
   unsigned long duration = millis() - start;
   
   if (result != pdTRUE) {
-  // Use LOG_D instead of LOG_W to reduce log spam
-    LOGF_D("SSH", "Channel %d: Could not acquire WRITE mutex after %lums", channelIndex, duration);
+    // Don't log as WARNING to avoid spam - just count
+    channels[channelIndex].writeMutexFailures++;
+    if (channels[channelIndex].writeMutexFailures % 50 == 1) { // Log only every 50 times
+      LOGF_D("SSH", "Channel %d: Write mutex timeout after %lums (failures=%d)", 
+             channelIndex, duration, channels[channelIndex].writeMutexFailures);
+    }
     return false;
   }
   
-  if (duration > 25) { // Réduit de 50ms à 25ms
-
-    LOGF_D("SSH", "Channel %d: WRITE mutex acquired after %lums (slow)", channelIndex, duration);
+  if (duration > 50) { // Warning threshold increased from 25ms to 50ms
+    LOGF_V("SSH", "Channel %d: WRITE mutex acquired after %lums (slow)", channelIndex, duration);
   }
   
   return true;
@@ -1353,47 +1361,41 @@ void SSHTunnel::unlockChannel(int channelIndex) {
   }
 }
 
-// NEW: Method to force release of stuck mutexes
-void SSHTunnel::forceMutexRelease(int channelIndex) {
+// FIXED: Safe method to handle mutex issues without destroying them
+void SSHTunnel::safeRetryMutexAccess(int channelIndex) {
   if (channels == nullptr || channelIndex < 0 || channelIndex >= config->getConnectionConfig().maxChannels) {
     return;
   }
   
   TunnelChannel &ch = channels[channelIndex];
   
-  LOGF_D("SSH", "Channel %d: Forcing mutex release", channelIndex);
+  // SAFE: Try to acquire without forcing deletion
+  bool readOk = false, writeOk = false;
   
-  // Force release of read mutex
   if (ch.readMutex) {
-  // Try to acquire with 0 timeout to check state
-    if (xSemaphoreTake(ch.readMutex, 0) == pdTRUE) {
-  // It was free, release it
+    if (xSemaphoreTake(ch.readMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       xSemaphoreGive(ch.readMutex);
-    } else {
-  // Mutex stuck, destroy and recreate
-      LOGF_W("SSH", "Channel %d: Read mutex stuck, recreating", channelIndex);
-      vSemaphoreDelete(ch.readMutex);
-      ch.readMutex = xSemaphoreCreateMutex();
-      if (!ch.readMutex) {
-        LOGF_E("SSH", "Channel %d: Failed to recreate read mutex", channelIndex);
-      }
+      readOk = true;
     }
   }
   
-  // Force release of write mutex
   if (ch.writeMutex) {
-    // Essayer d'acquérir avec timeout 0 pour vérifier l'état
-    if (xSemaphoreTake(ch.writeMutex, 0) == pdTRUE) {
-  // It was free, release it
+    if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
       xSemaphoreGive(ch.writeMutex);
-    } else {
-  // Mutex stuck, destroy and recreate
-      LOGF_W("SSH", "Channel %d: Write mutex stuck, recreating", channelIndex);
-      vSemaphoreDelete(ch.writeMutex);
-      ch.writeMutex = xSemaphoreCreateMutex();
-      if (!ch.writeMutex) {
-        LOGF_E("SSH", "Channel %d: Failed to recreate write mutex", channelIndex);
-      }
+      writeOk = true;
+    }
+  }
+  
+  if (!readOk || !writeOk) {
+    // Gentle approach: mark channel as problematic
+    ch.consecutiveErrors++;
+    LOGF_W("SSH", "Channel %d: Mutex access issues detected (read=%s, write=%s)", 
+           channelIndex, readOk ? "OK" : "STUCK", writeOk ? "OK" : "STUCK");
+    
+    // If really stuck, close channel gracefully instead of forcing
+    if (ch.consecutiveErrors > 10) {
+      LOGF_E("SSH", "Channel %d: Too many mutex issues, scheduling graceful close", channelIndex);
+      ch.gracefulClosing = true; // Graceful close instead of force
     }
   }
 }
@@ -1764,8 +1766,8 @@ void SSHTunnel::processPendingData(int channelIndex) {
   }
   lastProcessTime[channelIndex] = now;
   
-  // 1) Process SSH->Local buffer (sshToLocalBuffer)
-  if (xSemaphoreTake(ch.readMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+  // 1) Process SSH->Local buffer (sshToLocalBuffer) - FIXED timeout
+  if (xSemaphoreTake(ch.readMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
     if (ch.sshToLocalBuffer && !ch.sshToLocalBuffer->empty() && 
         ch.localSocket >= 0 && isSocketWritable(ch.localSocket, 5)) {
       
@@ -1778,6 +1780,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
         if (written > 0) {
           ch.totalBytesReceived += written;
           ch.queuedBytesToLocal = (ch.queuedBytesToLocal > written) ? ch.queuedBytesToLocal - written : 0;
+          ch.consecutiveErrors = 0; // Reset on success
           if (lockStats()) { 
             bytesReceived += written; 
             unlockStats(); 
@@ -1794,12 +1797,14 @@ void SSHTunnel::processPendingData(int channelIndex) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
             // Socket temporarily not writable - put data back
             ch.sshToLocalBuffer->write(tempBuffer, bytesRead);
-            LOGF_D("SSH", "Channel %d: Socket busy, %zu bytes preserved in SSH->Local buffer", 
-                   channelIndex, bytesRead);
+            ch.eagainErrors++; // Count separately from real errors
+            LOGF_V("SSH", "Channel %d: Socket busy, %zu bytes preserved (eagain=%d)", 
+                   channelIndex, bytesRead, ch.eagainErrors);
           } else {
-            LOGF_W("SSH", "Channel %d: Error writing from SSH->Local buffer: %s", 
-                   channelIndex, strerror(errno));
+            ch.sshToLocalBuffer->write(tempBuffer, bytesRead);
             ch.consecutiveErrors++;
+            LOGF_W("SSH", "Channel %d: Error writing from SSH->Local buffer: %s (err=%d)", 
+                   channelIndex, strerror(errno), ch.consecutiveErrors);
           }
         } else {
           // written == 0 - socket closed on receive side
@@ -1810,10 +1815,14 @@ void SSHTunnel::processPendingData(int channelIndex) {
       }
     }
     xSemaphoreGive(ch.readMutex);
+  } else {
+    // Failed to acquire mutex - count but don't panic
+    LOGF_V("SSH", "Channel %d: Could not acquire read mutex (busy)", channelIndex);
+    ch.readMutexFailures++;
   }
   
-  // 2) Process Local->SSH buffer (localToSshBuffer)
-  if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+  // 2) Process Local->SSH buffer (localToSshBuffer) - FIXED timeout
+  if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
     if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
       uint8_t tempBuffer[SSH_BUFFER_SIZE];
       size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
@@ -1824,6 +1833,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
         if (written > 0) {
           ch.totalBytesSent += written;
           ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
+          ch.consecutiveErrors = 0; // Reset on success
           if (lockStats()) { 
             bytesSent += written; 
             unlockStats(); 
@@ -1840,14 +1850,14 @@ void SSHTunnel::processPendingData(int channelIndex) {
           if (written == LIBSSH2_ERROR_EAGAIN) {
             // SSH channel temporarily busy - put data back
             ch.localToSshBuffer->write(tempBuffer, bytesRead);
-            LOGF_D("SSH", "Channel %d: SSH channel busy, %zu bytes preserved in Local->SSH buffer", 
-                   channelIndex, bytesRead);
             ch.eagainErrors++;
+            LOGF_V("SSH", "Channel %d: SSH channel busy, %zu bytes preserved (eagain=%d)", 
+                   channelIndex, bytesRead, ch.eagainErrors);
           } else {
-            LOGF_W("SSH", "Channel %d: Error writing from Local->SSH buffer: %zd", 
-                   channelIndex, written);
+            ch.localToSshBuffer->write(tempBuffer, bytesRead);
             ch.consecutiveErrors++;
-            // In a real error case, we may decide to drop this data
+            LOGF_W("SSH", "Channel %d: Error writing from Local->SSH buffer: %zd (err=%d)", 
+                   channelIndex, written, ch.consecutiveErrors);
           }
         } else {
           // written == 0 - channel closed
@@ -1858,6 +1868,10 @@ void SSHTunnel::processPendingData(int channelIndex) {
       }
     }
     xSemaphoreGive(ch.writeMutex);
+  } else {
+    // Failed to acquire mutex - count but don't panic
+    LOGF_V("SSH", "Channel %d: Could not acquire write mutex (busy)", channelIndex);
+    ch.writeMutexFailures++;
   }
 
   // 3) Resume flow control if we've dropped below the LOW watermark
@@ -2535,30 +2549,39 @@ void SSHTunnel::dataProcessingTaskWrapper(void* parameter) {
 
 void SSHTunnel::dataProcessingTaskFunction() {
   while (dataProcessingTaskRunning) {
-    // Attendre un signal de travail ou timeout de 100ms
-    if (xSemaphoreTake(dataProcessingSemaphore, pdMS_TO_TICKS(100)) == pdTRUE) {
-      // Il y a du travail à faire
+    // Wait for work signal or longer timeout to reduce contention
+    if (xSemaphoreTake(dataProcessingSemaphore, pdMS_TO_TICKS(200)) == pdTRUE) { // 200ms instead of 100ms
       if (!dataProcessingTaskRunning) break;
       
       int maxChannels = config->getConnectionConfig().maxChannels;
       for (int i = 0; i < maxChannels; i++) {
         if (channels[i].active) {
-          // Traitement lourd des données en attente
-          processPendingData(i);
+          // Check if there's really work before processing
+          bool hasWork = false;
+          if (channels[i].sshToLocalBuffer && !channels[i].sshToLocalBuffer->empty()) hasWork = true;
+          if (channels[i].localToSshBuffer && !channels[i].localToSshBuffer->empty()) hasWork = true;
           
-          // Traitement supplémentaire pour les canaux en fermeture gracieuse
-          if (channels[i].gracefulClosing) {
-            processPendingData(i); // S'assurer que les données sont transmises
+          if (hasWork) {
+            processPendingData(i);
           }
           
-          // Vérifier les gros transferts
-          detectLargeTransfer(i);
+          // Graceful handling of closing channels
+          if (channels[i].gracefulClosing) {
+            processPendingData(i);
+          }
+          
+          // Check large transfers less frequently
+          static unsigned long lastLargeTransferCheck = 0;
+          if (millis() - lastLargeTransferCheck > 5000) { // Every 5s instead of each loop
+            detectLargeTransfer(i);
+            lastLargeTransferCheck = millis();
+          }
         }
       }
     }
     
-    // Petite pause pour éviter la surcharge CPU
-    vTaskDelay(pdMS_TO_TICKS(5));
+    // Longer pause to reduce CPU usage
+    vTaskDelay(pdMS_TO_TICKS(10)); // 10ms instead of 5ms
   }
   
   // Nettoyer avant de terminer
@@ -2578,7 +2601,7 @@ bool SSHTunnel::startDataProcessingTask() {
     "SSH_DataProcessing",
     4096, // Stack size
     this,
-    tskIDLE_PRIORITY + 2, // Priorité légèrement élevée
+    tskIDLE_PRIORITY + 1, // FIXED: Reduced priority to avoid contention
     &dataProcessingTask
   );
   
@@ -2588,7 +2611,7 @@ bool SSHTunnel::startDataProcessingTask() {
     return false;
   }
   
-  LOG_I("SSH", "Data processing task started successfully");
+  LOG_I("SSH", "Data processing task started successfully with reduced priority");
   return true;
 }
 
