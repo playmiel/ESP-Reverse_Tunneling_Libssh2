@@ -35,6 +35,7 @@ attached_assets/
 
 # Documentation locale de développement
 OPTIMIZATIONS_ROADMAP.md
+CRITICAL_FIX_V131_STABILITY.cpp
 ROADMAP.md
 
 # Submodule changes (to avoid automatic commits)

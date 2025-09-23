@@ -49,6 +49,10 @@ struct TunnelChannel {
     int consecutiveErrors; // Number of consecutive errors
     int eagainErrors; // NEW: Separate counter for EAGAIN errors
     
+    // FIXED: New counters for mutex failure diagnostics (non-destructive)
+    int readMutexFailures;     // Counter for read mutex timeouts
+    int writeMutexFailures;    // Counter for write mutex timeouts  
+    
     // Additional counters for fine-grained flow control
     size_t queuedBytesToLocal;   // Bytes in sshToLocalBuffer
     size_t queuedBytesToRemote;  // Bytes in localToSshBuffer
@@ -224,7 +228,7 @@ private:
     void unlockChannel(int channelIndex);
     
     // NEW: Method to force release of blocked mutexes
-    void forceMutexRelease(int channelIndex);
+    void safeRetryMutexAccess(int channelIndex); // FIXED: Safe version instead of forceMutexRelease
 };
 
 #endif
