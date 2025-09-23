@@ -17,7 +17,40 @@
 #define STUCK_PROBE_THRESHOLD 8   // consecutive failed probes before gracefulClosing
 #endif
 
+#ifndef SOCKET_RECV_BURST_THRESHOLD
+#define SOCKET_RECV_BURST_THRESHOLD 5   // consecutive -43 before marking terminal failure
+#endif
+#ifndef SOCKET_RECV_BURST_WINDOW_MS
+#define SOCKET_RECV_BURST_WINDOW_MS 4000 // window to consider burst persistent
+#endif
+#ifndef SESSION_SOCKET_RECV_FAILURE_THRESHOLD
+#define SESSION_SOCKET_RECV_FAILURE_THRESHOLD 2 // channels failing terminally before session reset
+#endif
+#ifndef SESSION_FAILURE_WINDOW_MS
+#define SESSION_FAILURE_WINDOW_MS 10000 // 10s window for session escalation
+#endif
+
 // SSH write parameters now defined as static constexpr members of SSHTunnel (see header)
+
+// Session-level tracking for socket recv terminal failures
+static int g_terminalSocketFailuresRecent = 0;
+static unsigned long g_firstTerminalFailureMs = 0;
+static bool g_sessionResetTriggered = false;
+
+// Helper pour enregistrer un échec terminal (-43) et éventuellement déclencher une réinitialisation de session
+static void recordTerminalSocketFailure(unsigned long now) {
+  if (g_terminalSocketFailuresRecent == 0) {
+    g_firstTerminalFailureMs = now;
+  }
+  g_terminalSocketFailuresRecent++;
+  if (g_terminalSocketFailuresRecent >= SESSION_SOCKET_RECV_FAILURE_THRESHOLD &&
+      (now - g_firstTerminalFailureMs) <= SESSION_FAILURE_WINDOW_MS) {
+    if (!g_sessionResetTriggered) {
+      g_sessionResetTriggered = true; // le loop() s'en chargera
+      LOG_W("SSH", "Session escalation: multiple terminal -43 bursts -> scheduling reconnect");
+    }
+  }
+}
 
 // Fixed buffer (unchanged) + channel integrity threshold
 #define FIXED_BUFFER_SIZE (8 * 1024)
@@ -155,6 +188,9 @@ bool SSHTunnel::init() {
   channels[i].lastWriteErrorMs = 0;
   channels[i].lastErrorDetailLogMs = 0;
   channels[i].stuckProbeCount = 0;
+  channels[i].socketRecvBurstCount = 0;
+  channels[i].firstSocketRecvErrorMs = 0;
+  channels[i].terminalSocketFailure = false;
     
   // OPTIMIZED: Create unified buffers (simpler & efficient)
     char ringName[32];
@@ -307,7 +343,22 @@ bool SSHTunnel::isConnected() { return state == TUNNEL_CONNECTED; }
 void SSHTunnel::loop() {
   unsigned long now = millis();
 
-  // Handle reconnection if needed
+  // Escalade session planifiée suite à bursts terminaux -43
+  if (g_sessionResetTriggered && state == TUNNEL_CONNECTED) {
+    LOG_W("SSH", "Loop: executing scheduled session reset (terminal -43 bursts)");
+    disconnect();
+    g_sessionResetTriggered = false;
+    g_terminalSocketFailuresRecent = 0;
+    g_firstTerminalFailureMs = 0;
+    // Reconnexion immédiate sera gérée par logique existante (state==DISCONNECTED)
+  }
+  // Reset fenêtre si délai dépassé (évite accumulation éternelle)
+  if (g_terminalSocketFailuresRecent > 0 && (now - g_firstTerminalFailureMs) > SESSION_FAILURE_WINDOW_MS) {
+    g_terminalSocketFailuresRecent = 0;
+    g_firstTerminalFailureMs = 0;
+  }
+
+  // Handle reconnection if needed (après éventuel reset planifié)
   if (state == TUNNEL_ERROR ||
       (state == TUNNEL_CONNECTED && !checkConnection())) {
     handleReconnection();
@@ -975,6 +1026,9 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.lastWriteErrorMs = 0;
   ch.lastErrorDetailLogMs = 0;
   ch.stuckProbeCount = 0;
+  ch.socketRecvBurstCount = 0;
+  ch.firstSocketRecvErrorMs = 0;
+  ch.terminalSocketFailure = false;
   
   // OPTIMIZED: Clear unified buffers
   if (ch.sshToLocalBuffer) {
@@ -1485,6 +1539,11 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
     ssize_t bytesRead = libssh2_channel_read(ch.channel, (char *)rxBuffer, bufferSize);
     
     if (bytesRead > 0) {
+      // Reset burst counters sur succès de lecture
+      if (ch.socketRecvBurstCount) {
+        ch.socketRecvBurstCount = 0;
+        ch.firstSocketRecvErrorMs = 0;
+      }
   // DIAGNOSTIC: Check data consistency for large transfers
       if (ch.largeTransferInProgress && bytesRead > 1024) {
   // Simple check - count non-null bytes to detect corruption
@@ -1610,8 +1669,31 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         ch.gracefulClosing = true;
       }
     } else if (bytesRead < 0 && bytesRead != LIBSSH2_ERROR_EAGAIN) {
-      LOGF_W("SSH", "Channel %d: SSH read error: %d", channelIndex, (int)bytesRead);
-      ch.consecutiveErrors++;
+      if (bytesRead == LIBSSH2_ERROR_SOCKET_RECV) {
+        unsigned long nowErr = millis();
+        ch.socketRecvErrors++;
+        if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = nowErr;
+        ch.socketRecvBurstCount++;
+        if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
+            (nowErr - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
+          ch.terminalSocketFailure = true;
+          ch.gracefulClosing = true;
+          LOGF_W("SSH", "Channel %d: Terminal -43 burst (read) count=%d window=%lums queuedL=%zu queuedR=%zu", \
+                 channelIndex, ch.socketRecvBurstCount, (nowErr - ch.firstSocketRecvErrorMs), ch.queuedBytesToLocal, ch.queuedBytesToRemote);
+          recordTerminalSocketFailure(nowErr);
+        } else if (!ch.terminalSocketFailure) {
+          if ((nowErr - ch.lastErrorDetailLogMs) > 2000) {
+            ch.lastErrorDetailLogMs = nowErr;
+            LOGF_W("SSH", "Channel %d: -43 recv (read) burst=%d queuedR=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+          }
+        }
+      } else if (bytesRead == LIBSSH2_ERROR_DECRYPT) {
+        ch.fatalCryptoErrors++;
+        ch.gracefulClosing = true;
+      } else {
+        LOGF_W("SSH", "Channel %d: SSH read error: %d", channelIndex, (int)bytesRead);
+        ch.consecutiveErrors++;
+      }
     }
   }
 
@@ -1684,6 +1766,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w) ? ch.queuedBytesToRemote - w : 0;
         ch.lastSuccessfulWrite = now;
         ch.consecutiveErrors = 0;
+        // Reset burst counters on successful write
+        if (ch.socketRecvBurstCount) { ch.socketRecvBurstCount = 0; ch.firstSocketRecvErrorMs = 0; }
         if ((size_t)w < chunk) {
           // Put remainder back at head (simple: rewrite) if possible
           ch.localToSshBuffer->write(temp + w, chunk - w);
@@ -1697,6 +1781,20 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         ch.lastWriteErrorMs = now;
         if (w == LIBSSH2_ERROR_SOCKET_RECV) {
           ch.socketRecvErrors++;
+          if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = now;
+            ch.socketRecvBurstCount++;
+          if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
+              (now - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
+            ch.terminalSocketFailure = true;
+            ch.gracefulClosing = true;
+            LOGF_W("SSH", "Channel %d: Terminal -43 burst (drain) count=%d window=%lums qRemote=%zu", channelIndex, ch.socketRecvBurstCount, (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
+            recordTerminalSocketFailure(now);
+          } else if (!ch.terminalSocketFailure) {
+            if ((now - ch.lastErrorDetailLogMs) > 2000) {
+              ch.lastErrorDetailLogMs = now;
+              LOGF_W("SSH", "Channel %d: -43 recv (drain) burst=%d qRemote=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+            }
+          }
         } else if (w == LIBSSH2_ERROR_DECRYPT) {
           ch.fatalCryptoErrors++;
           ch.gracefulClosing = true;
@@ -1719,8 +1817,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       success = true;
     }
 
-  // 2) Read local socket if backpressure acceptable
-    if (ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
+  // 2) Read local socket if backpressure acceptable (suppress when burst >=2 or terminal)
+    bool suppressLocalRead = false;
+    if (ch.terminalSocketFailure) suppressLocalRead = true;
+    else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
+    if (!suppressLocalRead && ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
       ssize_t localRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
       if (localRead > 0) {
   // Attempt immediate looped write (direct drainage)
@@ -1739,8 +1840,23 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           } else {
             ch.consecutiveErrors++; 
             ch.lastWriteErrorMs = now;
-            if (w == LIBSSH2_ERROR_SOCKET_RECV) ch.socketRecvErrors++;
-            else if (w == LIBSSH2_ERROR_DECRYPT) { ch.fatalCryptoErrors++; ch.gracefulClosing = true; }
+            if (w == LIBSSH2_ERROR_SOCKET_RECV) {
+              ch.socketRecvErrors++;
+              if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = now;
+              ch.socketRecvBurstCount++;
+              if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
+                  (now - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
+                ch.terminalSocketFailure = true;
+                ch.gracefulClosing = true;
+                LOGF_W("SSH", "Channel %d: Terminal -43 burst (direct) count=%d window=%lums qRemote=%zu", channelIndex, ch.socketRecvBurstCount, (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
+                recordTerminalSocketFailure(now);
+              } else if (!ch.terminalSocketFailure) {
+                if ((now - ch.lastErrorDetailLogMs) > 2000) {
+                  ch.lastErrorDetailLogMs = now;
+                  LOGF_W("SSH", "Channel %d: -43 recv (direct) burst=%d qRemote=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+                }
+              }
+            } else if (w == LIBSSH2_ERROR_DECRYPT) { ch.fatalCryptoErrors++; ch.gracefulClosing = true; }
             if (now - ch.lastErrorDetailLogMs > 2000) {
               ch.lastErrorDetailLogMs = now;
               LOGF_W("SSH","Channel %d: Direct write err %zd cons=%d sockRecv=%d crypt=%d remain=%zu", 
@@ -1791,6 +1907,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       } else if (localRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         LOGF_W("SSH", "Channel %d: Local read error %s", channelIndex, strerror(errno));
         ch.consecutiveErrors++;
+      }
+    } else if (suppressLocalRead) {
+      if ((now - ch.lastErrorDetailLogMs) > 2000) {
+        ch.lastErrorDetailLogMs = now;
+        LOGF_D("SSH", "Channel %d: Local read suppressed (burst=%d terminal=%d qRemote=%zu)", channelIndex, ch.socketRecvBurstCount, ch.terminalSocketFailure ? 1 : 0, ch.queuedBytesToRemote);
       }
     }
   }
