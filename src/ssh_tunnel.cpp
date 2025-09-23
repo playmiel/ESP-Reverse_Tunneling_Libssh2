@@ -72,17 +72,19 @@ SSHTunnel::SSHTunnel()
       state(TUNNEL_DISCONNECTED), lastKeepAlive(0), lastConnectionAttempt(0),
   reconnectAttempts(0), bytesReceived(0), bytesSent(0), droppedBytes(0),
       channels(nullptr), rxBuffer(nullptr), txBuffer(nullptr),
-      tunnelMutex(nullptr), statsMutex(nullptr), pendingConnectionsMutex(nullptr), 
+      tunnelMutex(nullptr), statsMutex(nullptr), sessionMutex(nullptr), pendingConnectionsMutex(nullptr), 
       config(&globalSSHConfig), dataProcessingTask(nullptr), 
       dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false) {
 
   // OPTIMIZED: Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
   statsMutex = xSemaphoreCreateMutex();
+  sessionMutex = xSemaphoreCreateMutex();
   pendingConnectionsMutex = xSemaphoreCreateMutex();
   dataProcessingSemaphore = xSemaphoreCreateBinary();
   
-  if (tunnelMutex == NULL || statsMutex == NULL || pendingConnectionsMutex == NULL || dataProcessingSemaphore == NULL) {
+  if (tunnelMutex == NULL || statsMutex == NULL || sessionMutex == NULL ||
+      pendingConnectionsMutex == NULL || dataProcessingSemaphore == NULL) {
     LOG_E("SSH", "Failed to create tunnel mutexes");
   }
 }
@@ -96,14 +98,14 @@ SSHTunnel::~SSHTunnel() {
   // Free semaphores
   SAFE_DELETE_SEMAPHORE(tunnelMutex);
   SAFE_DELETE_SEMAPHORE(statsMutex);
+  SAFE_DELETE_SEMAPHORE(sessionMutex);
   SAFE_DELETE_SEMAPHORE(pendingConnectionsMutex);
   SAFE_DELETE_SEMAPHORE(dataProcessingSemaphore);
   
   // Clean pending connections
   for (auto& pending : pendingConnections) {
     if (pending.channel) {
-      libssh2_channel_close(pending.channel);
-      libssh2_channel_free(pending.channel);
+      closeLibssh2Channel(pending.channel);
     }
   }
   pendingConnections.clear();
@@ -468,11 +470,17 @@ bool SSHTunnel::initializeSSH() {
 
   /* Start it up. This will trade welcome banners, exchange keys,
    * and setup crypto, compression, and MAC layers */
+  if (!lockSession(pdMS_TO_TICKS(5000))) {
+    LOG_E("SSH", "Session lock timeout during handshake");
+    return false;
+  }
   rc = libssh2_session_handshake(session, socketfd);
+  unlockSession();
   if (rc) {
     LOGF_E("SSH", "Error when starting up SSH session: %d", rc);
     return false;
   }
+
 
   // libssh2_trace(session, LIBSSH2_TRACE_SOCKET | LIBSSH2_TRACE_ERROR);
 
@@ -499,15 +507,21 @@ bool SSHTunnel::verifyHostKey() {
   // Get server host key
   size_t host_key_len;
   int host_key_type;
+  if (!lockSession(pdMS_TO_TICKS(200))) {
+    LOG_E("SSH", "Session lock timeout while reading host key");
+    return false;
+  }
   const char* host_key = libssh2_session_hostkey(session, &host_key_len, &host_key_type);
   
   if (!host_key) {
+    unlockSession();
     LOG_E("SSH", "Failed to get host key from server");
     return false;
   }
   
   // Get SHA256 fingerprint
   const char *fingerprint_sha256 = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256);
+  unlockSession();
   if (!fingerprint_sha256) {
     LOG_E("SSH", "Failed to get host key fingerprint");
     return false;
@@ -591,8 +605,15 @@ bool SSHTunnel::authenticateSSH() {
   const SSHServerConfig& sshConfig = config->getSSHConfig();
   
   /* check what authentication methods are available */
-  char *userauthlist =
-      libssh2_userauth_list(session, sshConfig.username.c_str(), sshConfig.username.length());
+  char *userauthlist = nullptr;
+  if (lockSession(pdMS_TO_TICKS(500))) {
+    userauthlist =
+        libssh2_userauth_list(session, sshConfig.username.c_str(), sshConfig.username.length());
+    unlockSession();
+  } else {
+    LOG_E("SSH", "Session lock timeout while querying authentication methods");
+    return false;
+  }
   LOGF_I("SSH", "Authentication methods: %s", userauthlist);
 
   int auth = 0;
@@ -611,7 +632,15 @@ bool SSHTunnel::authenticateSSH() {
   }
 
   if (auth & AUTH_PASSWORD) {
-    if (libssh2_userauth_password(session, sshConfig.username.c_str(), sshConfig.password.c_str())) {
+    int authRc = 0;
+    if (lockSession(pdMS_TO_TICKS(1000))) {
+      authRc = libssh2_userauth_password(session, sshConfig.username.c_str(), sshConfig.password.c_str());
+      unlockSession();
+    } else {
+      LOG_E("SSH", "Session lock timeout during password authentication");
+      return false;
+    }
+    if (authRc) {
       LOG_E("SSH", "Authentication by password failed");
       return false;
     }
@@ -638,36 +667,38 @@ bool SSHTunnel::authenticateSSH() {
       LOGF_D("SSH", "Private key first 50 chars: %.50s", sshConfig.privateKeyData.c_str());
       LOGF_D("SSH", "Using passphrase: %s", passphrase ? "yes" : "no");
       
-      int auth_result = libssh2_userauth_publickey_frommemory(session, 
-                                                sshConfig.username.c_str(),
-                                                sshConfig.username.length(),
-                                                sshConfig.publicKeyData.c_str(),
-                                                sshConfig.publicKeyData.length(),
-                                                sshConfig.privateKeyData.c_str(),
-                                                sshConfig.privateKeyData.length(),
-                                                passphrase);
+      int auth_result = 0;
+      String errorDetail = "";
+      if (lockSession(pdMS_TO_TICKS(1000))) {
+        auth_result = libssh2_userauth_publickey_frommemory(session, 
+                                              sshConfig.username.c_str(),
+                                              sshConfig.username.length(),
+                                              sshConfig.publicKeyData.c_str(),
+                                              sshConfig.publicKeyData.length(),
+                                              sshConfig.privateKeyData.c_str(),
+                                              sshConfig.privateKeyData.length(),
+                                              passphrase);
+        if (auth_result) {
+          char *errmsg = nullptr;
+          int errlen = 0;
+          libssh2_session_last_error(session, &errmsg, &errlen, 0);
+          if (errmsg && errlen > 0) {
+            errorDetail = String(errmsg).substring(0, errlen);
+          }
+        }
+        unlockSession();
+      } else {
+        LOG_E("SSH", "Session lock timeout during public key authentication");
+        return false;
+      }
       if (auth_result) {
-        char *errmsg;
-        int errlen;
-        libssh2_session_last_error(session, &errmsg, &errlen, 0);
-        LOGF_E("SSH", "Authentication by public key from memory failed! Error code: %d, Message: %s", auth_result, errmsg ? errmsg : "Unknown");
+        const char* detail = errorDetail.length() ? errorDetail.c_str() : "Unknown";
+        LOGF_E("SSH", "Authentication by public key from memory failed! Error code: %d, Message: %s", auth_result, detail);
         
   // Retry with explicit empty passphrase
         LOGF_I("SSH", "Retrying with empty passphrase...");
-        auth_result = libssh2_userauth_publickey_frommemory(session, 
-                                                  sshConfig.username.c_str(),
-                                                  sshConfig.username.length(),
-                                                  sshConfig.publicKeyData.c_str(),
-                                                  sshConfig.publicKeyData.length(),
-                                                  sshConfig.privateKeyData.c_str(),
-                                                  sshConfig.privateKeyData.length(),
-                                                  "");
-        if (auth_result) {
-          libssh2_session_last_error(session, &errmsg, &errlen, 0);
-          LOGF_E("SSH", "Retry with empty passphrase also failed! Error: %d, Message: %s", auth_result, errmsg ? errmsg : "Unknown");
-          
-          // Final attempt: try NULL instead of empty string
-          LOGF_I("SSH", "Final retry with NULL passphrase...");
+        errorDetail = "";
+        if (lockSession(pdMS_TO_TICKS(1000))) {
           auth_result = libssh2_userauth_publickey_frommemory(session, 
                                                     sshConfig.username.c_str(),
                                                     sshConfig.username.length(),
@@ -675,10 +706,52 @@ bool SSHTunnel::authenticateSSH() {
                                                     sshConfig.publicKeyData.length(),
                                                     sshConfig.privateKeyData.c_str(),
                                                     sshConfig.privateKeyData.length(),
-                                                    NULL);
+                                                    "");
           if (auth_result) {
+            char *errmsg = nullptr;
+            int errlen = 0;
             libssh2_session_last_error(session, &errmsg, &errlen, 0);
-            LOGF_E("SSH", "All authentication attempts failed! Final error: %d, Message: %s", auth_result, errmsg ? errmsg : "Unknown");
+            if (errmsg && errlen > 0) {
+              errorDetail = String(errmsg).substring(0, errlen);
+            }
+          }
+          unlockSession();
+        } else {
+          LOG_E("SSH", "Session lock timeout during public key retry");
+          return false;
+        }
+        if (auth_result) {
+          const char* retryDetail = errorDetail.length() ? errorDetail.c_str() : "Unknown";
+          LOGF_E("SSH", "Retry with empty passphrase also failed! Error: %d, Message: %s", auth_result, retryDetail);
+          
+          // Final attempt: try NULL instead of empty string
+          LOGF_I("SSH", "Final retry with NULL passphrase...");
+          errorDetail = "";
+          if (lockSession(pdMS_TO_TICKS(1000))) {
+            auth_result = libssh2_userauth_publickey_frommemory(session, 
+                                                      sshConfig.username.c_str(),
+                                                      sshConfig.username.length(),
+                                                      sshConfig.publicKeyData.c_str(),
+                                                      sshConfig.publicKeyData.length(),
+                                                      sshConfig.privateKeyData.c_str(),
+                                                      sshConfig.privateKeyData.length(),
+                                                      NULL);
+            if (auth_result) {
+              char *errmsg = nullptr;
+              int errlen = 0;
+              libssh2_session_last_error(session, &errmsg, &errlen, 0);
+              if (errmsg && errlen > 0) {
+                errorDetail = String(errmsg).substring(0, errlen);
+              }
+            }
+            unlockSession();
+          } else {
+            LOG_E("SSH", "Session lock timeout during public key final retry");
+            return false;
+          }
+          if (auth_result) {
+            const char* finalDetail = errorDetail.length() ? errorDetail.c_str() : "Unknown";
+            LOGF_E("SSH", "All authentication attempts failed! Final error: %d, Message: %s", auth_result, finalDetail);
             
             // Info: supported formats hint
             LOG_W("SSH", "Note: Your private key is in OpenSSH format. Consider converting to PEM format:");
@@ -698,8 +771,26 @@ bool SSHTunnel::authenticateSSH() {
       String keyfile1_str = sshConfig.privateKeyPath + ".pub";
       const char *keyfile1 = keyfile1_str.c_str();
       const char *keyfile2 = sshConfig.privateKeyPath.c_str();
-      if (libssh2_userauth_publickey_fromfile(session, sshConfig.username.c_str(), keyfile1,
-                                              keyfile2, sshConfig.password.c_str())) {
+      int fileAuth = 0;
+      if (lockSession(pdMS_TO_TICKS(1000))) {
+        fileAuth = libssh2_userauth_publickey_fromfile(session, sshConfig.username.c_str(), keyfile1,
+                                              keyfile2, sshConfig.password.c_str());
+        if (fileAuth) {
+          char *errmsg = nullptr;
+          int errlen = 0;
+          libssh2_session_last_error(session, &errmsg, &errlen, 0);
+          String detailStr = "";
+          if (errmsg && errlen > 0) {
+            detailStr = String(errmsg).substring(0, errlen);
+          }
+          unlockSession();
+          const char* detail = detailStr.length() ? detailStr.c_str() : "Unknown";
+          LOGF_E("SSH", "Authentication by public key from file failed! Error: %d, Message: %s", fileAuth, detail);
+          return false;
+        }
+        unlockSession();
+      } else {
+        LOG_E("SSH", "Session lock timeout during file-based authentication");
         LOG_E("SSH", "Authentication by public key from file failed!");
         return false;
       }
@@ -723,8 +814,14 @@ bool SSHTunnel::createReverseTunnel() {
   const char* bind_host = tunnelConfig.remoteBindHost.c_str();
   
   do {
+    if (!lockSession(pdMS_TO_TICKS(500))) {
+      LOG_W("SSH", "Session lock timeout while creating reverse tunnel listener");
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
     listener = libssh2_channel_forward_listen_ex(
         session, bind_host, ssh_port, &bound_port, maxlisten);
+    unlockSession();
     if (!listener) {
       vTaskDelay(pdMS_TO_TICKS(10));
     }
@@ -741,22 +838,57 @@ bool SSHTunnel::createReverseTunnel() {
 
 void SSHTunnel::cleanupSSH() {
   if (listener) {
-    libssh2_channel_forward_cancel(listener);
+    if (lockSession(pdMS_TO_TICKS(500))) {
+      libssh2_channel_forward_cancel(listener);
+      unlockSession();
+    }
     listener = nullptr;
   }
 
   if (session) {
-    libssh2_session_disconnect(session, "Shutdown");
-    libssh2_session_free(session);
+    if (lockSession(pdMS_TO_TICKS(500))) {
+      libssh2_session_disconnect(session, "Shutdown");
+      libssh2_session_free(session);
+      unlockSession();
+    }
     session = nullptr;
   }
+}
+
+void SSHTunnel::closeLibssh2Channel(LIBSSH2_CHANNEL* channel) {
+  if (!channel) {
+    return;
+  }
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    libssh2_channel_close(channel);
+    libssh2_channel_free(channel);
+    unlockSession();
+  }
+}
+
+bool SSHTunnel::channelEofLocked(LIBSSH2_CHANNEL* channel) {
+  if (!channel) {
+    return true;
+  }
+  bool eof = false;
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    eof = libssh2_channel_eof(channel);
+    unlockSession();
+  }
+  return eof;
 }
 
 bool SSHTunnel::handleNewConnection() {
   if (!listener)
     return false;
 
-  LIBSSH2_CHANNEL *channel = libssh2_channel_forward_accept(listener);
+  LIBSSH2_CHANNEL *channel = nullptr;
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    channel = libssh2_channel_forward_accept(listener);
+    unlockSession();
+  } else {
+    return false;
+  }
 
   if (!channel) {
     return false; // No new connection or error
@@ -765,8 +897,7 @@ bool SSHTunnel::handleNewConnection() {
   // NEW: Decide whether to accept connection (queue system currently disabled)
   if (!shouldAcceptNewConnection()) {
     LOGF_W("SSH", "All channels busy - rejecting new connection");
-    libssh2_channel_close(channel);
-    libssh2_channel_free(channel);
+    closeLibssh2Channel(channel);
     return false; // Rejeter directement au lieu de mettre en queue
   }
 
@@ -801,8 +932,7 @@ bool SSHTunnel::handleNewConnection() {
   if (channelIndex == -1) {
     LOGF_W("SSH", "No available channel slots (active: %d/%d), closing new connection", 
            getActiveChannels(), maxChannels);
-    libssh2_channel_close(channel);
-    libssh2_channel_free(channel);
+    closeLibssh2Channel(channel);
     return false;
   }
 
@@ -810,8 +940,7 @@ bool SSHTunnel::handleNewConnection() {
   int localSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (localSocket < 0) {
     LOG_E("SSH", "Failed to create local socket");
-    libssh2_channel_close(channel);
-    libssh2_channel_free(channel);
+    closeLibssh2Channel(channel);
     return false;
   }
 
@@ -826,8 +955,7 @@ bool SSHTunnel::handleNewConnection() {
     LOGF_E("SSH", "Failed to connect to local endpoint %s:%d", 
            tunnelConfig.localHost.c_str(), tunnelConfig.localPort);
     close(localSocket);
-    libssh2_channel_close(channel);
-    libssh2_channel_free(channel);
+    closeLibssh2Channel(channel);
     return false;
   }
 
@@ -859,7 +987,12 @@ bool SSHTunnel::handleNewConnection() {
   channels[channelIndex].lastHardRecoveryMs = 0;
   channels[channelIndex].lastHealthWarnMs = 0;
 
-  libssh2_channel_set_blocking(channel, 0);
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    libssh2_channel_set_blocking(channel, 0);
+    unlockSession();
+  } else {
+    LOG_W("SSH", "Channel %d: Unable to switch to non-blocking mode (lock timeout)", channelIndex);
+  }
 
   LOGF_I("SSH", "New tunnel connection established (channel %d)", channelIndex);
   return true;
@@ -875,6 +1008,20 @@ void SSHTunnel::handleChannelData(int channelIndex) {
 
   // Check channel health before processing data (with hysteresis and cooldown)
   if (!isChannelHealthy(channelIndex)) {
+    // Cas terminal: isChannelHealthy already logged; handle immediate/timeout close here
+    if (ch.terminalSocketFailure) {
+      unsigned long nowTerm = millis();
+      bool buffersEmptyTerm = (ch.sshToLocalBuffer ? ch.sshToLocalBuffer->empty() : true) && (ch.localToSshBuffer ? ch.localToSshBuffer->empty() : true);
+      bool timeoutTerm = (ch.firstSocketRecvErrorMs && (nowTerm - ch.firstSocketRecvErrorMs) > 1500);
+      if (buffersEmptyTerm || timeoutTerm) {
+        LOGF_W("SSH", "Channel %d: Closing (terminal burst) buffersEmpty=%d timeout=%d", channelIndex, buffersEmptyTerm?1:0, timeoutTerm?1:0);
+        closeChannel(channelIndex);
+      } else {
+        // tenter un drain minimal
+        processPendingData(channelIndex);
+      }
+      return;
+    }
     ch.healthUnhealthyCount++;
     // Prefer a gentle approach first
     if (ch.healthUnhealthyCount < HEALTH_UNHEALTHY_THRESHOLD) {
@@ -982,8 +1129,11 @@ void SSHTunnel::closeChannel(int channelIndex) {
   flushPendingData(channelIndex);
 
   if (ch.channel) {
-    libssh2_channel_close(ch.channel);
-    libssh2_channel_free(ch.channel);
+    if (lockSession(pdMS_TO_TICKS(500))) {
+      libssh2_channel_close(ch.channel);
+      libssh2_channel_free(ch.channel);
+      unlockSession();
+    }
     ch.channel = nullptr;
   }
 
@@ -1204,7 +1354,14 @@ void SSHTunnel::sendKeepAlive() {
     return;
 
   int seconds = 0;
-  int rc = libssh2_keepalive_send(session, &seconds);
+  int rc = LIBSSH2_ERROR_EAGAIN;
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    rc = libssh2_keepalive_send(session, &seconds);
+    unlockSession();
+  } else {
+    LOG_W("SSH", "Keep-alive skipped (session lock timeout)");
+    return;
+  }
   if (rc == 0) {
     LOGF_D("SSH", "Keep-alive sent, next in %d seconds", seconds);
   } else if (rc != LIBSSH2_ERROR_EAGAIN) {
@@ -1319,6 +1476,23 @@ bool SSHTunnel::lockStats() {
 void SSHTunnel::unlockStats() {
   if (statsMutex != NULL) {
     xSemaphoreGive(statsMutex);
+  }
+}
+
+bool SSHTunnel::lockSession(TickType_t ticks) {
+  if (sessionMutex == NULL) {
+    return false;
+  }
+  TickType_t waitTicks = ticks;
+  if (waitTicks == 0) {
+    waitTicks = 1; // ensure we at least yield once when timeout 0 requested
+  }
+  return xSemaphoreTake(sessionMutex, waitTicks) == pdTRUE;
+}
+
+void SSHTunnel::unlockSession() {
+  if (sessionMutex != NULL) {
+    xSemaphoreGive(sessionMutex);
   }
 }
 
@@ -1536,7 +1710,26 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
       return false;
     }
 
-    ssize_t bytesRead = libssh2_channel_read(ch.channel, (char *)rxBuffer, bufferSize);
+    ssize_t bytesRead = 0;
+    bool channelEof = false;
+    String readErrorDetail = "";
+    if (lockSession(pdMS_TO_TICKS(200))) {
+      bytesRead = libssh2_channel_read(ch.channel, (char *)rxBuffer, bufferSize);
+      if (bytesRead == 0) {
+        channelEof = libssh2_channel_eof(ch.channel);
+      } else if (bytesRead < 0 && bytesRead != LIBSSH2_ERROR_EAGAIN) {
+        char* errmsg = nullptr;
+        int errlen = 0;
+        libssh2_session_last_error(session, &errmsg, &errlen, 0);
+        if (errmsg && errlen > 0) {
+          readErrorDetail = String(errmsg).substring(0, errlen);
+        }
+      }
+      unlockSession();
+    } else {
+      unlockChannelRead(channelIndex);
+      return false;
+    }
     
     if (bytesRead > 0) {
       // Reset burst counters sur succès de lecture
@@ -1664,7 +1857,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
       }
     } else if (bytesRead == 0) {
       // 0 -> vérifier explicitement EOF
-      if (libssh2_channel_eof(ch.channel)) {
+      if (channelEof) {
         LOGF_I("SSH", "Channel %d: SSH channel EOF", channelIndex);
         ch.gracefulClosing = true;
       }
@@ -1684,14 +1877,16 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         } else if (!ch.terminalSocketFailure) {
           if ((nowErr - ch.lastErrorDetailLogMs) > 2000) {
             ch.lastErrorDetailLogMs = nowErr;
-            LOGF_W("SSH", "Channel %d: -43 recv (read) burst=%d queuedR=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+            const char* detail = readErrorDetail.length() ? readErrorDetail.c_str() : "socket_recv";
+            LOGF_W("SSH", "Channel %d: -43 recv (read) burst=%d queuedR=%zu detail=%s", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote, detail);
           }
         }
       } else if (bytesRead == LIBSSH2_ERROR_DECRYPT) {
         ch.fatalCryptoErrors++;
         ch.gracefulClosing = true;
       } else {
-        LOGF_W("SSH", "Channel %d: SSH read error: %d", channelIndex, (int)bytesRead);
+        const char* detail = readErrorDetail.length() ? readErrorDetail.c_str() : "unknown";
+        LOGF_W("SSH", "Channel %d: SSH read error: %d detail=%s", channelIndex, (int)bytesRead, detail);
         ch.consecutiveErrors++;
       }
     }
@@ -1742,72 +1937,75 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   // 1) Loop-drain already queued data (localToSshBuffer)
     size_t totalWritten = 0;
     int passes = 0;
-  while (passes < SSH_MAX_WRITES_PER_PASS && ch.localToSshBuffer && !ch.localToSshBuffer->empty()) {
-  // Check SSH window
-      size_t winSize = 0, winUsed = 0;
-  // NOTE: libssh2_channel_window_write_ex signature semble différente sur cible; suppression contrôle fenêtre direct
-  // (Future improvement: adapt according to actual header.)
-  (void)winSize; (void)winUsed; // silencieux
+    if (lockSession(pdMS_TO_TICKS(200))) {
+      while (passes < SSH_MAX_WRITES_PER_PASS && ch.localToSshBuffer && !ch.localToSshBuffer->empty()) {
+        size_t winSize = 0, winUsed = 0;
+        (void)winSize; (void)winUsed;
 
-      uint8_t temp[SSH_BUFFER_SIZE];
-      size_t chunk = ch.localToSshBuffer->read(temp, sizeof(temp));
-      if (chunk == 0) break;
-      if (chunk < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
-  // Try to aggregate a bit more to avoid micro-writes
-        size_t extra = ch.localToSshBuffer->read(temp + chunk, MIN_WRITE_SIZE - chunk);
-        chunk += extra;
-      }
-
-      ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)temp, chunk);
-      if (w > 0) {
-        passes++;
-        totalWritten += w;
-        ch.totalBytesSent += w;
-        ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w) ? ch.queuedBytesToRemote - w : 0;
-        ch.lastSuccessfulWrite = now;
-        ch.consecutiveErrors = 0;
-        // Reset burst counters on successful write
-        if (ch.socketRecvBurstCount) { ch.socketRecvBurstCount = 0; ch.firstSocketRecvErrorMs = 0; }
-        if ((size_t)w < chunk) {
-          // Put remainder back at head (simple: rewrite) if possible
-          ch.localToSshBuffer->write(temp + w, chunk - w);
+        uint8_t temp[SSH_BUFFER_SIZE];
+        size_t chunk = ch.localToSshBuffer->read(temp, sizeof(temp));
+        if (chunk == 0) break;
+        if (chunk < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
+          size_t extra = ch.localToSshBuffer->read(temp + chunk, MIN_WRITE_SIZE - chunk);
+          chunk += extra;
         }
-      } else if (w == LIBSSH2_ERROR_EAGAIN) {
-  // Put the whole chunk back
-        ch.localToSshBuffer->write(temp, chunk);
-        break;
-      } else {
-        ch.consecutiveErrors++;
-        ch.lastWriteErrorMs = now;
-        if (w == LIBSSH2_ERROR_SOCKET_RECV) {
-          ch.socketRecvErrors++;
-          if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = now;
-            ch.socketRecvBurstCount++;
-          if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
-              (now - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
-            ch.terminalSocketFailure = true;
-            ch.gracefulClosing = true;
-            LOGF_W("SSH", "Channel %d: Terminal -43 burst (drain) count=%d window=%lums qRemote=%zu", channelIndex, ch.socketRecvBurstCount, (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
-            recordTerminalSocketFailure(now);
-          } else if (!ch.terminalSocketFailure) {
-            if ((now - ch.lastErrorDetailLogMs) > 2000) {
-              ch.lastErrorDetailLogMs = now;
-              LOGF_W("SSH", "Channel %d: -43 recv (drain) burst=%d qRemote=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
-            }
+
+        String drainErrorDetail = "";
+        ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)temp, chunk);
+        if (w > 0) {
+          passes++;
+          totalWritten += w;
+          ch.totalBytesSent += w;
+          ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w) ? ch.queuedBytesToRemote - w : 0;
+          ch.lastSuccessfulWrite = now;
+          ch.consecutiveErrors = 0;
+          if (ch.socketRecvBurstCount) { ch.socketRecvBurstCount = 0; ch.firstSocketRecvErrorMs = 0; }
+          if ((size_t)w < chunk) {
+            ch.localToSshBuffer->write(temp + w, chunk - w);
           }
-        } else if (w == LIBSSH2_ERROR_DECRYPT) {
-          ch.fatalCryptoErrors++;
-          ch.gracefulClosing = true;
+        } else if (w == LIBSSH2_ERROR_EAGAIN) {
+          ch.localToSshBuffer->write(temp, chunk);
+          break;
+        } else {
+          ch.consecutiveErrors++;
+          ch.lastWriteErrorMs = now;
+          if (w == LIBSSH2_ERROR_SOCKET_RECV) {
+            ch.socketRecvErrors++;
+            if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = now;
+            ch.socketRecvBurstCount++;
+            if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
+                (now - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
+              ch.terminalSocketFailure = true;
+              ch.gracefulClosing = true;
+              LOGF_W("SSH", "Channel %d: Terminal -43 burst (drain) count=%d window=%lums qRemote=%zu", channelIndex, ch.socketRecvBurstCount, (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
+              recordTerminalSocketFailure(now);
+            } else if (!ch.terminalSocketFailure) {
+              if ((now - ch.lastErrorDetailLogMs) > 2000) {
+                ch.lastErrorDetailLogMs = now;
+                LOGF_W("SSH", "Channel %d: -43 recv (drain) burst=%d qRemote=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+              }
+            }
+          } else if (w == LIBSSH2_ERROR_DECRYPT) {
+            ch.fatalCryptoErrors++;
+            ch.gracefulClosing = true;
+          }
+          char* errmsg = nullptr;
+          int errlen = 0;
+          libssh2_session_last_error(session, &errmsg, &errlen, 0);
+          if (errmsg && errlen > 0) {
+            drainErrorDetail = String(errmsg).substring(0, errlen);
+          }
+          if (now - ch.lastErrorDetailLogMs > 2000) {
+            ch.lastErrorDetailLogMs = now;
+            const char* detail = drainErrorDetail.length() ? drainErrorDetail.c_str() : "unknown";
+            LOGF_W("SSH", "Channel %d: Write error %zd during drain cons=%d sockRecv=%d crypt=%d qRemote=%zu detail=%s", 
+                   channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, ch.queuedBytesToRemote, detail);
+          }
+          ch.localToSshBuffer->write(temp, chunk);
+          break;
         }
-        if (now - ch.lastErrorDetailLogMs > 2000) {
-          ch.lastErrorDetailLogMs = now;
-          LOGF_W("SSH", "Channel %d: Write error %zd during drain cons=%d sockRecv=%d crypt=%d qRemote=%zu", 
-                 channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, ch.queuedBytesToRemote);
-        }
-        // Put data back for future retry then exit loop
-        ch.localToSshBuffer->write(temp, chunk);
-        break;
       }
+      unlockSession();
     }
 
     if (totalWritten > 0) {
@@ -1826,44 +2024,57 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       if (localRead > 0) {
   // Attempt immediate looped write (direct drainage)
         size_t offset = 0; int directPass = 0; size_t directWrittenTotal = 0;
-  while (offset < (size_t)localRead && directPass < SSH_MAX_WRITES_PER_PASS) {
-          size_t remain = (size_t)localRead - offset;
-          // Check window
-            // (SSH window control disabled due to incorrect signature on target)
-          ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)txBuffer + offset, remain);
-          if (w > 0) {
-            offset += w; directPass++; directWrittenTotal += w;
-            ch.totalBytesSent += w; ch.lastSuccessfulWrite = now; ch.consecutiveErrors = 0;
-            if (lockStats()) { bytesSent += w; unlockStats(); }
-          } else if (w == LIBSSH2_ERROR_EAGAIN) {
-            break; // Queue the remainder
-          } else {
-            ch.consecutiveErrors++; 
-            ch.lastWriteErrorMs = now;
-            if (w == LIBSSH2_ERROR_SOCKET_RECV) {
-              ch.socketRecvErrors++;
-              if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = now;
-              ch.socketRecvBurstCount++;
-              if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
-                  (now - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
-                ch.terminalSocketFailure = true;
-                ch.gracefulClosing = true;
-                LOGF_W("SSH", "Channel %d: Terminal -43 burst (direct) count=%d window=%lums qRemote=%zu", channelIndex, ch.socketRecvBurstCount, (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
-                recordTerminalSocketFailure(now);
-              } else if (!ch.terminalSocketFailure) {
-                if ((now - ch.lastErrorDetailLogMs) > 2000) {
-                  ch.lastErrorDetailLogMs = now;
-                  LOGF_W("SSH", "Channel %d: -43 recv (direct) burst=%d qRemote=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+        String directErrorDetail = "";
+        bool sessionLocked = lockSession(pdMS_TO_TICKS(200));
+        if (sessionLocked) {
+          while (offset < (size_t)localRead && directPass < SSH_MAX_WRITES_PER_PASS) {
+            size_t remain = (size_t)localRead - offset;
+            ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)txBuffer + offset, remain);
+            if (w > 0) {
+              offset += w; directPass++; directWrittenTotal += w;
+              ch.totalBytesSent += w; ch.lastSuccessfulWrite = now; ch.consecutiveErrors = 0;
+              if (lockStats()) { bytesSent += w; unlockStats(); }
+            } else if (w == LIBSSH2_ERROR_EAGAIN) {
+              break; // Queue the remainder
+            } else {
+              ch.consecutiveErrors++;
+              ch.lastWriteErrorMs = now;
+              if (w == LIBSSH2_ERROR_SOCKET_RECV) {
+                ch.socketRecvErrors++;
+                if (ch.socketRecvBurstCount == 0) ch.firstSocketRecvErrorMs = now;
+                ch.socketRecvBurstCount++;
+                if (!ch.terminalSocketFailure && ch.socketRecvBurstCount >= SOCKET_RECV_BURST_THRESHOLD &&
+                    (now - ch.firstSocketRecvErrorMs) <= SOCKET_RECV_BURST_WINDOW_MS) {
+                  ch.terminalSocketFailure = true;
+                  ch.gracefulClosing = true;
+                  LOGF_W("SSH", "Channel %d: Terminal -43 burst (direct) count=%d window=%lums qRemote=%zu", channelIndex, ch.socketRecvBurstCount, (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
+                  recordTerminalSocketFailure(now);
+                } else if (!ch.terminalSocketFailure) {
+                  if ((now - ch.lastErrorDetailLogMs) > 2000) {
+                    ch.lastErrorDetailLogMs = now;
+                    LOGF_W("SSH", "Channel %d: -43 recv (direct) burst=%d qRemote=%zu", channelIndex, ch.socketRecvBurstCount, ch.queuedBytesToRemote);
+                  }
                 }
+              } else if (w == LIBSSH2_ERROR_DECRYPT) {
+                ch.fatalCryptoErrors++;
+                ch.gracefulClosing = true;
               }
-            } else if (w == LIBSSH2_ERROR_DECRYPT) { ch.fatalCryptoErrors++; ch.gracefulClosing = true; }
-            if (now - ch.lastErrorDetailLogMs > 2000) {
-              ch.lastErrorDetailLogMs = now;
-              LOGF_W("SSH","Channel %d: Direct write err %zd cons=%d sockRecv=%d crypt=%d remain=%zu", 
-                     channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, (size_t)localRead - offset);
+              char* errmsg = nullptr;
+              int errlen = 0;
+              libssh2_session_last_error(session, &errmsg, &errlen, 0);
+              if (errmsg && errlen > 0) {
+                directErrorDetail = String(errmsg).substring(0, errlen);
+              }
+              if (now - ch.lastErrorDetailLogMs > 2000) {
+                ch.lastErrorDetailLogMs = now;
+                const char* detail = directErrorDetail.length() ? directErrorDetail.c_str() : "unknown";
+                LOGF_W("SSH","Channel %d: Direct write err %zd cons=%d sockRecv=%d crypt=%d remain=%zu detail=%s", 
+                       channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, (size_t)localRead - offset, detail);
+              }
+              break;
             }
-            break;
           }
+          unlockSession();
         }
         size_t remaining = (size_t)localRead - offset;
         if (remaining > 0) {
@@ -1996,41 +2207,54 @@ void SSHTunnel::processPendingData(int channelIndex) {
       const int maxWritesThisPass = 6; // Conservative per-loop drain cap (overrides global macro 8)
       int passes = 0;
       size_t totalWrittenThisPass = 0;
-      while (passes < maxWritesThisPass && !ch.localToSshBuffer->empty()) {
-        uint8_t tempBuffer[SSH_BUFFER_SIZE];
-        size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
-        if (bytesRead == 0) break;
-        ssize_t written = libssh2_channel_write(ch.channel, (char*)tempBuffer, bytesRead);
-        if (written > 0) {
-          passes++;
-          totalWrittenThisPass += written;
-          ch.totalBytesSent += written;
-          ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
-          ch.consecutiveErrors = 0;
-          if (lockStats()) { bytesSent += written; unlockStats(); }
-          if ((size_t)written < bytesRead) {
-            ch.localToSshBuffer->write(tempBuffer + written, bytesRead - written);
-            break; // Reduced SSH window: stop draining
+      if (lockSession(pdMS_TO_TICKS(200))) {
+        while (passes < maxWritesThisPass && !ch.localToSshBuffer->empty()) {
+          uint8_t tempBuffer[SSH_BUFFER_SIZE];
+          size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
+          if (bytesRead == 0) break;
+          if (bytesRead < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
+            size_t extra = ch.localToSshBuffer->read(tempBuffer + bytesRead, MIN_WRITE_SIZE - bytesRead);
+            bytesRead += extra;
           }
-        } else if (written == LIBSSH2_ERROR_EAGAIN) {
-          // Remettre intégralement le chunk
-          ch.localToSshBuffer->write(tempBuffer, bytesRead);
-          ch.eagainErrors++;
+          String writeErrorDetail = "";
+          ssize_t written = libssh2_channel_write(ch.channel, (char*)tempBuffer, bytesRead);
+          if (written > 0) {
+            passes++;
+            totalWrittenThisPass += written;
+            ch.totalBytesSent += written;
+            ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
+            ch.consecutiveErrors = 0;
+            if (lockStats()) { bytesSent += written; unlockStats(); }
+            if ((size_t)written < bytesRead) {
+              ch.localToSshBuffer->write(tempBuffer + written, bytesRead - written);
+              break; // Reduced SSH window: stop draining
+            }
+          } else if (written == LIBSSH2_ERROR_EAGAIN) {
+            ch.localToSshBuffer->write(tempBuffer, bytesRead);
+            ch.eagainErrors++;
             if ((ch.eagainErrors % 32) == 1) {
               LOGF_D("SSH", "Channel %d: SSH channel busy mid-drain (eagain=%d passes=%d total=%zu)", channelIndex, ch.eagainErrors, passes, totalWrittenThisPass);
             }
-          break; // SSH window full
-        } else if (written == 0) {
-          // Canal fermé
-          ch.localToSshBuffer->write(tempBuffer, bytesRead);
-          LOGF_I("SSH", "Channel %d: SSH channel closed, %zu bytes preserved", channelIndex, bytesRead);
-          break;
-        } else { // Erreur négative
-          ch.localToSshBuffer->write(tempBuffer, bytesRead);
-          ch.consecutiveErrors++;
-          LOGF_W("SSH", "Channel %d: Write error %zd (err=%d)", channelIndex, written, ch.consecutiveErrors);
-          break;
+            break; // SSH window full
+          } else if (written == 0) {
+            ch.localToSshBuffer->write(tempBuffer, bytesRead);
+            LOGF_I("SSH", "Channel %d: SSH channel closed, %zu bytes preserved", channelIndex, bytesRead);
+            break;
+          } else {
+            char* errmsg = nullptr;
+            int errlen = 0;
+            libssh2_session_last_error(session, &errmsg, &errlen, 0);
+            if (errmsg && errlen > 0) {
+              writeErrorDetail = String(errmsg).substring(0, errlen);
+            }
+            ch.localToSshBuffer->write(tempBuffer, bytesRead);
+            ch.consecutiveErrors++;
+            const char* detail = writeErrorDetail.length() ? writeErrorDetail.c_str() : "unknown";
+            LOGF_W("SSH", "Channel %d: Write error %zd (err=%d, detail=%s)", channelIndex, written, ch.consecutiveErrors, detail);
+            break;
+          }
         }
+        unlockSession();
       }
       if (totalWrittenThisPass > 0) {
         LOGF_D("SSH", "Channel %d: Drained %zu bytes in %d passes (queuedRemote=%zu)", channelIndex, totalWrittenThisPass, passes, ch.queuedBytesToRemote);
@@ -2172,6 +2396,21 @@ void SSHTunnel::flushPendingData(int channelIndex) {
 
 bool SSHTunnel::isChannelHealthy(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
+  // Si le canal est marqué terminal suite à un burst -43, il est immédiatement unhealthy
+  if (ch.terminalSocketFailure) {
+    // Passage en DEBUG pour éviter spam WARN répété
+    static unsigned long lastTermLog[16] = {0};
+    unsigned long now = millis();
+    if (channelIndex < 16) {
+      if (now - lastTermLog[channelIndex] > 3000) {
+        lastTermLog[channelIndex] = now;
+        LOGF_W("SSH", "Channel %d: Unhealthy (terminal -43 burst) queuedL=%zu queuedR=%zu", channelIndex, ch.queuedBytesToLocal, ch.queuedBytesToRemote);
+      } else {
+        LOGF_D("SSH", "Channel %d: Terminal burst pending close", channelIndex);
+      }
+    }
+    return false;
+  }
   if (!ch.active) {
     return false;
   }
@@ -2303,7 +2542,7 @@ void SSHTunnel::recoverChannel(int channelIndex) {
     }
   }
   
-  if (ch.channel && libssh2_channel_eof(ch.channel)) {
+  if (ch.channel && channelEofLocked(ch.channel)) {
     LOGF_W("SSH", "Channel %d: SSH channel EOF during recovery, closing", channelIndex);
     closeChannel(channelIndex);
     return;
@@ -2584,8 +2823,7 @@ void SSHTunnel::queuePendingConnection(LIBSSH2_CHANNEL* channel) {
       PendingConnection& oldest = pendingConnections.front();
       LOGF_W("SSH", "Pending connections queue full - closing oldest connection");
       
-      libssh2_channel_close(oldest.channel);
-      libssh2_channel_free(oldest.channel);
+      closeLibssh2Channel(oldest.channel);
       pendingConnections.erase(pendingConnections.begin());
     }
     
@@ -2601,8 +2839,7 @@ void SSHTunnel::queuePendingConnection(LIBSSH2_CHANNEL* channel) {
   } else {
     // Impossible d'acquérir le mutex - fermer la connexion
     LOGF_E("SSH", "Could not acquire mutex for pending connections - closing connection");
-    libssh2_channel_close(channel);
-    libssh2_channel_free(channel);
+    closeLibssh2Channel(channel);
   }
 }
 
@@ -2617,8 +2854,7 @@ bool SSHTunnel::processPendingConnections() {
       // Vérifier si la connexion a expiré
       if (now - it->timestamp > MAX_WAIT_TIME) {
         LOGF_W("SSH", "Pending connection expired - closing");
-        libssh2_channel_close(it->channel);
-        libssh2_channel_free(it->channel);
+        closeLibssh2Channel(it->channel);
         it = pendingConnections.erase(it);
         continue;
       }
@@ -2637,8 +2873,7 @@ bool SSHTunnel::processPendingConnections() {
         // Traiter la connexion (copie du code de handleNewConnection)
         if (!processQueuedConnection(channel)) {
           // Si échec, fermer la connexion
-          libssh2_channel_close(channel);
-          libssh2_channel_free(channel);
+          closeLibssh2Channel(channel);
         }
         
         return true; // Une connexion traitée
@@ -2741,7 +2976,12 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL* channel) {
   channels[channelIndex].transferredBytes = 0;
   channels[channelIndex].peakBytesPerSecond = 0;
 
-  libssh2_channel_set_blocking(channel, 0);
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    libssh2_channel_set_blocking(channel, 0);
+    unlockSession();
+  } else {
+    LOG_W("SSH", "Queued channel %d: Unable to switch to non-blocking mode", channelIndex);
+  }
 
   LOGF_I("SSH", "Queued tunnel connection established (channel %d)", channelIndex);
   return true;
@@ -2861,12 +3101,16 @@ void SSHTunnel::stopDataProcessingTask() {
 // NOUVEAU: Récupération gracieuse sans effacer les buffers
 void SSHTunnel::gracefulRecoverChannel(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
+  if (ch.terminalSocketFailure) {
+    LOGF_D("SSH", "Channel %d: Skip graceful recovery (terminal failure)", channelIndex);
+    return;
+  }
   
   LOGF_I("SSH", "Channel %d: Attempting graceful recovery", channelIndex);
   
   // 1. Vérifier l'état des sockets/canaux sans les fermer immédiatement
   bool localSocketOk = (ch.localSocket >= 0);
-  bool sshChannelOk = (ch.channel != nullptr && !libssh2_channel_eof(ch.channel));
+  bool sshChannelOk = (ch.channel != nullptr && !channelEofLocked(ch.channel));
   
   if (localSocketOk) {
     int sockError = 0;
@@ -2913,4 +3157,3 @@ void SSHTunnel::gracefulRecoverChannel(int channelIndex) {
   
   LOGF_I("SSH", "Channel %d: Graceful recovery completed", channelIndex);
 }
-
