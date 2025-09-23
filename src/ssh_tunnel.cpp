@@ -13,10 +13,7 @@
 #define LOW_WATER_LOCAL  (2 * 1024)      // 2KB - resume local socket reads
 #define CRITICAL_WATER_LOCAL (4 * 1024)  // 4KB - hard stop local socket reads
 
-// SSH write parameters
-#define MAX_WRITES_PER_PASS 8
-#define MIN_SSH_WINDOW_SIZE 512
-#define MIN_WRITE_SIZE 256
+// SSH write parameters now defined as static constexpr members of SSHTunnel (see header)
 
 // Fixed buffer (unchanged) + channel integrity threshold
 #define FIXED_BUFFER_SIZE (8 * 1024)
@@ -1041,7 +1038,7 @@ void SSHTunnel::cleanupInactiveChannels() {
         } else {
           // Periodic log of state during graceful close
           static unsigned long lastGracefulLog[16] = {0}; // Pour 16 canaux max
-          if (now - lastGracefulLog[i] > 5000) { // Log toutes les 5 secondes
+          if (now - lastGracefulLog[i] > 5000) { // Log every 5s
             LOGF_I("SSH", "Channel %d graceful close in progress - buffers: ssh2local=%zu, local2ssh=%zu", i,
                    channels[i].sshToLocalBuffer ? channels[i].sshToLocalBuffer->size() : 0,
                    channels[i].localToSshBuffer ? channels[i].localToSshBuffer->size() : 0);
@@ -1104,7 +1101,7 @@ void SSHTunnel::printChannelStatistics() {
   static unsigned long lastStatsTime = 0;
   unsigned long now = millis();
   
-  // Print stats toutes les 2 minutes
+  // Print stats every 2 minutes
   if (now - lastStatsTime < 120000) return;
   lastStatsTime = now;
   
@@ -1285,8 +1282,8 @@ bool SSHTunnel::lockChannelRead(int channelIndex) {
     return false;
   }
   
-  if (duration > 50) { // Warning threshold increased from 25ms to 50ms
-    LOGF_V("SSH", "Channel %d: READ mutex acquired after %lums (slow)", channelIndex, duration);
+  if (duration > 40) { // Seuil réduit 50 -> 40ms et log DEBUG (cache flush)
+    LOGF_D("SSH", "Channel %d: READ mutex acquired after %lums (slow)", channelIndex, duration);
   }
   
   return true;
@@ -1329,8 +1326,8 @@ bool SSHTunnel::lockChannelWrite(int channelIndex) {
     return false;
   }
   
-  if (duration > 50) { // Warning threshold increased from 25ms to 50ms
-    LOGF_V("SSH", "Channel %d: WRITE mutex acquired after %lums (slow)", channelIndex, duration);
+  if (duration > 40) { // Seuil réduit 50 -> 40ms et log DEBUG
+    LOGF_D("SSH", "Channel %d: WRITE mutex acquired after %lums (slow)", channelIndex, duration);
   }
   
   return true;
@@ -1633,7 +1630,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   // 1) Loop-drain already queued data (localToSshBuffer)
     size_t totalWritten = 0;
     int passes = 0;
-    while (passes < MAX_WRITES_PER_PASS && ch.localToSshBuffer && !ch.localToSshBuffer->empty()) {
+  while (passes < SSH_MAX_WRITES_PER_PASS && ch.localToSshBuffer && !ch.localToSshBuffer->empty()) {
   // Check SSH window
       size_t winSize = 0, winUsed = 0;
   // NOTE: libssh2_channel_window_write_ex signature semble différente sur cible; suppression contrôle fenêtre direct
@@ -1687,7 +1684,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       if (localRead > 0) {
   // Attempt immediate looped write (direct drainage)
         size_t offset = 0; int directPass = 0; size_t directWrittenTotal = 0;
-        while (offset < (size_t)localRead && directPass < MAX_WRITES_PER_PASS) {
+  while (offset < (size_t)localRead && directPass < SSH_MAX_WRITES_PER_PASS) {
           size_t remain = (size_t)localRead - offset;
           // Check window
             // (SSH window control disabled due to incorrect signature on target)
@@ -1795,16 +1792,15 @@ void SSHTunnel::processPendingData(int channelIndex) {
                  channelIndex, written, bytesRead);
         } else if (written < 0) {
           if (errno == EAGAIN || errno == EWOULDBLOCK) {
-            // Socket temporarily not writable - put data back
             ch.sshToLocalBuffer->write(tempBuffer, bytesRead);
-            ch.eagainErrors++; // Count separately from real errors
-            LOGF_V("SSH", "Channel %d: Socket busy, %zu bytes preserved (eagain=%d)", 
-                   channelIndex, bytesRead, ch.eagainErrors);
+            ch.eagainErrors++;
+            if ((ch.eagainErrors % 32) == 1) {
+              LOGF_D("SSH", "Channel %d: Socket busy, preserved=%zu (eagain=%d)", channelIndex, bytesRead, ch.eagainErrors);
+            }
           } else {
             ch.sshToLocalBuffer->write(tempBuffer, bytesRead);
             ch.consecutiveErrors++;
-            LOGF_W("SSH", "Channel %d: Error writing from SSH->Local buffer: %s (err=%d)", 
-                   channelIndex, strerror(errno), ch.consecutiveErrors);
+            LOGF_W("SSH", "Channel %d: Error writing from SSH->Local buffer: %s (err=%d)", channelIndex, strerror(errno), ch.consecutiveErrors);
           }
         } else {
           // written == 0 - socket closed on receive side
@@ -1816,62 +1812,64 @@ void SSHTunnel::processPendingData(int channelIndex) {
     }
     xSemaphoreGive(ch.readMutex);
   } else {
-    // Failed to acquire mutex - count but don't panic
-    LOGF_V("SSH", "Channel %d: Could not acquire read mutex (busy)", channelIndex);
     ch.readMutexFailures++;
+    if ((ch.readMutexFailures % 64) == 1) {
+      LOGF_D("SSH", "Channel %d: Read mutex busy (failures=%d)", channelIndex, ch.readMutexFailures);
+    }
   }
   
   // 2) Process Local->SSH buffer (localToSshBuffer) - FIXED timeout
   if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
     if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
-      uint8_t tempBuffer[SSH_BUFFER_SIZE];
-      size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
-      
-      if (bytesRead > 0) {
+      const int maxWritesThisPass = 6; // Conservative per-loop drain cap (overrides global macro 8)
+      int passes = 0;
+      size_t totalWrittenThisPass = 0;
+      while (passes < maxWritesThisPass && !ch.localToSshBuffer->empty()) {
+        uint8_t tempBuffer[SSH_BUFFER_SIZE];
+        size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
+        if (bytesRead == 0) break;
         ssize_t written = libssh2_channel_write(ch.channel, (char*)tempBuffer, bytesRead);
-
         if (written > 0) {
+          passes++;
+          totalWrittenThisPass += written;
           ch.totalBytesSent += written;
           ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
-          ch.consecutiveErrors = 0; // Reset on success
-          if (lockStats()) { 
-            bytesSent += written; 
-            unlockStats(); 
-          }
-          
-          // If not all sent, put remainder back in buffer
-          if (written < bytesRead) {
+          ch.consecutiveErrors = 0;
+          if (lockStats()) { bytesSent += written; unlockStats(); }
+          if ((size_t)written < bytesRead) {
             ch.localToSshBuffer->write(tempBuffer + written, bytesRead - written);
+            break; // Reduced SSH window: stop draining
           }
-          
-          LOGF_D("SSH", "Channel %d: Processed %zd/%zu bytes from Local->SSH buffer", 
-                 channelIndex, written, bytesRead);
-        } else if (written < 0) {
-          if (written == LIBSSH2_ERROR_EAGAIN) {
-            // SSH channel temporarily busy - put data back
-            ch.localToSshBuffer->write(tempBuffer, bytesRead);
-            ch.eagainErrors++;
-            LOGF_V("SSH", "Channel %d: SSH channel busy, %zu bytes preserved (eagain=%d)", 
-                   channelIndex, bytesRead, ch.eagainErrors);
-          } else {
-            ch.localToSshBuffer->write(tempBuffer, bytesRead);
-            ch.consecutiveErrors++;
-            LOGF_W("SSH", "Channel %d: Error writing from Local->SSH buffer: %zd (err=%d)", 
-                   channelIndex, written, ch.consecutiveErrors);
-          }
-        } else {
-          // written == 0 - channel closed
+        } else if (written == LIBSSH2_ERROR_EAGAIN) {
+          // Remettre intégralement le chunk
           ch.localToSshBuffer->write(tempBuffer, bytesRead);
-          LOGF_I("SSH", "Channel %d: SSH channel closed, %zu bytes preserved", 
-                 channelIndex, bytesRead);
+          ch.eagainErrors++;
+            if ((ch.eagainErrors % 32) == 1) {
+              LOGF_D("SSH", "Channel %d: SSH channel busy mid-drain (eagain=%d passes=%d total=%zu)", channelIndex, ch.eagainErrors, passes, totalWrittenThisPass);
+            }
+          break; // SSH window full
+        } else if (written == 0) {
+          // Canal fermé
+          ch.localToSshBuffer->write(tempBuffer, bytesRead);
+          LOGF_I("SSH", "Channel %d: SSH channel closed, %zu bytes preserved", channelIndex, bytesRead);
+          break;
+        } else { // Erreur négative
+          ch.localToSshBuffer->write(tempBuffer, bytesRead);
+          ch.consecutiveErrors++;
+          LOGF_W("SSH", "Channel %d: Write error %zd (err=%d)", channelIndex, written, ch.consecutiveErrors);
+          break;
         }
+      }
+      if (totalWrittenThisPass > 0) {
+        LOGF_D("SSH", "Channel %d: Drained %zu bytes in %d passes (queuedRemote=%zu)", channelIndex, totalWrittenThisPass, passes, ch.queuedBytesToRemote);
       }
     }
     xSemaphoreGive(ch.writeMutex);
   } else {
-    // Failed to acquire mutex - count but don't panic
-    LOGF_V("SSH", "Channel %d: Could not acquire write mutex (busy)", channelIndex);
     ch.writeMutexFailures++;
+    if ((ch.writeMutexFailures % 64) == 1) {
+      LOGF_D("SSH", "Channel %d: Write mutex busy (failures=%d)", channelIndex, ch.writeMutexFailures);
+    }
   }
 
   // 3) Resume flow control if we've dropped below the LOW watermark
@@ -2526,6 +2524,14 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL* channel) {
   channels[channelIndex].lastActivity = millis();
   channels[channelIndex].pendingBytes = 0;
   channels[channelIndex].flowControlPaused = false;
+  // Reset per-channel reliability counters
+  channels[channelIndex].consecutiveErrors = 0;
+  channels[channelIndex].eagainErrors = 0;
+  channels[channelIndex].readMutexFailures = 0;
+  channels[channelIndex].writeMutexFailures = 0;
+  channels[channelIndex].lostWriteChunks = 0;
+  channels[channelIndex].queuedBytesToLocal = 0;
+  channels[channelIndex].queuedBytesToRemote = 0;
   
   // Initialiser les variables de détection des gros transferts
   channels[channelIndex].largeTransferInProgress = false;
@@ -2554,6 +2560,9 @@ void SSHTunnel::dataProcessingTaskFunction() {
       if (!dataProcessingTaskRunning) break;
       
       int maxChannels = config->getConnectionConfig().maxChannels;
+      static unsigned long lastMutexProbe = 0;
+  bool doProbe = (millis() - lastMutexProbe) > 3000; // every 3s
+      if (doProbe) lastMutexProbe = millis();
       for (int i = 0; i < maxChannels; i++) {
         if (channels[i].active) {
           // Check if there's really work before processing
@@ -2568,6 +2577,11 @@ void SSHTunnel::dataProcessingTaskFunction() {
           // Graceful handling of closing channels
           if (channels[i].gracefulClosing) {
             processPendingData(i);
+          }
+
+          // Sondage doux périodique des mutex si activité réduite
+          if (doProbe && !channels[i].gracefulClosing) {
+            safeRetryMutexAccess(i);
           }
           
           // Check large transfers less frequently

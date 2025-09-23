@@ -30,8 +30,6 @@ Thumbs.db
 *.log
 
 # Project specific
-attached_assets/
-.replit
 
 # Documentation locale de développement
 OPTIMIZATIONS_ROADMAP.md
