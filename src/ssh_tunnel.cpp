@@ -196,6 +196,7 @@ bool SSHTunnel::init() {
     channels[i].terminalSocketFailure = false;
     channels[i].readProbeFailCount = 0;
     channels[i].writeProbeFailCount = 0;
+    channels[i].localReadTerminated = false;
     
   // OPTIMIZED: Create unified buffers (simpler & efficient)
     char ringName[32];
@@ -1184,6 +1185,7 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.terminalSocketFailure = false;
   ch.readProbeFailCount = 0;
   ch.writeProbeFailCount = 0;
+  ch.localReadTerminated = false;
   
   // OPTIMIZED: Clear unified buffers
   if (ch.sshToLocalBuffer) {
@@ -2046,6 +2048,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     bool suppressLocalRead = false;
     if (ch.remoteEof) suppressLocalRead = true;
     if (ch.terminalSocketFailure) suppressLocalRead = true;
+    if (ch.localReadTerminated) suppressLocalRead = true;
     else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
     if (!suppressLocalRead && ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
       ssize_t localRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
@@ -2149,9 +2152,18 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       } else if (localRead == 0) {
         LOGF_I("SSH", "Channel %d: Local socket closed", channelIndex);
         ch.gracefulClosing = true;
+        ch.localReadTerminated = true;
+        if (ch.localSocket >= 0) {
+          shutdown(ch.localSocket, SHUT_RD);
+        }
       } else if (localRead < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
         LOGF_W("SSH", "Channel %d: Local read error %s", channelIndex, strerror(errno));
         ch.consecutiveErrors++;
+        ch.gracefulClosing = true;
+        ch.localReadTerminated = true;
+        if (ch.localSocket >= 0) {
+          shutdown(ch.localSocket, SHUT_RD);
+        }
       }
     } else if (suppressLocalRead) {
       if ((now - ch.lastErrorDetailLogMs) > 2000) {
@@ -2600,14 +2612,26 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   }
   
 
-  // Vérifier si les buffers unifiés ne sont pas trop pleins (réduit les seuils)
-  if (ch.sshToLocalBuffer && ch.sshToLocalBuffer->size() > 20 * 1024) { // 20KB max
-    LOGF_D("SSH", "Channel %d: Unhealthy due to SSH->Local buffer size (%zu)", channelIndex, ch.sshToLocalBuffer->size());
-    return false;
+  // Vérifier si les buffers unifiés ne sont pas trop pleins (seuil dynamique 75 % de la capacité)
+  if (ch.sshToLocalBuffer) {
+    size_t cap = ch.sshToLocalBuffer->capacityBytes();
+    size_t limit = cap ? (cap * 3) / 4 : (size_t)(20 * 1024);
+    if (limit == 0) limit = 1; // garde-fou
+    if (ch.sshToLocalBuffer->size() > limit) {
+      LOGF_D("SSH", "Channel %d: Unhealthy due to SSH->Local buffer size (%zu/%zu)",
+             channelIndex, ch.sshToLocalBuffer->size(), cap);
+      return false;
+    }
   }
-  if (ch.localToSshBuffer && ch.localToSshBuffer->size() > 20 * 1024) { // 20KB max
-    LOGF_D("SSH", "Channel %d: Unhealthy due to Local->SSH buffer size (%zu)", channelIndex, ch.localToSshBuffer->size());
-    return false;
+  if (ch.localToSshBuffer) {
+    size_t cap = ch.localToSshBuffer->capacityBytes();
+    size_t limit = cap ? (cap * 3) / 4 : (size_t)(20 * 1024);
+    if (limit == 0) limit = 1;
+    if (ch.localToSshBuffer->size() > limit) {
+      LOGF_D("SSH", "Channel %d: Unhealthy due to Local->SSH buffer size (%zu/%zu)",
+             channelIndex, ch.localToSshBuffer->size(), cap);
+      return false;
+    }
   }
   
 
@@ -2732,6 +2756,7 @@ void SSHTunnel::recoverChannel(int channelIndex) {
     return;
   }
   
+  ch.localReadTerminated = false;
   ch.lastActivity = millis();
   LOGF_I("SSH", "Channel %d: Hard recovery completed", channelIndex);
 }

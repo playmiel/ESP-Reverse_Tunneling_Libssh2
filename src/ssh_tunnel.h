@@ -80,6 +80,7 @@ struct TunnelChannel {
     bool terminalSocketFailure;         // channel marked unrecoverable due to persistent -43
     int readProbeFailCount;             // consecutive health-check probe failures (read mutex)
     int writeProbeFailCount;            // consecutive health-check probe failures (write mutex)
+    bool localReadTerminated;           // local side no longer readable (socket closed/error)
 
     // NEW (partial enqueue protection): deferred buffers for residual data that
     // n'a pas pu être placé dans les ring buffers (évitant toute perte).
