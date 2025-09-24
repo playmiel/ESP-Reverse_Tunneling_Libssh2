@@ -1707,6 +1707,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
       LOGF_I("SSH", "Channel %d: Socket error before write: %s, initiating graceful close", 
              channelIndex, strerror(sockError));
       ch.gracefulClosing = true;
+      unlockChannelRead(channelIndex);
       return false;
     }
 
