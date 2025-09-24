@@ -9,9 +9,9 @@
 // Flow-control thresholds sized for large single-client transfers
 #undef HIGH_WATER_LOCAL
 #undef LOW_WATER_LOCAL
-#define HIGH_WATER_LOCAL (10 * 1024)      // 10KB - pause reads once ring nearly full
-#define LOW_WATER_LOCAL  (6 * 1024)       // 6KB  - resume reads after backlog shrinks
-#define CRITICAL_WATER_LOCAL (14 * 1024)  // 14KB - last resort hard stop on local reads
+#define HIGH_WATER_LOCAL (24 * 1024)      // 24KB - pause reads once ring nearly full
+#define LOW_WATER_LOCAL  (12 * 1024)      // 12KB - resume reads after backlog shrinks
+#define CRITICAL_WATER_LOCAL (28 * 1024)  // 28KB - last resort hard stop on local reads
 
 #ifndef STUCK_PROBE_THRESHOLD
 #define STUCK_PROBE_THRESHOLD 8   // consecutive failed probes before gracefulClosing
@@ -53,8 +53,8 @@ static void recordTerminalSocketFailure(unsigned long now) {
 }
 
 // Fixed buffer (aligned with thresholds) + channel integrity threshold
-#define FIXED_BUFFER_SIZE (16 * 1024)
-#define MAX_QUEUED_BYTES (32 * 1024)
+#define FIXED_BUFFER_SIZE (32 * 1024)
+#define MAX_QUEUED_BYTES (64 * 1024)
 
 // Health/recovery tuning (reduce noisy recoveries and WARN spam)
 #ifndef HEALTH_UNHEALTHY_THRESHOLD
@@ -191,18 +191,20 @@ bool SSHTunnel::init() {
   channels[i].lastWriteErrorMs = 0;
   channels[i].lastErrorDetailLogMs = 0;
   channels[i].stuckProbeCount = 0;
-  channels[i].socketRecvBurstCount = 0;
-  channels[i].firstSocketRecvErrorMs = 0;
-  channels[i].terminalSocketFailure = false;
+    channels[i].socketRecvBurstCount = 0;
+    channels[i].firstSocketRecvErrorMs = 0;
+    channels[i].terminalSocketFailure = false;
+    channels[i].readProbeFailCount = 0;
+    channels[i].writeProbeFailCount = 0;
     
   // OPTIMIZED: Create unified buffers (simpler & efficient)
     char ringName[32];
     
-  // Unified buffer for SSH->Local (FIXED_BUFFER_SIZE = 8KB)
+  // Unified buffer for SSH->Local (FIXED_BUFFER_SIZE = 32KB)
     snprintf(ringName, sizeof(ringName), "CH%d_SSH2LOC", i);
     channels[i].sshToLocalBuffer = new DataRingBuffer(FIXED_BUFFER_SIZE, ringName);
     
-  // Unified buffer for Local->SSH (FIXED_BUFFER_SIZE = 8KB)
+  // Unified buffer for Local->SSH (FIXED_BUFFER_SIZE = 32KB)
     snprintf(ringName, sizeof(ringName), "CH%d_LOC2SSH", i);
     channels[i].localToSshBuffer = new DataRingBuffer(FIXED_BUFFER_SIZE, ringName);
     
@@ -1180,6 +1182,8 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.socketRecvBurstCount = 0;
   ch.firstSocketRecvErrorMs = 0;
   ch.terminalSocketFailure = false;
+  ch.readProbeFailCount = 0;
+  ch.writeProbeFailCount = 0;
   
   // OPTIMIZED: Clear unified buffers
   if (ch.sshToLocalBuffer) {
@@ -2386,6 +2390,8 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t* data, size_t size, 
   if (!data || size == 0) return 0;
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active) return 0;
+  static unsigned long lastQueueHighLogToLocal[16] = {0};
+  static unsigned long lastQueueHighLogToRemote[16] = {0};
   DataRingBuffer* targetBuffer = isRead ? ch.sshToLocalBuffer : ch.localToSshBuffer;
   SemaphoreHandle_t mutex = isRead ? ch.readMutex : ch.writeMutex;
   bool locked = false;
@@ -2403,6 +2409,22 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t* data, size_t size, 
     if (isRead) ch.queuedBytesToLocal += w; else ch.queuedBytesToRemote += w;
   }
   ch.lastActivity = millis();
+  if (channelIndex < 16 && totalQueued > 0) {
+    unsigned long nowDiag = millis();
+    if (isRead) {
+      if (ch.queuedBytesToLocal > HIGH_WATER_LOCAL && (nowDiag - lastQueueHighLogToLocal[channelIndex] > 2000)) {
+        lastQueueHighLogToLocal[channelIndex] = nowDiag;
+        LOGF_D("SSH", "Channel %d: Queue high watermark (toLocal=%zu, toRemote=%zu)",
+               channelIndex, ch.queuedBytesToLocal, ch.queuedBytesToRemote);
+      }
+    } else {
+      if (ch.queuedBytesToRemote > HIGH_WATER_LOCAL && (nowDiag - lastQueueHighLogToRemote[channelIndex] > 2000)) {
+        lastQueueHighLogToRemote[channelIndex] = nowDiag;
+        LOGF_D("SSH", "Channel %d: Queue high watermark (toLocal=%zu, toRemote=%zu)",
+               channelIndex, ch.queuedBytesToLocal, ch.queuedBytesToRemote);
+      }
+    }
+  }
   if (locked) xSemaphoreGive(mutex);
   if (totalQueued == 0) {
     ch.lostWriteChunks++;
@@ -2599,18 +2621,42 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   if (ch.readMutex) {
     if (xSemaphoreTake(ch.readMutex, 0) == pdTRUE) {
       xSemaphoreGive(ch.readMutex);
+      if (ch.readProbeFailCount) {
+        ch.readProbeFailCount = 0;
+      }
     } else {
-      LOGF_D("SSH", "Channel %d: Unhealthy due to blocked read mutex", channelIndex);
-      return false;
+      ch.readProbeFailCount++;
+      if (ch.readProbeFailCount >= STUCK_PROBE_THRESHOLD) {
+        if (now - ch.lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+          ch.lastHealthWarnMs = now;
+          LOGF_W("SSH", "Channel %d: Read mutex blocked (%d probes)", channelIndex, ch.readProbeFailCount);
+        }
+        return false;
+      }
+      if ((ch.readProbeFailCount % 3) == 1) {
+        LOGF_D("SSH", "Channel %d: Read mutex busy (probe=%d)", channelIndex, ch.readProbeFailCount);
+      }
     }
   }
   
   if (ch.writeMutex) {
     if (xSemaphoreTake(ch.writeMutex, 0) == pdTRUE) {
       xSemaphoreGive(ch.writeMutex);
+      if (ch.writeProbeFailCount) {
+        ch.writeProbeFailCount = 0;
+      }
     } else {
-      LOGF_D("SSH", "Channel %d: Unhealthy due to blocked write mutex", channelIndex);
-      return false;
+      ch.writeProbeFailCount++;
+      if (ch.writeProbeFailCount >= STUCK_PROBE_THRESHOLD) {
+        if (now - ch.lastHealthWarnMs > HEALTH_WARN_THROTTLE_MS) {
+          ch.lastHealthWarnMs = now;
+          LOGF_W("SSH", "Channel %d: Write mutex blocked (%d probes)", channelIndex, ch.writeProbeFailCount);
+        }
+        return false;
+      }
+      if ((ch.writeProbeFailCount % 3) == 1) {
+        LOGF_D("SSH", "Channel %d: Write mutex busy (probe=%d)", channelIndex, ch.writeProbeFailCount);
+      }
     }
   }
   
@@ -2696,6 +2742,7 @@ size_t SSHTunnel::getOptimalBufferSize(int channelIndex) {
   const size_t MAX_BUFFER_SIZE = 1460; // MTU typique Ethernet
   size_t baseSize = config->getConnectionConfig().bufferSize;
   if (baseSize < MIN_BUFFER_SIZE) baseSize = MIN_BUFFER_SIZE;
+  if (baseSize > MAX_BUFFER_SIZE) baseSize = MAX_BUFFER_SIZE;
 
   // Si erreurs persistantes, rester à la taille minimale sûre
   if (ch.consecutiveErrors > 5) {
