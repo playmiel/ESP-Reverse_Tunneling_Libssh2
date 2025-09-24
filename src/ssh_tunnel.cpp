@@ -1862,7 +1862,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
     } else if (bytesRead == 0) {
       // 0 -> vérifier explicitement EOF
       if (channelEof) {
-        if (!ch.remoteEof) {
+        bool firstEof = !ch.remoteEof;
+        if (firstEof) {
           LOGF_I("SSH", "Channel %d: SSH channel EOF", channelIndex);
         } else {
           LOGF_D("SSH", "Channel %d: SSH channel EOF (repeat)", channelIndex);
@@ -1870,6 +1871,9 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         ch.remoteEof = true;
         ch.gracefulClosing = true;
         remoteEofDetected = true;
+        if (firstEof && ch.localSocket >= 0) {
+          shutdown(ch.localSocket, SHUT_RDWR);
+        }
       }
     } else if (bytesRead < 0 && bytesRead != LIBSSH2_ERROR_EAGAIN) {
       if (bytesRead == LIBSSH2_ERROR_SOCKET_RECV) {
@@ -1904,20 +1908,12 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
 
   unlockChannelRead(channelIndex);
 
-  if (remoteEofDetected) {
-    discardLocalToSsh(channelIndex, "remote EOF signal");
-  }
   return success;
 }
 
 bool SSHTunnel::processChannelWrite(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active || !ch.channel || ch.localSocket < 0) {
-    return false;
-  }
-
-  if (ch.remoteEof) {
-    discardLocalToSsh(channelIndex, "remote EOF gating local reads");
     return false;
   }
 
@@ -1951,6 +1947,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   bool success = false;
   size_t bufferSize = getOptimalBufferSize(channelIndex);
   unsigned long now = millis();
+  bool dropPending = false;
+  String dropReason = "";
 
   if (ch.active && ch.channel && ch.localSocket >= 0) {
   // 1) Loop-drain already queued data (localToSshBuffer)
@@ -2021,6 +2019,12 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                    channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, ch.queuedBytesToRemote, detail);
           }
           ch.localToSshBuffer->write(temp, chunk);
+          if (w == LIBSSH2_ERROR_CHANNEL_CLOSED || w == LIBSSH2_ERROR_SOCKET_SEND || w == LIBSSH2_ERROR_SOCKET_RECV) {
+            dropPending = true;
+            dropReason = String("ssh drain failure (code=") + String((int)w) + ")";
+            ch.gracefulClosing = true;
+            ch.remoteEof = true;
+          }
           break;
         }
       }
@@ -2036,6 +2040,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
 
   // 2) Read local socket if backpressure acceptable (suppress when burst >=2 or terminal)
     bool suppressLocalRead = false;
+    if (ch.remoteEof) suppressLocalRead = true;
     if (ch.terminalSocketFailure) suppressLocalRead = true;
     else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
     if (!suppressLocalRead && ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
@@ -2089,6 +2094,12 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                 const char* detail = directErrorDetail.length() ? directErrorDetail.c_str() : "unknown";
                 LOGF_W("SSH","Channel %d: Direct write err %zd cons=%d sockRecv=%d crypt=%d remain=%zu detail=%s", 
                        channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors, ch.fatalCryptoErrors, (size_t)localRead - offset, detail);
+              }
+              if (w == LIBSSH2_ERROR_CHANNEL_CLOSED || w == LIBSSH2_ERROR_SOCKET_SEND || w == LIBSSH2_ERROR_SOCKET_RECV) {
+                dropPending = true;
+                dropReason = String("ssh direct write failure (code=") + String((int)w) + ")";
+                ch.gracefulClosing = true;
+                ch.remoteEof = true;
               }
               break;
             }
@@ -2145,6 +2156,37 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       }
     }
   }
+
+    if (dropPending) {
+      size_t droppedBytesLocal = 0;
+      if (ch.localToSshBuffer) {
+        droppedBytesLocal += ch.localToSshBuffer->size();
+        ch.localToSshBuffer->clear();
+        ch.queuedBytesToRemote = 0;
+      }
+      if (ch.deferredToRemote) {
+        size_t remain = (ch.deferredToRemoteSize > ch.deferredToRemoteOffset)
+                          ? (ch.deferredToRemoteSize - ch.deferredToRemoteOffset)
+                          : 0;
+        droppedBytesLocal += remain;
+        SAFE_FREE(ch.deferredToRemote);
+        ch.deferredToRemote = nullptr;
+        ch.deferredToRemoteSize = 0;
+        ch.deferredToRemoteOffset = 0;
+      }
+      if (droppedBytesLocal > 0) {
+        ch.bytesDropped += droppedBytesLocal;
+        if (lockStats()) {
+          droppedBytes += droppedBytesLocal;
+          unlockStats();
+        }
+        const char* reason = dropReason.length() ? dropReason.c_str() : "ssh write failure";
+        LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)", channelIndex, droppedBytesLocal, reason);
+      }
+      if (ch.localSocket >= 0) {
+        shutdown(ch.localSocket, SHUT_RDWR);
+      }
+    }
 
   unlockChannelWrite(channelIndex);
   return success;
@@ -2221,7 +2263,9 @@ void SSHTunnel::processPendingData(int channelIndex) {
   }
   
   // 2) Process Local->SSH buffer (localToSshBuffer) - FIXED timeout
-  if (!ch.remoteEof && xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
+  if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
+    bool dropPending = false;
+    String dropReason = "";
     if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
       const int maxWritesThisPass = 6; // Conservative per-loop drain cap (overrides global macro 8)
       int passes = 0;
@@ -2270,6 +2314,10 @@ void SSHTunnel::processPendingData(int channelIndex) {
             ch.consecutiveErrors++;
             const char* detail = writeErrorDetail.length() ? writeErrorDetail.c_str() : "unknown";
             LOGF_W("SSH", "Channel %d: Write error %zd (err=%d, detail=%s)", channelIndex, written, ch.consecutiveErrors, detail);
+            if (written == LIBSSH2_ERROR_CHANNEL_CLOSED || written == LIBSSH2_ERROR_SOCKET_SEND || written == LIBSSH2_ERROR_SOCKET_RECV) {
+              dropPending = true;
+              dropReason = String("ssh drain failure (code=") + String((int)written) + ")";
+            }
             break;
           }
         }
@@ -2279,9 +2327,40 @@ void SSHTunnel::processPendingData(int channelIndex) {
         LOGF_D("SSH", "Channel %d: Drained %zu bytes in %d passes (queuedRemote=%zu)", channelIndex, totalWrittenThisPass, passes, ch.queuedBytesToRemote);
       }
     }
+
+    if (dropPending) {
+      size_t droppedBytesLocal = 0;
+      if (ch.localToSshBuffer) {
+        droppedBytesLocal += ch.localToSshBuffer->size();
+        ch.localToSshBuffer->clear();
+        ch.queuedBytesToRemote = 0;
+      }
+      if (ch.deferredToRemote) {
+        size_t remain = (ch.deferredToRemoteSize > ch.deferredToRemoteOffset)
+                          ? (ch.deferredToRemoteSize - ch.deferredToRemoteOffset)
+                          : 0;
+        droppedBytesLocal += remain;
+        SAFE_FREE(ch.deferredToRemote);
+        ch.deferredToRemote = nullptr;
+        ch.deferredToRemoteSize = 0;
+        ch.deferredToRemoteOffset = 0;
+      }
+      if (droppedBytesLocal > 0) {
+        ch.bytesDropped += droppedBytesLocal;
+        if (lockStats()) {
+          droppedBytes += droppedBytesLocal;
+          unlockStats();
+        }
+        const char* reason = dropReason.length() ? dropReason.c_str() : "ssh write failure";
+        LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)", channelIndex, droppedBytesLocal, reason);
+      }
+      ch.gracefulClosing = true;
+      ch.remoteEof = true;
+      if (ch.localSocket >= 0) {
+        shutdown(ch.localSocket, SHUT_RDWR);
+      }
+    }
     xSemaphoreGive(ch.writeMutex);
-  } else if (ch.remoteEof) {
-    discardLocalToSsh(channelIndex, "remote EOF pending processing");
   } else {
     ch.writeMutexFailures++;
     if ((ch.writeMutexFailures % 64) == 1) {
@@ -2307,15 +2386,6 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t* data, size_t size, 
   if (!data || size == 0) return 0;
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active) return 0;
-  if (!isRead && ch.remoteEof) {
-    ch.lostWriteChunks++;
-    if ((ch.lostWriteChunks % 10) == 1) {
-      LOGF_I("SSH", "Channel %d: Remote EOF - dropping %zu bytes queued for SSH", channelIndex, size);
-    }
-    ch.bytesDropped += size;
-    if (lockStats()) { droppedBytes += size; unlockStats(); }
-    return 0;
-  }
   DataRingBuffer* targetBuffer = isRead ? ch.sshToLocalBuffer : ch.localToSshBuffer;
   SemaphoreHandle_t mutex = isRead ? ch.readMutex : ch.writeMutex;
   bool locked = false;
@@ -2386,11 +2456,9 @@ void SSHTunnel::flushPendingData(int channelIndex) {
 
   // 3. Local->SSH ring vers SSH
   if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
-    if (ch.remoteEof) {
-      discardLocalToSsh(channelIndex, "remote EOF during flush");
-      return;
-    }
     if (lockChannelWrite(channelIndex)) {
+      bool dropPending = false;
+      String dropReason = "";
       uint8_t temp[SSH_BUFFER_SIZE];
       size_t peeked = ch.localToSshBuffer->peek(temp, sizeof(temp));
       if (peeked > 0) {
@@ -2421,46 +2489,46 @@ void SSHTunnel::flushPendingData(int channelIndex) {
                    ch.queuedBytesToRemote,
                    (size_t)(ch.deferredToRemote ? (ch.deferredToRemoteSize - ch.deferredToRemoteOffset) : 0));
           }
+          if (w == LIBSSH2_ERROR_CHANNEL_CLOSED || w == LIBSSH2_ERROR_SOCKET_SEND || w == LIBSSH2_ERROR_SOCKET_RECV) {
+            dropPending = true;
+            dropReason = String("ssh flush failure (code=") + String((int)w) + ")";
+          }
+        }
+      }
+      if (dropPending) {
+        size_t droppedBytesLocal = 0;
+        if (ch.localToSshBuffer) {
+          droppedBytesLocal += ch.localToSshBuffer->size();
+          ch.localToSshBuffer->clear();
+          ch.queuedBytesToRemote = 0;
+        }
+        if (ch.deferredToRemote) {
+          size_t remain = (ch.deferredToRemoteSize > ch.deferredToRemoteOffset)
+                            ? (ch.deferredToRemoteSize - ch.deferredToRemoteOffset)
+                            : 0;
+          droppedBytesLocal += remain;
+          SAFE_FREE(ch.deferredToRemote);
+          ch.deferredToRemote = nullptr;
+          ch.deferredToRemoteSize = 0;
+          ch.deferredToRemoteOffset = 0;
+        }
+        if (droppedBytesLocal > 0) {
+          ch.bytesDropped += droppedBytesLocal;
+          if (lockStats()) {
+            droppedBytes += droppedBytesLocal;
+            unlockStats();
+          }
+          const char* reason = dropReason.length() ? dropReason.c_str() : "ssh write failure";
+          LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)", channelIndex, droppedBytesLocal, reason);
+        }
+        ch.gracefulClosing = true;
+        ch.remoteEof = true;
+        if (ch.localSocket >= 0) {
+          shutdown(ch.localSocket, SHUT_RDWR);
         }
       }
       unlockChannelWrite(channelIndex);
     }
-  }
-}
-
-void SSHTunnel::discardLocalToSsh(int channelIndex, const char* reason) {
-  if (channelIndex < 0 || channelIndex >= config->getConnectionConfig().maxChannels) return;
-  TunnelChannel &ch = channels[channelIndex];
-  size_t dropped = 0;
-
-  if (ch.localToSshBuffer) {
-    if (ch.writeMutex && xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(50)) == pdTRUE) {
-      dropped += ch.localToSshBuffer->size();
-      ch.localToSshBuffer->clear();
-      ch.queuedBytesToRemote = 0;
-      xSemaphoreGive(ch.writeMutex);
-    }
-  }
-
-  if (ch.deferredToRemote) {
-    size_t remain = (ch.deferredToRemoteSize > ch.deferredToRemoteOffset)
-                        ? (ch.deferredToRemoteSize - ch.deferredToRemoteOffset)
-                        : 0;
-    dropped += remain;
-    SAFE_FREE(ch.deferredToRemote);
-    ch.deferredToRemote = nullptr;
-    ch.deferredToRemoteSize = 0;
-    ch.deferredToRemoteOffset = 0;
-  }
-
-  if (dropped > 0) {
-    ch.bytesDropped += dropped;
-    if (lockStats()) {
-      droppedBytes += dropped;
-      unlockStats();
-    }
-    const char* ctx = reason ? reason : "remote EOF";
-    LOGF_I("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)", channelIndex, dropped, ctx);
   }
 }
 
