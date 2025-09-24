@@ -49,9 +49,14 @@ struct TunnelChannel {
     int consecutiveErrors; // Number of consecutive errors
     int eagainErrors; // NEW: Separate counter for EAGAIN errors
     
+    // FIXED: New counters for mutex failure diagnostics (non-destructive)
+    int readMutexFailures;     // Counter for read mutex timeouts
+    int writeMutexFailures;    // Counter for write mutex timeouts  
+    
     // Additional counters for fine-grained flow control
     size_t queuedBytesToLocal;   // Bytes in sshToLocalBuffer
     size_t queuedBytesToRemote;  // Bytes in localToSshBuffer
+    bool remoteEof;              // Remote side has sent EOF
     
     // NEW: Large transfer detection
     bool largeTransferInProgress; // Large file transfer in progress
@@ -63,6 +68,31 @@ struct TunnelChannel {
     int healthUnhealthyCount;           // consecutive unhealthy detections
     unsigned long lastHardRecoveryMs;   // last time a hard recovery was performed
     unsigned long lastHealthWarnMs;     // last time we logged a WARN for health
+    // Error classification & backoff
+    int socketRecvErrors;
+    int fatalCryptoErrors;
+    unsigned long lastWriteErrorMs;
+    unsigned long lastErrorDetailLogMs;
+    int stuckProbeCount;                // consecutive non-blocking mutex probe failures
+    // Socket recv (-43) burst handling
+    int socketRecvBurstCount;           // consecutive LIBSSH2_ERROR_SOCKET_RECV without success
+    unsigned long firstSocketRecvErrorMs; // timestamp of first error in current burst
+    bool terminalSocketFailure;         // channel marked unrecoverable due to persistent -43
+    int readProbeFailCount;             // consecutive health-check probe failures (read mutex)
+    int writeProbeFailCount;            // consecutive health-check probe failures (write mutex)
+    bool localReadTerminated;           // local side no longer readable (socket closed/error)
+
+    // NEW (partial enqueue protection): deferred buffers for residual data that
+    // n'a pas pu être placé dans les ring buffers (évitant toute perte).
+    uint8_t* deferredToLocal;      // SSH->Local résidu en attente d'enqueue
+    size_t deferredToLocalSize;    // taille totale du résidu
+    size_t deferredToLocalOffset;  // offset déjà enqueue
+    uint8_t* deferredToRemote;     // Local->SSH résidu en attente
+    size_t deferredToRemoteSize;
+    size_t deferredToRemoteOffset;
+
+    // NEW: Metrics for dropped bytes (only when we truly drop data)
+    size_t bytesDropped;          // Per-channel dropped bytes counter
 };
 
 class SSHTunnel {
@@ -81,6 +111,7 @@ public:
     // Statistics
     unsigned long getBytesReceived();
     unsigned long getBytesSent();
+    unsigned long getBytesDropped();
     int getActiveChannels();
 
 private:
@@ -103,13 +134,15 @@ private:
     bool processChannelWrite(int channelIndex); // Local -> SSH (poll for write)
     void processPendingData(int channelIndex);  // Process pending data (poll for read/write)
     bool queueData(int channelIndex, uint8_t* data, size_t size, bool isRead);
+    // New version: returns number of bytes actually enqueued into the ring buffer (0..size).
+    // No silent loss: if return < size, caller must store the remainder in deferred buffer.
+    size_t queueData(int channelIndex, const uint8_t* data, size_t size, bool isRead);
     void flushPendingData(int channelIndex);
     bool isChannelHealthy(int channelIndex);
     void recoverChannel(int channelIndex);
     void gracefulRecoverChannel(int channelIndex); // NEW: Recovery without clearing buffers
     size_t getOptimalBufferSize(int channelIndex);
     void checkAndRecoverDeadlocks(); // NEW: Deadlock detection and recovery
-    
     // NEW: Dedicated task for data processing (producer/consumer pattern)
     static void dataProcessingTaskWrapper(void* parameter);
     void dataProcessingTaskFunction();
@@ -126,6 +159,8 @@ private:
     void queuePendingConnection(LIBSSH2_CHANNEL* channel);
     bool processPendingConnections();
     bool processQueuedConnection(LIBSSH2_CHANNEL* channel);
+    void closeLibssh2Channel(LIBSSH2_CHANNEL* channel);
+    bool channelEofLocked(LIBSSH2_CHANNEL* channel);
 
     // Poll helpers
     bool isSocketWritable(int sockfd, int timeoutMs = 0);
@@ -154,6 +189,7 @@ private:
     // Statistics
     unsigned long bytesReceived;
     unsigned long bytesSent;
+    unsigned long droppedBytes; // NEW: Global dropped bytes (sum of channels)
 
     // Buffers (dynamic allocation based on config)
     uint8_t* rxBuffer;
@@ -162,6 +198,7 @@ private:
     // Thread-safe protection
     SemaphoreHandle_t tunnelMutex;
     SemaphoreHandle_t statsMutex;
+    SemaphoreHandle_t sessionMutex;
 
     // Configuration reference
     SSHConfiguration* config;
@@ -194,6 +231,8 @@ private:
     void unlockTunnel();
     bool lockStats();
     void unlockStats();
+    bool lockSession(TickType_t ticks = portMAX_DELAY);
+    void unlockSession();
 
     // Per-channel protection methods with separate mutexes
     bool lockChannelRead(int channelIndex);
@@ -206,7 +245,12 @@ private:
     void unlockChannel(int channelIndex);
     
     // NEW: Method to force release of blocked mutexes
-    void forceMutexRelease(int channelIndex);
+    void safeRetryMutexAccess(int channelIndex); // FIXED: Safe version instead of forceMutexRelease
+
+    // SSH write/drain tuning parameters
+    static constexpr int SSH_MAX_WRITES_PER_PASS = 8;      // Max drain iterations per loop
+    static constexpr int MIN_SSH_WINDOW_SIZE = 512;        // Minimum assumed remote window (advisory)
+    static constexpr int MIN_WRITE_SIZE = 256;             // Aggregate small chunks to at least this size
 };
 
 #endif

@@ -233,6 +233,7 @@ public:
     bool empty() const { return count == 0; }
     bool full() const { return count >= capacity; }
     float usage() const { return (float)count / capacity * 100.0f; }
+    size_t capacityBytes() const { return capacity; }
     
     // Diagnostics
     void printStats() const {

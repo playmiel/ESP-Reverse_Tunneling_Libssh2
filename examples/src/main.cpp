@@ -185,8 +185,9 @@ void reportStats() {
   if (freeHeap > 10000) { // Only if we have enough memory
     LOGF_I("STATS", "Tunnel State: %s", tunnel.getStateString().c_str());
     LOGF_I("STATS", "Active Channels: %d", tunnel.getActiveChannels());
-    LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
-    LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
+  LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
+  LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
+  LOGF_I("STATS", "Bytes Dropped: %lu", tunnel.getBytesDropped());
   }
 
   // Throughput calculation (approximate)
@@ -195,6 +196,7 @@ void reportStats() {
 
   unsigned long bytesSent = tunnel.getBytesSent();
   unsigned long bytesReceived = tunnel.getBytesReceived();
+  unsigned long bytesDropped = tunnel.getBytesDropped();
 
   unsigned long sentRate = (bytesSent - lastBytesSent) * 1000 / STATS_INTERVAL;
   unsigned long receivedRate = (bytesReceived - lastBytesReceived) * 1000 / STATS_INTERVAL;

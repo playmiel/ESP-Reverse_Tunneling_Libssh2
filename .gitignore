@@ -29,13 +29,9 @@ Thumbs.db
 *.temp
 *.log
 
-# Project specific
-attached_assets/
-.replit
 
 # Documentation locale de développement
-OPTIMIZATIONS_ROADMAP.md
-ROADMAP.md
+AGENTS.md
 
 # Submodule changes (to avoid automatic commits)
 # Note: This helps with the submodule issue mentioned by user
@@ -43,6 +39,3 @@ examples/.pio/libdeps/*/
 examples/.pio/
 *.piopm
 
-# Fichiers à exclure du suivi Git
-CRITICAL_FIX_DRAINAGE.cpp
-SSH_PERFORMANCE_FIXES.md
