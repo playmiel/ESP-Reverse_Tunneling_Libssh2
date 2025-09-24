@@ -140,8 +140,6 @@ private:
     void gracefulRecoverChannel(int channelIndex); // NEW: Recovery without clearing buffers
     size_t getOptimalBufferSize(int channelIndex);
     void checkAndRecoverDeadlocks(); // NEW: Deadlock detection and recovery
-    void discardLocalToSsh(int channelIndex, const char* reason); // Drop pending local->SSH data safely
-    
     // NEW: Dedicated task for data processing (producer/consumer pattern)
     static void dataProcessingTaskWrapper(void* parameter);
     void dataProcessingTaskFunction();
