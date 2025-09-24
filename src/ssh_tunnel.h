@@ -78,6 +78,8 @@ struct TunnelChannel {
     int socketRecvBurstCount;           // consecutive LIBSSH2_ERROR_SOCKET_RECV without success
     unsigned long firstSocketRecvErrorMs; // timestamp of first error in current burst
     bool terminalSocketFailure;         // channel marked unrecoverable due to persistent -43
+    int readProbeFailCount;             // consecutive health-check probe failures (read mutex)
+    int writeProbeFailCount;            // consecutive health-check probe failures (write mutex)
 
     // NEW (partial enqueue protection): deferred buffers for residual data that
     // n'a pas pu être placé dans les ring buffers (évitant toute perte).
