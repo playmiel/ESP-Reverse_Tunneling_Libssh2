@@ -6,12 +6,12 @@
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
 
-// Optimized (reduced) flow-control thresholds to limit accumulation and improve backpressure
+// Flow-control thresholds sized for large single-client transfers
 #undef HIGH_WATER_LOCAL
 #undef LOW_WATER_LOCAL
-#define HIGH_WATER_LOCAL (3 * 1024)      // 3KB - proactively pause local socket reads
-#define LOW_WATER_LOCAL  (2 * 1024)      // 2KB - resume local socket reads
-#define CRITICAL_WATER_LOCAL (4 * 1024)  // 4KB - hard stop local socket reads
+#define HIGH_WATER_LOCAL (10 * 1024)      // 10KB - pause reads once ring nearly full
+#define LOW_WATER_LOCAL  (6 * 1024)       // 6KB  - resume reads after backlog shrinks
+#define CRITICAL_WATER_LOCAL (14 * 1024)  // 14KB - last resort hard stop on local reads
 
 #ifndef STUCK_PROBE_THRESHOLD
 #define STUCK_PROBE_THRESHOLD 8   // consecutive failed probes before gracefulClosing
@@ -52,8 +52,8 @@ static void recordTerminalSocketFailure(unsigned long now) {
   }
 }
 
-// Fixed buffer (unchanged) + channel integrity threshold
-#define FIXED_BUFFER_SIZE (8 * 1024)
+// Fixed buffer (aligned with thresholds) + channel integrity threshold
+#define FIXED_BUFFER_SIZE (16 * 1024)
 #define MAX_QUEUED_BYTES (32 * 1024)
 
 // Health/recovery tuning (reduce noisy recoveries and WARN spam)
