@@ -17,7 +17,7 @@ jobs:
           - name: arduino-3
             platform_url: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.30-2/platform-espressif32.zip
           - name: arduino-rc
-            platform_url: https://github.com/pioarduino/platform-espressif32/releases/download/rc/platform-espressif32.zip
+            platform_url: https://github.com/pioarduino/platform-espressif32/releases/download/53.03.10-rc3/platform-espressif32.zip
     steps:
       - name: Checkout
         uses: actions/checkout@v4

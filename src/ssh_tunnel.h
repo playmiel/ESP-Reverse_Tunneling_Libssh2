@@ -56,6 +56,7 @@ struct TunnelChannel {
     // Additional counters for fine-grained flow control
     size_t queuedBytesToLocal;   // Bytes in sshToLocalBuffer
     size_t queuedBytesToRemote;  // Bytes in localToSshBuffer
+    bool remoteEof;              // Remote side has sent EOF
     
     // NEW: Large transfer detection
     bool largeTransferInProgress; // Large file transfer in progress
@@ -139,6 +140,7 @@ private:
     void gracefulRecoverChannel(int channelIndex); // NEW: Recovery without clearing buffers
     size_t getOptimalBufferSize(int channelIndex);
     void checkAndRecoverDeadlocks(); // NEW: Deadlock detection and recovery
+    void discardLocalToSsh(int channelIndex, const char* reason); // Drop pending local->SSH data safely
     
     // NEW: Dedicated task for data processing (producer/consumer pattern)
     static void dataProcessingTaskWrapper(void* parameter);
