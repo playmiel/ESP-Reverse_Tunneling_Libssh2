@@ -2,6 +2,7 @@
 #include "network_optimizations.h"
 #include "memory_fixes.h"
 #include "lwip/sockets.h"
+#include <errno.h>
 
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
@@ -2045,13 +2046,41 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     }
 
   // 2) Read local socket if backpressure acceptable (suppress when burst >=2 or terminal)
-    bool suppressLocalRead = false;
-    if (ch.remoteEof) suppressLocalRead = true;
-    if (ch.terminalSocketFailure) suppressLocalRead = true;
-    if (ch.localReadTerminated) suppressLocalRead = true;
-    else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
-    if (!suppressLocalRead && ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
-      ssize_t localRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
+  bool suppressLocalRead = false;
+  if (ch.remoteEof) suppressLocalRead = true;
+  if (ch.terminalSocketFailure) suppressLocalRead = true;
+  if (ch.localReadTerminated) suppressLocalRead = true;
+  else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
+  if (!suppressLocalRead && ch.localSocket >= 0) {
+    int sockError = 0;
+    socklen_t errLen = sizeof(sockError);
+    if (getsockopt(ch.localSocket, SOL_SOCKET, SO_ERROR, &sockError, &errLen) == 0 && sockError != 0) {
+      bool benignReset = (sockError == ECONNRESET || sockError == ENOTCONN ||
+                          sockError == EPIPE || sockError == ESHUTDOWN ||
+                          sockError == ECONNABORTED);
+      unsigned long nowErr = millis();
+      if (benignReset) {
+        if ((nowErr - ch.lastErrorDetailLogMs) > 1000) {
+          ch.lastErrorDetailLogMs = nowErr;
+          LOGF_I("SSH", "Channel %d: Local socket error before read: %s", channelIndex, strerror(sockError));
+        }
+        ch.gracefulClosing = true;
+        ch.localReadTerminated = true;
+      } else {
+        if ((nowErr - ch.lastErrorDetailLogMs) > 1000) {
+          ch.lastErrorDetailLogMs = nowErr;
+          LOGF_W("SSH", "Channel %d: Local socket error before read: %s (errno=%d)", channelIndex, strerror(sockError), sockError);
+        }
+        ch.consecutiveErrors++;
+      }
+      if (ch.localSocket >= 0) {
+        shutdown(ch.localSocket, SHUT_RD);
+      }
+      suppressLocalRead = true;
+    }
+  }
+  if (!suppressLocalRead && ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
+    ssize_t localRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
       if (localRead > 0) {
   // Attempt immediate looped write (direct drainage)
         size_t offset = 0; int directPass = 0; size_t directWrittenTotal = 0;
