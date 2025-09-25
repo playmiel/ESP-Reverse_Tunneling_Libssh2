@@ -1,32 +1,36 @@
-# Documentation ESP-Reverse_Tunneling_Libssh2
+# ESP-Reverse_Tunneling_Libssh2 Documentation
 
-Cette documentation couvre tous les aspects de la librairie ESP-Reverse_Tunneling_Libssh2.
+This documentation covers all aspects of the ESP-Reverse_Tunneling_Libssh2 library.
 
-## 📖 Guides principaux
+## 📖 Main Guides
 
 ### [SSH_KEYS_MEMORY.md](SSH_KEYS_MEMORY.md)
-Guide complet pour l'authentification SSH par clés avec stockage en mémoire :
-- Configuration des clés SSH
-- Stockage sécurisé en LittleFS  
-- Formats de clés supportés
-- Exemples pratiques
+Complete guide for SSH key authentication with in-memory storage:
 
-### [HOST_KEY_VERIFICATION.md](HOST_KEY_VERIFICATION.md) 
-Guide de sécurité pour la vérification des clés d'hôte :
-- Protection contre les attaques Man-in-the-Middle
-- Configuration des empreintes de serveur
-- API de vérification
-- Bonnes pratiques de sécurité
-- Migration et dépannage
+- SSH key configuration
+- Secure LittleFS storage  
+- Supported key formats
+- Practical examples
+
+### [HOST_KEY_VERIFICATION.md](HOST_KEY_VERIFICATION.md)
+Security guide for host key verification:
+
+- Protection against Man-in-the-Middle attacks
+- Server fingerprint configuration
+- Verification API
+- Security best practices
+- Migration and troubleshooting
 
 ## 🔧 Configuration
 
-### Authentification par mot de passe (simple)
+### Password authentication (simple)
+
 ```cpp
 globalSSHConfig.setSSHServer("server.com", 22, "username", "password");
 ```
 
-### Authentification par clé SSH (recommandée)
+### SSH key authentication (recommended)
+
 ```cpp
 globalSSHConfig.setSSHKeyAuthFromMemory(
     "server.com", 22, "username", 
@@ -34,92 +38,98 @@ globalSSHConfig.setSSHKeyAuthFromMemory(
 );
 ```
 
-### Configuration sécurisée complète
+### Secure full configuration
+
 ```cpp
-// Authentification SSH
+// SSH authentication
 globalSSHConfig.setSSHKeyAuthFromMemory(
     "server.com", 22, "username",
     privateKeyData, publicKeyData, ""
 );
 
-// Vérification de l'identité du serveur
+// Server identity verification
 globalSSHConfig.setHostKeyVerification(
-    "empreinte_sha256_du_serveur",
+    "server_sha256_fingerprint",
     "ssh-ed25519",
     true
 );
 
-// Configuration du tunnel
+// Tunnel configuration
 globalSSHConfig.setTunnelConfig(
-    "0.0.0.0", 8080,    // Serveur distant (bind)
-    "192.168.1.100", 80 // Cible locale (ESP32)
+    "0.0.0.0", 8080,    // Remote server bind
+    "192.168.1.100", 80 // Local target (ESP32)
 );
 ```
 
-## 📊 Formats de clés supportés
+## 📊 Supported Key Formats
 
-| Format | Compatibilité | Recommandation |
+| Format | Compatibility | Recommendation |
 |--------|---------------|----------------|
-| OpenSSH moderne (`-----BEGIN OPENSSH PRIVATE KEY-----`) | ⚠️ Variable | Convertir en PKCS#8 |
-| PKCS#8 (`-----BEGIN PRIVATE KEY-----`) | ✅ Excellente | **Recommandé** |
-| PEM RSA (`-----BEGIN RSA PRIVATE KEY-----`) | ✅ Excellente | OK pour RSA |
-| PEM EC (`-----BEGIN EC PRIVATE KEY-----`) | ✅ Bonne | OK pour ECDSA |
+| Modern OpenSSH (`-----BEGIN OPENSSH PRIVATE KEY-----`) | ⚠️ Variable | Convert to PKCS#8 |
+| PKCS#8 (`-----BEGIN PRIVATE KEY-----`) | ✅ Excellent | **Recommended** |
+| PEM RSA (`-----BEGIN RSA PRIVATE KEY-----`) | ✅ Excellent | OK for RSA |
+| PEM EC (`-----BEGIN EC PRIVATE KEY-----`) | ✅ Good | OK for ECDSA |
 
-## 🔐 Algorithmes de clés supportés
+## 🔐 Supported Key Algorithms
 
-| Algorithme | Support | Taille recommandée |
-|------------|---------|-------------------|
-| **Ed25519** | ✅ Excellent | 256 bits (fixe) |
+| Algorithm | Support | Recommended Size |
+|-----------|---------|------------------|
+| **Ed25519** | ✅ Excellent | 256 bits (fixed) |
 | RSA | ✅ Excellent | 4096 bits |
-| ECDSA P-256 | ✅ Bon | 256 bits |
-| ECDSA P-384 | ✅ Bon | 384 bits |
-| ECDSA P-521 | ✅ Bon | 521 bits |
-| DSA | ⚠️ Déprécié | Non recommandé |
+| ECDSA P-256 | ✅ Good | 256 bits |
+| ECDSA P-384 | ✅ Good | 384 bits |
+| ECDSA P-521 | ✅ Good | 521 bits |
+| DSA | ⚠️ Deprecated | Not recommended |
 
-## 🛡️ Niveaux de sécurité
+## 🛡️ Security Levels
 
-### Développement (niveau 1)
+### Development (level 1)
+
 ```cpp
 globalSSHConfig.setSSHServer("server.com", 22, "user", "password");
-// Pas de vérification d'hôte
+// No host verification
 ```
 
-### Production basique (niveau 2)  
+### Basic production (level 2)  
+
 ```cpp
-globalSSHConfig.setSSHKeyAuthFromMemory(/* clés SSH */);
-// Authentification par clé mais pas de vérification d'hôte
+globalSSHConfig.setSSHKeyAuthFromMemory(/* SSH keys */);
+// Key-based auth but no host verification
 ```
 
-### Production sécurisée (niveau 3) - **Recommandé**
+### Secure production (level 3) - **Recommended**
+
 ```cpp
-globalSSHConfig.setSSHKeyAuthFromMemory(/* clés SSH */);
-globalSSHConfig.setHostKeyVerification(/* empreinte serveur */);
-// Authentification par clé + vérification d'hôte
+globalSSHConfig.setSSHKeyAuthFromMemory(/* SSH keys */);
+globalSSHConfig.setHostKeyVerification(/* server fingerprint */);
+// Key-based auth + host verification
 ```
 
-## 🚀 Démarrage rapide
+## 🚀 Quick Start
 
 ### 1. Installation
+
 ```ini
 # platformio.ini
 lib_deps = 
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
 ```
 
-### 2. Code minimal
+### 2. Minimal code
+
 ```cpp
 #include "ESP-Reverse_Tunneling_Libssh2.h"
 
 SSHTunnel tunnel;
 
 void setup() {
-    // Configuration WiFi
+    // WiFi configuration
     WiFi.begin("SSID", "PASSWORD");
     
-    // Configuration SSH
-    globalSSHConfig.setSSHKeyAuthFromMemory(/* paramètres */);
+    // SSH configuration
+    globalSSHConfig.setSSHKeyAuthFromMemory(/* parameters */);
     
-    // Initialisation
+    // Initialization
     tunnel.init();
     tunnel.connectSSH();
 }
@@ -129,57 +139,58 @@ void loop() {
 }
 ```
 
-### 3. Verification du statut
+### 3. Status check
+
 ```cpp
 if (tunnel.isConnected()) {
-    Serial.println("Tunnel actif");
-    Serial.printf("Canaux actifs: %d\n", tunnel.getActiveChannels());
-    Serial.printf("Données reçues: %lu bytes\n", tunnel.getBytesReceived());
-    Serial.printf("Données envoyées: %lu bytes\n", tunnel.getBytesSent());
+    Serial.println("Tunnel active");
+    Serial.printf("Active channels: %d\n", tunnel.getActiveChannels());
+    Serial.printf("Bytes received: %lu bytes\n", tunnel.getBytesReceived());
+    Serial.printf("Bytes sent: %lu bytes\n", tunnel.getBytesSent());
 }
 ```
 
-## 🔍 Dépannage
+## 🔍 Troubleshooting
 
-### Problèmes courants
+### Common issues
 
 #### "Authentication failed"
-- ✅ Vérifier le format des clés (préférer PKCS#8)
-- ✅ Vérifier que la clé publique est dans `authorized_keys`
-- ✅ Tester la connexion SSH manuelle depuis un PC
+- ✅ Check key format (prefer PKCS#8)
+- ✅ Ensure public key is in `authorized_keys`
+- ✅ Test manual SSH connection from a PC
 
 #### "Host key verification failed"  
-- ✅ Obtenir la vraie empreinte du serveur
-- ✅ Vérifier la configuration de l'empreinte
-- ✅ S'assurer qu'il ne s'agit pas d'une attaque
+- ✅ Get the real server fingerprint
+- ✅ Check configured fingerprint
+- ✅ Ensure it's not an attack
 
 #### "Connection timeout"
-- ✅ Vérifier la connectivité réseau
-- ✅ Vérifier que le port SSH est ouvert
-- ✅ Tester avec un client SSH standard
+- ✅ Verify network connectivity
+- ✅ Check SSH port open
+- ✅ Test with a standard SSH client
 
-### Logs utiles
+### Useful logs
 ```cpp
-// Activer le debug détaillé
+// Enable detailed debug
 globalSSHConfig.setDebugConfig(true, 115200);
 
-// Diagnostiquer les clés SSH
+// Diagnose SSH keys
 globalSSHConfig.diagnoseSSHKeys();
 ```
 
-## 📈 Optimisations performances
+## 📈 Performance Optimizations
 
-### Mémoire
-- Utiliser des clés Ed25519 (plus compactes)
-- Ajuster `bufferSize` selon l'usage
-- Limiter `maxChannels` selon les besoins
+### Memory
+- Use Ed25519 keys (more compact)
+- Adjust `bufferSize` according to usage
+- Limit `maxChannels` to what you need
 
-### Réseau
-- Ajuster `keepAliveIntervalSec`
-- Optimiser `channelTimeoutMs`
-- Utiliser les optimisations réseau intégrées
+### Network
+- Tune `keepAliveIntervalSec`
+- Optimize `channelTimeoutMs`
+- Use built-in network optimizations
 
-### Configuration recommandée
+### Recommended configuration
 ```cpp
 globalSSHConfig.setConnectionConfig(
     30,    // Keep-alive: 30s
@@ -197,13 +208,14 @@ globalSSHConfig.setBufferConfig(
 
 ## 📞 Support
 
-Pour des questions ou problèmes :
-1. Consulter cette documentation
-2. Vérifier les [examples/](../examples/) 
-3. Activer les logs de debug
-4. Ouvrir une issue sur GitHub
+For questions or issues:
+
+1. Consult this documentation
+2. Check the [examples/](../examples/)
+3. Enable debug logs
+4. Open a GitHub issue
 
 ---
 
-**Version de la documentation :** 1.0  
-**Dernière mise à jour :** 2025-01-31
+**Documentation version:** 1.0  
+**Last update:** 2025-01-31

@@ -1,51 +1,56 @@
-# Vérification des Clés d'Hôte (Known Hosts)
+# Host Key Verification (Known Hosts)
 
 ## Introduction
 
-La vérification des clés d'hôte est un mécanisme de sécurité crucial qui protège contre les attaques **Man-in-the-Middle (MITM)**. Cette fonctionnalité vérifie l'identité du serveur SSH en comparant son empreinte cryptographique avec une valeur attendue.
+Host key verification is a critical security mechanism that protects against **Man-in-the-Middle (MITM)** attacks. It validates the SSH server’s identity by comparing its cryptographic fingerprint to an expected value.
 
-## Pourquoi c'est important
+## Why It Matters
 
-### Sans vérification des clés d'hôte :
-```
+### Without host key verification
+
+```text
 Internet → [Attaquant] → [Votre ESP32] → [Vrai serveur]
            ↑
     Se fait passer pour votre serveur
     Peut intercepter/modifier tout le trafic
 ```
 
-### Avec vérification :
-- ✅ **Détection d'attaques MITM**
-- ✅ **Vérification de l'identité du serveur**
-- ✅ **Protection des données sensibles**
-- ✅ **Conformité aux bonnes pratiques de sécurité**
+### With verification
+
+- ✅ **Detects MITM attacks**
+- ✅ **Verifies server identity**
+- ✅ **Protects sensitive data**
+- ✅ **Follows security best practices**
 
 ## Configuration
 
-### 1. Obtenir l'empreinte du serveur
+### 1. Obtain the server fingerprint
 
-#### Sur votre serveur Linux :
+#### On your Linux server
+
 ```bash
-# Obtenir l'empreinte SHA256 de la clé Ed25519
+# Get the SHA256 fingerprint of the Ed25519 key
 ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub -E sha256
 
-# Ou depuis un client
+# Or from a client
 ssh-keyscan -t ed25519 votre-serveur.com | ssh-keygen -lf - -E sha256
 ```
 
-#### Exemple de sortie :
-```
+#### Example output
+
+```text
 256 SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56 root@server (ED25519)
 ```
 
-### 2. Configuration dans votre code ESP32
+### 2. ESP32 Code Configuration
 
-#### Méthode 1 : Configuration complète
+#### Method 1: Full configuration
+
 ```cpp
 #include "ESP-Reverse_Tunneling_Libssh2.h"
 
 void setup() {
-    // Configuration SSH normale
+    // Standard SSH configuration
     globalSSHConfig.setSSHKeyAuthFromMemory(
         "votre-serveur.com",
         22,
@@ -55,21 +60,22 @@ void setup() {
         ""  // Pas de passphrase
     );
 
-    // Activer la vérification avec empreinte attendue
+    // Enable verification with expected fingerprint
     globalSSHConfig.setHostKeyVerification(
-        "abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56", // Empreinte SHA256
-        "ssh-ed25519",  // Type de clé attendu
-        true           // Activer la vérification
+    "abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56", // SHA256 fingerprint
+    "ssh-ed25519",  // Expected key type
+    true           // Enable verification
     );
 }
 ```
 
-#### Méthode 2 : Configuration étape par étape
-```cpp
-// D'abord configurer SSH normalement
-globalSSHConfig.setSSHKeyAuthFromMemory(/* paramètres SSH */);
+#### Method 2: Step-by-step configuration
 
-// Puis configurer la vérification
+```cpp
+// First configure SSH normally
+globalSSHConfig.setSSHKeyAuthFromMemory(/* SSH parameters */);
+
+// Then configure verification
 globalSSHConfig.setHostKeyVerification(true);
 globalSSHConfig.setExpectedHostKey(
     "abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56",
@@ -77,46 +83,47 @@ globalSSHConfig.setExpectedHostKey(
 );
 ```
 
-#### Méthode 3 : Mode découverte (première connexion)
+#### Method 3: Discovery mode (first connection)
+
 ```cpp
-// Désactiver la vérification pour découvrir l'empreinte
+// Disable verification to discover fingerprint
 globalSSHConfig.setHostKeyVerification(false);
 
-// Dans les logs, vous verrez :
+// Logs will show:
 // [INFO] Store this fingerprint in your configuration: abcd1234...
-// Utilisez ensuite cette empreinte pour activer la vérification
+// Use this fingerprint to enable verification afterward
 ```
 
-## API de Configuration
+## Configuration API
 
-### Méthodes disponibles
+### Available methods
 
 ```cpp
 class SSHConfiguration {
 public:
-    // Activer/désactiver la vérification
+    // Enable/disable verification
     void setHostKeyVerification(bool enable);
     
-    // Configurer l'empreinte attendue
+    // Set expected fingerprint
     void setExpectedHostKey(const String& fingerprint, const String& keyType = "");
     
-    // Configuration complète en une fois
+    // Full configuration helper
     void setHostKeyVerification(const String& fingerprint, const String& keyType = "", bool enable = true);
 };
 ```
 
-### Paramètres
+### Parameters
 
-| Paramètre | Type | Description |
+| Parameter | Type | Description |
 |-----------|------|-------------|
-| `fingerprint` | String | Empreinte SHA256 (64 caractères hex) |
-| `keyType` | String | Type de clé : "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-*" |
-| `enable` | bool | Activer/désactiver la vérification |
+| `fingerprint` | String | SHA256 fingerprint (64 hex characters) |
+| `keyType` | String | Key type: "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-*" |
+| `enable` | bool | Enable/disable verification |
 
-## Types de clés supportés
+## Supported key types
 
-| Type | Constante libssh2 | Chaîne de configuration |
-|------|------------------|------------------------|
+| Type | libssh2 Constant | Config string |
+|------|------------------|---------------|
 | RSA | `LIBSSH2_HOSTKEY_TYPE_RSA` | `"ssh-rsa"` |
 | DSA | `LIBSSH2_HOSTKEY_TYPE_DSS` | `"ssh-dss"` |
 | ECDSA P-256 | `LIBSSH2_HOSTKEY_TYPE_ECDSA_256` | `"ecdsa-sha2-nistp256"` |
@@ -124,17 +131,19 @@ public:
 | ECDSA P-521 | `LIBSSH2_HOSTKEY_TYPE_ECDSA_521` | `"ecdsa-sha2-nistp521"` |
 | Ed25519 | `LIBSSH2_HOSTKEY_TYPE_ED25519` | `"ssh-ed25519"` |
 
-## Logs et Debug
+## Logs and Debug
 
-### Logs normaux (vérification réussie)
-```
+### Normal logs (verification success)
+
+```text
 [INFO] Server host key: ssh-ed25519
 [INFO] Server fingerprint (SHA256): abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
 [INFO] Host key verification successful
 ```
 
-### Logs d'erreur (empreinte incorrecte)
-```
+### Error logs (fingerprint mismatch)
+
+```text
 [ERROR] HOST KEY VERIFICATION FAILED!
 [ERROR] This could indicate a Man-in-the-Middle attack!
 [ERROR] Expected: abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
@@ -142,8 +151,9 @@ public:
 [ERROR] Key type: ssh-ed25519
 ```
 
-### Mode découverte
-```
+### Discovery mode
+
+```text
 [WARN] Host key verification disabled - connection accepted without verification
 [INFO] Server host key: ssh-ed25519
 [INFO] Server fingerprint (SHA256): abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
@@ -151,19 +161,20 @@ public:
 [INFO] Store this fingerprint in your configuration: abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
 ```
 
-## Exemples d'utilisation
+## Usage Examples
 
-### Exemple 1 : Configuration de production
+### Example 1: Production configuration
+
 ```cpp
 void configureSecureSSH() {
-    // Clés SSH
+    // SSH keys
     String privateKey = R"(-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
 -----END PRIVATE KEY-----)";
     
     String publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAebBChSTfMPbiXfphT6KUzZ+TxZ2UwmrnTXx9ojgLh4 esp32-device";
     
-    // Configuration complète sécurisée
+    // Full secure configuration
     globalSSHConfig.setSSHKeyAuthFromMemory(
         "production-server.com",
         22,
@@ -173,7 +184,7 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
         ""
     );
     
-    // Vérification obligatoire en production
+    // Mandatory verification in production
     globalSSHConfig.setHostKeyVerification(
         "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
         "ssh-ed25519",
@@ -182,115 +193,119 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
 }
 ```
 
-### Exemple 2 : Configuration de développement
+### Example 2: Development configuration
+
 ```cpp
 void configureDevSSH() {
-    // Configuration SSH normale
-    globalSSHConfig.setSSHKeyAuthFromMemory(/* paramètres */);
+    // Standard SSH configuration
+    globalSSHConfig.setSSHKeyAuthFromMemory(/* parameters */);
     
-    // Mode découverte pour obtenir l'empreinte
+    // Discovery mode to get fingerprint
     globalSSHConfig.setHostKeyVerification(false);
     
-    // TODO: Remplacer par la vraie empreinte une fois obtenue
+    // TODO: Replace with real fingerprint once obtained
     // globalSSHConfig.setHostKeyVerification("EMPREINTE_ICI", "ssh-ed25519", true);
 }
 ```
 
-### Exemple 3 : Configuration flexible
+### Example 3: Flexible configuration
+
 ```cpp
 void configureFlexibleSSH() {
-    // Configuration SSH
-    globalSSHConfig.setSSHKeyAuthFromMemory(/* paramètres */);
+    // SSH configuration
+    globalSSHConfig.setSSHKeyAuthFromMemory(/* parameters */);
     
     #ifdef PRODUCTION
-        // Vérification stricte en production
+    // Strict verification in production
         globalSSHConfig.setHostKeyVerification(
             "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
             "ssh-ed25519",
             true
         );
     #else
-        // Mode permissif en développement
+    // Permissive mode in development
         globalSSHConfig.setHostKeyVerification(false);
         LOG_W("SSH", "Host key verification disabled in development mode");
     #endif
 }
 ```
 
-## Sécurité et bonnes pratiques
+## Security and Best Practices
 
-### ✅ Recommandations
+### ✅ Recommendations
 
-1. **Toujours activer en production**
+1. **Always enable in production**
    ```cpp
    globalSSHConfig.setHostKeyVerification(true);
    ```
 
-2. **Utiliser des empreintes complètes**
-   - SHA256 recommandé (64 caractères hex)
-   - Éviter SHA1 (déprécié)
+2. **Use full fingerprints**
 
-3. **Spécifier le type de clé**
+    - Prefer SHA256 (64 hex chars)
+    - Avoid SHA1 (deprecated)
+
+3. **Specify key type**
    ```cpp
    globalSSHConfig.setExpectedHostKey("empreinte", "ssh-ed25519");
    ```
 
-4. **Surveiller les logs**
-   - Alertes automatiques sur échec de vérification
-   - Monitoring des changements d'empreinte
+4. **Monitor logs**
 
-### ❌ À éviter
+    - Automatic alerts on verification failure
+    - Watch for fingerprint changes
 
-1. **Ne jamais désactiver en production**
+### ❌ Avoid
+
+1. **Never disable in production**
    ```cpp
    // DANGEREUX en production !
    globalSSHConfig.setHostKeyVerification(false);
    ```
 
-2. **Ne pas ignorer les erreurs de vérification**
-   - Un échec peut indiquer une attaque
-   - Investiguer tout changement d'empreinte
+2. **Do not ignore verification failures**
+- A failure can indicate an attack
+- Investigate any fingerprint change
 
-3. **Ne pas utiliser d'empreintes partielles**
-   - Toujours utiliser l'empreinte complète
-   - Vérifier la casse et les caractères
+3. **Do not use partial fingerprints**
+- Always use the full fingerprint
+- Check case and characters
 
-## Dépannage
+## Troubleshooting
 
-### Problème : "Host key verification failed"
+### Issue: "Host key verification failed"
 
-**Causes possibles :**
-- Serveur reconfiguré avec de nouvelles clés
-- Attaque Man-in-the-Middle
-- Erreur de configuration (mauvaise empreinte)
+**Possible causes:**
+- Server reconfigured with new keys
+- Man-in-the-Middle attack
+- Configuration error (wrong fingerprint)
 
-**Solutions :**
-1. Vérifier l'empreinte sur le serveur
-2. Comparer avec l'empreinte configurée
-3. Mettre à jour si le serveur a changé légitimement
+**Solutions:**
+1. Check the fingerprint on the server
+2. Compare with configured fingerprint
+3. Update if server legitimately changed
 
-### Problème : "Failed to get host key from server"
+### Issue: "Failed to get host key from server"
 
-**Causes possibles :**
-- Problème de connexion réseau
-- Serveur SSH non disponible
-- Version libssh2 incompatible
+**Possible causes:**
+- Network connectivity issue
+- SSH server unavailable
+- Incompatible libssh2 version
 
-**Solutions :**
-1. Vérifier la connectivité réseau
-2. Tester la connexion SSH manuelle
-3. Vérifier les logs du serveur
+**Solutions:**
+1. Verify network connectivity
+2. Test manual SSH connection
+3. Check server logs
 
-### Problème : Type de clé non reconnu
+### Issue: Unrecognized key type
 
-**Solutions :**
-1. Utiliser un type de clé supporté
-2. Mettre à jour libssh2 si nécessaire
-3. Configurer le serveur avec un algorithme supporté
+**Solutions:**
+1. Use a supported key type
+2. Update libssh2 if needed
+3. Configure server with supported algorithm
 
-## Structure de configuration
+## Configuration Structure
 
-### Dans ssh_config.h
+### In ssh_config.h
 ```cpp
 struct SSHServerConfig {
     String host;
@@ -301,42 +316,42 @@ struct SSHServerConfig {
     String privateKeyData;
     String publicKeyData;
     
-    // Configuration known hosts
-    bool verifyHostKey;                    // Activer/désactiver
-    String expectedHostKeyFingerprint;    // Empreinte SHA256
-    String hostKeyType;                   // Type de clé attendu
+    // Known hosts configuration
+    bool verifyHostKey;                    // Enable/disable
+    String expectedHostKeyFingerprint;     // SHA256 fingerprint
+    String hostKeyType;                    // Expected key type
 };
 ```
 
-### Valeurs par défaut
+### Default values
 ```cpp
 SSHServerConfig() : 
-    // ... autres paramètres ...
-    verifyHostKey(false),                  // Désactivé par défaut
-    expectedHostKeyFingerprint(""),       // Aucune empreinte
-    hostKeyType("") {}                    // Tous types acceptés
+    // ... other parameters ...
+    verifyHostKey(false),                  // Disabled by default
+    expectedHostKeyFingerprint(""),       // No fingerprint
+    hostKeyType("") {}                    // All types accepted
 ```
 
-## Migration depuis une version sans vérification
+## Migration from a version without verification
 
-### Étape 1 : Mise à jour du code
+### Step 1: Update code
 ```cpp
-// Ancien code (sans vérification)
+// Old code (no verification)
 globalSSHConfig.setSSHKeyAuthFromMemory(host, port, user, privKey, pubKey, "");
 
-// Nouveau code (avec découverte)
+// New code (with discovery)
 globalSSHConfig.setSSHKeyAuthFromMemory(host, port, user, privKey, pubKey, "");
-globalSSHConfig.setHostKeyVerification(false); // Mode découverte temporaire
+globalSSHConfig.setHostKeyVerification(false); // Temporary discovery mode
 ```
 
-### Étape 2 : Obtenir l'empreinte
-1. Compiler et flasher avec le mode découverte
-2. Noter l'empreinte dans les logs
-3. Sauvegarder l'empreinte en lieu sûr
+### Step 2: Get the fingerprint
+1. Build and flash in discovery mode
+2. Note the fingerprint from logs
+3. Store fingerprint securely
 
-### Étape 3 : Activer la vérification
+### Step 3: Enable verification
 ```cpp
-// Configuration finale sécurisée
+// Final secure configuration
 globalSSHConfig.setSSHKeyAuthFromMemory(host, port, user, privKey, pubKey, "");
 globalSSHConfig.setHostKeyVerification(
     "empreinte_obtenue_etape_2",
@@ -345,31 +360,31 @@ globalSSHConfig.setHostKeyVerification(
 );
 ```
 
-## Exemple complet
+## Complete Example
 
 ```cpp
 #include "ESP-Reverse_Tunneling_Libssh2.h"
 
-// Configuration sécurisée complète
+// Full secure configuration
 void setupSecureSSHTunnel() {
-    // Clés SSH au format PKCS#8 (recommandé)
+    // SSH keys in PKCS#8 format (recommended)
     String privateKey = R"(-----BEGIN PRIVATE KEY-----
 MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
 -----END PRIVATE KEY-----)";
     
     String publicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAebBChSTfMPbiXfphT6KUzZ+TxZ2UwmrnTXx9ojgLh4 esp32-tunnel";
     
-    // Configuration SSH avec authentification par clé
+    // SSH configuration with key authentication
     globalSSHConfig.setSSHKeyAuthFromMemory(
         "tunnel.example.com",   // Serveur SSH
         22,                     // Port SSH
         "tunnel-user",          // Utilisateur
-        privateKey,             // Clé privée
-        publicKey,              // Clé publique
+    privateKey,             // Private key
+    publicKey,              // Public key
         ""                      // Pas de passphrase
     );
     
-    // Configuration du tunnel reverse
+    // Reverse tunnel configuration
     globalSSHConfig.setTunnelConfig(
         "0.0.0.0",             // Bind sur toutes les interfaces du serveur
         8080,                  // Port distant (serveur)
@@ -377,36 +392,36 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
         80                     // Port local (serveur web ESP32)
     );
     
-    // Configuration sécurisée avec vérification des clés d'hôte
+    // Secure configuration with host key verification
     globalSSHConfig.setHostKeyVerification(
         "a1b2c3d4e5f67890123456789012345678901234567890abcdef1234567890ab",  // Empreinte SHA256
-        "ssh-ed25519",                                                      // Type de clé
+    "ssh-ed25519",                                                      // Key type
         true                                                               // Activer
     );
     
-    // Configuration des paramètres de connexion
+    // Connection parameters configuration
     globalSSHConfig.setConnectionConfig(
-        30,    // Keep-alive: 30 secondes
-        5000,  // Délai de reconnexion: 5 secondes
-        10,    // Max tentatives de reconnexion
-        30     // Timeout de connexion: 30 secondes
+    30,    // Keep-alive: 30 seconds
+    5000,  // Reconnect delay: 5 seconds
+    10,    // Max reconnect attempts
+    30     // Connection timeout: 30 seconds
     );
 }
 
 void setup() {
     Serial.begin(115200);
     
-    // Configuration WiFi
+    // WiFi configuration
     WiFi.begin("SSID", "PASSWORD");
     while (WiFi.status() != WL_CONNECTED) {
         delay(1000);
         Serial.println("Connecting to WiFi...");
     }
     
-    // Configuration sécurisée du tunnel SSH
+    // Secure tunnel configuration
     setupSecureSSHTunnel();
     
-    // Initialisation du tunnel
+    // Tunnel initialization
     if (!tunnel.init()) {
         Serial.println("Failed to initialize SSH tunnel");
         return;
@@ -421,4 +436,4 @@ void loop() {
 }
 ```
 
-Cette documentation complète couvre tous les aspects de la vérification des clés d'hôte dans votre librairie ESP-Reverse_Tunneling_Libssh2.
+This documentation covers all aspects of host key verification in your ESP-Reverse_Tunneling_Libssh2 library.

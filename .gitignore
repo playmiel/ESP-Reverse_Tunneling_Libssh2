@@ -28,9 +28,10 @@ Thumbs.db
 *.tmp
 *.temp
 *.log
+.vscode
 
 
-# Documentation locale de développement
+# Local development documentation (was French)
 AGENTS.md
 
 # Submodule changes (to avoid automatic commits)

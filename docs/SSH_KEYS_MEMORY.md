@@ -1,22 +1,22 @@
-# Utilisation des clés SSH avec libssh2_userauth_publickey_frommemory
+# Using SSH Keys with libssh2_userauth_publickey_frommemory
 
-Ce guide explique comment utiliser l'authentification SSH par clé publique avec les clés stockées en mémoire au lieu de fichiers, ce qui est plus fiable avec LittleFS sur ESP32.
+This guide explains how to use SSH public key authentication with keys stored directly in memory instead of filesystem files, which is often more reliable with LittleFS on ESP32.
 
-## Avantages de l'authentification par clé en mémoire
+## Advantages of in‑memory key authentication
 
-- **Compatibilité LittleFS** : Évite les problèmes de lecture de fichiers avec LittleFS
-- **Performance** : Pas d'accès disque pendant l'authentification
-- **Sécurité** : Les clés peuvent être chargées une seule fois au démarrage
-- **Fiabilité** : Évite les erreurs de chemin de fichier
+- **LittleFS compatibility**: Avoids file read issues
+- **Performance**: No disk access during authentication
+- **Security**: Keys can be loaded once at boot
+- **Reliability**: Prevents path resolution errors
 
-## Méthodes d'utilisation
+## Usage Methods
 
-### 1. Configuration avec clés directement en mémoire
+### 1. Configuration with keys directly in memory
 
 ```cpp
 String privateKey = R"(-----BEGIN OPENSSH PRIVATE KEY-----
 b3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAFwAAAAdzc2gtcn
-... (votre clé privée complète ici)
+... (your full private key here)
 -----END OPENSSH PRIVATE KEY-----)";
 
 String publicKey = "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAAB... user@host";
@@ -31,20 +31,20 @@ globalSSHConfig.setSSHKeyAuthFromMemory(
 );
 ```
 
-### 2. Chargement automatique depuis LittleFS
+### 2. Automatic loading from LittleFS
 
 ```cpp
-// Cette méthode charge automatiquement les clés en mémoire
+// This method automatically loads keys into memory
 globalSSHConfig.setSSHKeyAuth(
   "your-remote-server.com",
   22,
   "your_username",
-  "/ssh_key",       // Chemin vers la clé privée dans LittleFS
+  "/ssh_key",       // Path to private key in LittleFS
   ""                // Passphrase optionnelle
 );
 ```
 
-### 3. Chargement manuel depuis LittleFS
+### 3. Manual loading from LittleFS
 
 ```cpp
 // Initialiser LittleFS
@@ -53,7 +53,7 @@ if (!LittleFS.begin(true)) {
   return;
 }
 
-// Charger les clés en mémoire
+// Load keys into memory
 if (globalSSHConfig.loadSSHKeysFromLittleFS("/ssh_key")) {
   LOG_I("CONFIG", "SSH keys loaded successfully");
 } else {
@@ -61,26 +61,26 @@ if (globalSSHConfig.loadSSHKeysFromLittleFS("/ssh_key")) {
 }
 ```
 
-## Préparation des clés SSH
+## Preparing SSH Keys
 
-### Génération des clés
+### Key generation
 
 ```bash
-# Générer une paire de clés SSH
+# Generate an SSH key pair
 ssh-keygen -t rsa -b 2048 -f ssh_key -N ""
 
-# Cela créera :
-# - ssh_key (clé privée)
-# - ssh_key.pub (clé publique)
+# This creates:
+# - ssh_key (private key)
+# - ssh_key.pub (public key)
 ```
 
-### Upload vers LittleFS
+### Upload to LittleFS
 
-1. **Via l'outil ESP32 Sketch Data Upload** :
-   - Placez vos clés dans le dossier `data/` de votre projet
-   - Utilisez l'outil "ESP32 Sketch Data Upload" dans Arduino IDE
+1. **Via ESP32 Sketch Data Upload tool**:
+  - Put your keys in the project `data/` directory
+  - Use the "ESP32 Sketch Data Upload" tool in Arduino IDE
 
-2. **Programmatiquement** :
+2. **Programmatically**:
    ```cpp
    File privateKeyFile = LittleFS.open("/ssh_key", "w");
    privateKeyFile.print(privateKeyString);
@@ -91,7 +91,7 @@ ssh-keygen -t rsa -b 2048 -f ssh_key -N ""
    publicKeyFile.close();
    ```
 
-## Exemple complet
+## Full example
 
 ```cpp
 #include <WiFi.h>
@@ -101,19 +101,19 @@ ssh-keygen -t rsa -b 2048 -f ssh_key -N ""
 void setup() {
   Serial.begin(115200);
   
-  // Initialiser LittleFS
+  // Initialize LittleFS
   if (!LittleFS.begin(true)) {
     LOG_E("MAIN", "Failed to initialize LittleFS");
     return;
   }
   
-  // Configuration WiFi
+  // WiFi configuration
   WiFi.begin("YOUR_SSID", "YOUR_PASSWORD");
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
   }
   
-  // Configuration SSH avec clés depuis LittleFS
+  // SSH configuration with keys from LittleFS
   globalSSHConfig.setSSHKeyAuth(
     "your-server.com",
     22,
@@ -122,10 +122,10 @@ void setup() {
     ""  // Pas de passphrase
   );
   
-  // Configuration du tunnel
+  // Tunnel configuration
   globalSSHConfig.setTunnelConfig("0.0.0.0", 8080, "192.168.1.100", 80);
   
-  // Initialiser et connecter le tunnel
+  // Initialize and connect tunnel
   SSHTunnel tunnel;
   if (tunnel.init() && tunnel.connectSSH()) {
     LOG_I("MAIN", "SSH tunnel established successfully");
@@ -133,33 +133,33 @@ void setup() {
 }
 ```
 
-## Dépannage
+## Troubleshooting
 
-### Problème : "SSH keys not available in memory"
-- Vérifiez que LittleFS est initialisé
-- Vérifiez que les fichiers de clés existent dans LittleFS
-- Vérifiez les permissions de lecture des fichiers
+### Issue: "SSH keys not available in memory"
+- Check LittleFS initialized
+- Check key files exist in LittleFS
+- Check read permissions
 
-### Problème : "Authentication by public key from memory failed"
-- Vérifiez le format des clés (OpenSSH ou PEM)
-- Vérifiez que la clé publique correspond à la clé privée
-- Vérifiez que la passphrase est correcte si utilisée
+### Issue: "Authentication by public key from memory failed"
+- Validate key formats (OpenSSH or PEM)
+- Ensure public key matches private key
+- Ensure passphrase (if any) is correct
 
-### Problème : Format de clé non supporté
-- libssh2 supporte les formats OpenSSH et PEM
-- Convertir au besoin : `ssh-keygen -p -m PEM -f ssh_key`
+### Issue: Unsupported key format
+- libssh2 supports OpenSSH and PEM formats
+- Convert if needed: `ssh-keygen -p -m PEM -f ssh_key`
 
-## Notes de sécurité
+## Security notes
 
-1. **Ne jamais** inclure de vraies clés privées dans le code source
-2. Utiliser des clés dédiées pour l'ESP32
-3. Stocker les clés de manière sécurisée (chiffrement, accès restreint)
-4. Considérer l'utilisation de certificats temporaires si possible
+1. **Never** commit real private keys to source
+2. Use device-dedicated keys
+3. Store keys securely (encryption, restricted access)
+4. Consider temporary/rotated credentials when possible
 
-## Compatibilité
+## Compatibility
 
 - ✅ OpenSSH private key format
 - ✅ PEM private key format  
 - ✅ RSA keys
-- ✅ ED25519 keys (si supporté par libssh2)
-- ✅ Clés avec et sans passphrase
+- ✅ ED25519 keys (if supported by libssh2)
+- ✅ Keys with or without passphrase
