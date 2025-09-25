@@ -26,7 +26,7 @@ void setup() {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 
-  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version améliorée avec configuration dynamique");
+  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Enhanced version with dynamic configuration");
 
   // SSH tunnel configuration
   configureSSHTunnel();

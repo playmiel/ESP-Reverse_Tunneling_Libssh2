@@ -83,11 +83,11 @@ struct TunnelChannel {
     bool localReadTerminated;           // local side no longer readable (socket closed/error)
 
     // NEW (partial enqueue protection): deferred buffers for residual data that
-    // n'a pas pu être placé dans les ring buffers (évitant toute perte).
-    uint8_t* deferredToLocal;      // SSH->Local résidu en attente d'enqueue
-    size_t deferredToLocalSize;    // taille totale du résidu
-    size_t deferredToLocalOffset;  // offset déjà enqueue
-    uint8_t* deferredToRemote;     // Local->SSH résidu en attente
+    // could not be placed into the ring buffers (avoids any data loss).
+    uint8_t* deferredToLocal;      // SSH->Local residual awaiting enqueue
+    size_t deferredToLocalSize;    // total size of residual
+    size_t deferredToLocalOffset;  // already enqueued offset
+    uint8_t* deferredToRemote;     // Local->SSH residual awaiting enqueue
     size_t deferredToRemoteSize;
     size_t deferredToRemoteOffset;
 

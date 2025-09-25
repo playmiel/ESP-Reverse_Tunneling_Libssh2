@@ -83,7 +83,7 @@ Configure your SSH server details in the library configuration files.
 
 After successful compilation and upload, you should see:
 ```
-ESP32 SSH Reverse Tunnel - Version optimisée
+ESP32 SSH Reverse Tunnel - Optimized Version
 Buffer size: 4096 bytes
 Max channels: 10
 WiFi connected successfully
