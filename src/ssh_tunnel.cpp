@@ -7,12 +7,8 @@
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
 
-// Flow-control thresholds sized for large single-client transfers
-#undef HIGH_WATER_LOCAL
-#undef LOW_WATER_LOCAL
-#define HIGH_WATER_LOCAL (24 * 1024)      // 24KB - pause reads once ring nearly full
-#define LOW_WATER_LOCAL  (12 * 1024)      // 12KB - resume reads after backlog shrinks
-#define CRITICAL_WATER_LOCAL (28 * 1024)  // 28KB - last resort hard stop on local reads
+// Flow-control thresholds: use class-level constants from SSHTunnel (28KB/14KB)
+// Note: remove local macro overrides to avoid divergence from header values.
 
 #ifndef STUCK_PROBE_THRESHOLD
 #define STUCK_PROBE_THRESHOLD 8   // consecutive failed probes before gracefulClosing
@@ -53,9 +49,11 @@ static void recordTerminalSocketFailure(unsigned long now) {
   }
 }
 
-// Fixed buffer (aligned with thresholds) + channel integrity threshold
-#define FIXED_BUFFER_SIZE (32 * 1024)
+// Channel integrity threshold (total queued cap across both directions)
 #define MAX_QUEUED_BYTES (64 * 1024)
+
+static const size_t kInteractiveQueueThreshold = 4 * 1024;
+static const unsigned long kInteractiveActivityWindowMs = 800;
 
 // Health/recovery tuning (reduce noisy recoveries and WARN spam)
 #ifndef HEALTH_UNHEALTHY_THRESHOLD
@@ -171,6 +169,8 @@ bool SSHTunnel::init() {
     channels[i].totalBytesSent = 0;
     channels[i].lastSuccessfulWrite = 0;
     channels[i].lastSuccessfulRead = 0;
+    channels[i].priority = config->getConnectionConfig().defaultChannelPriority;
+    channels[i].effectivePriority = channels[i].priority;
     channels[i].gracefulClosing = false;
     channels[i].consecutiveErrors = 0;
   channels[i].eagainErrors = 0; // NEW: Separate counter for EAGAIN
@@ -406,20 +406,66 @@ void SSHTunnel::loop() {
     processPendingConnections();
   }
 
-  // Handle data for existing channels (optimized with fewer logs)
+  // Handle data for existing channels with weighted prioritization
   int maxChannels = config->getConnectionConfig().maxChannels;
-  for (int i = 0; i < maxChannels; i++) {
-    if (channels[i].active) {
-  // OPTIMIZED: Delegate heavy processing to the dedicated task
-  // Signal the processing task there is work
-      if (dataProcessingSemaphore) {
-        xSemaphoreGive(dataProcessingSemaphore);
-      }
-      
-  // Lightweight processing in the main loop
-      handleChannelData(i);
-    }
+  static std::vector<ChannelScheduleEntry> lowBucket;
+  static std::vector<ChannelScheduleEntry> normalBucket;
+  static std::vector<ChannelScheduleEntry> highBucket;
+  if (lowBucket.capacity() < static_cast<size_t>(maxChannels)) {
+    lowBucket.reserve(maxChannels);
   }
+  if (normalBucket.capacity() < static_cast<size_t>(maxChannels)) {
+    normalBucket.reserve(maxChannels);
+  }
+  if (highBucket.capacity() < static_cast<size_t>(maxChannels)) {
+    highBucket.reserve(maxChannels);
+  }
+
+  bool hasWorkSignal = false;
+  prepareChannelSchedule(lowBucket, normalBucket, highBucket, false, hasWorkSignal);
+
+  if (hasWorkSignal && dataProcessingSemaphore) {
+    xSemaphoreGive(dataProcessingSemaphore);
+  }
+
+  auto processBucket = [&](const std::vector<ChannelScheduleEntry>& bucket) {
+    if (bucket.empty()) {
+      return;
+    }
+
+    uint8_t maxWeight = 0;
+    for (const auto& entry : bucket) {
+      if (entry.weight > maxWeight) {
+        maxWeight = entry.weight;
+      }
+    }
+
+    for (uint8_t pass = 0; pass < maxWeight; ++pass) {
+      for (const auto& entry : bucket) {
+        if (pass >= entry.weight) {
+          continue;
+        }
+
+        int idx = entry.index;
+        if (idx < 0 || idx >= maxChannels) {
+          continue;
+        }
+        if (!channels[idx].active) {
+          continue;
+        }
+
+        if (pass > 0 && !channelHasPendingWork(channels[idx])) {
+          continue;
+        }
+
+        handleChannelData(idx);
+      }
+    }
+  };
+
+  processBucket(highBucket);
+  processBucket(normalBucket);
+  processBucket(lowBucket);
 
   // Cleanup inactive channels
   cleanupInactiveChannels();
@@ -883,6 +929,138 @@ bool SSHTunnel::channelEofLocked(LIBSSH2_CHANNEL* channel) {
   return eof;
 }
 
+bool SSHTunnel::channelHasPendingWork(const TunnelChannel& channel) const {
+  if (!channel.active) {
+    return false;
+  }
+
+  if (channel.sshToLocalBuffer && !channel.sshToLocalBuffer->empty()) {
+    return true;
+  }
+  if (channel.localToSshBuffer && !channel.localToSshBuffer->empty()) {
+    return true;
+  }
+  if (channel.deferredToLocal && channel.deferredToLocalOffset < channel.deferredToLocalSize) {
+    return true;
+  }
+  if (channel.deferredToRemote && channel.deferredToRemoteOffset < channel.deferredToRemoteSize) {
+    return true;
+  }
+  if (channel.pendingBytes > 0) {
+    return true;
+  }
+
+  return false;
+}
+
+uint8_t SSHTunnel::getPriorityWeight(uint8_t priority) const {
+  const ConnectionConfig& connConf = config->getConnectionConfig();
+  switch (priority) {
+    case 2:
+      return connConf.priorityWeightHigh;
+    case 1:
+      return connConf.priorityWeightNormal;
+    default:
+      return connConf.priorityWeightLow;
+  }
+}
+
+uint8_t SSHTunnel::evaluateChannelPriority(int channelIndex, unsigned long now, bool hasWork) const {
+  if (channels == nullptr || channelIndex < 0 || channelIndex >= config->getConnectionConfig().maxChannels) {
+    return 0;
+  }
+
+  const TunnelChannel &ch = channels[channelIndex];
+  uint8_t priority = ch.priority;
+
+  bool recentRead = (ch.lastSuccessfulRead != 0) && (now >= ch.lastSuccessfulRead) && ((now - ch.lastSuccessfulRead) <= kInteractiveActivityWindowMs);
+  bool recentWrite = (ch.lastSuccessfulWrite != 0) && (now >= ch.lastSuccessfulWrite) && ((now - ch.lastSuccessfulWrite) <= kInteractiveActivityWindowMs);
+  bool interactiveActive = recentRead || recentWrite;
+  bool queuesLight = (ch.queuedBytesToLocal <= kInteractiveQueueThreshold) && (ch.queuedBytesToRemote <= kInteractiveQueueThreshold);
+
+  if (interactiveActive && queuesLight && hasWork) {
+    if (priority < 2) {
+      priority++;
+    }
+  }
+
+  if (ch.largeTransferInProgress && priority > 0) {
+    priority--;
+  }
+
+  if (ch.flowControlPaused && priority > 0) {
+    priority--;
+  }
+
+  if (ch.terminalSocketFailure) {
+    priority = 0;
+  }
+
+  if (ch.gracefulClosing && hasWork && priority < 1) {
+    priority = 1;
+  }
+
+  if (priority > 2) {
+    priority = 2;
+  }
+
+  return priority;
+}
+
+void SSHTunnel::prepareChannelSchedule(std::vector<ChannelScheduleEntry>& low,
+                                       std::vector<ChannelScheduleEntry>& normal,
+                                       std::vector<ChannelScheduleEntry>& high,
+                                       bool onlyWithWork,
+                                       bool &hasWorkSignal) {
+  low.clear();
+  normal.clear();
+  high.clear();
+  hasWorkSignal = false;
+
+  if (channels == nullptr) {
+    return;
+  }
+
+  const ConnectionConfig& connConf = config->getConnectionConfig();
+  int maxChannels = connConf.maxChannels;
+  unsigned long now = millis();
+
+  for (int i = 0; i < maxChannels; ++i) {
+    if (!channels[i].active) {
+      continue;
+    }
+
+    TunnelChannel &ch = channels[i];
+    bool pendingWork = channelHasPendingWork(ch);
+    bool include = !onlyWithWork || pendingWork || ch.gracefulClosing;
+
+    uint8_t effective = evaluateChannelPriority(i, now, pendingWork || ch.gracefulClosing);
+    ch.effectivePriority = effective;
+
+    if (!include) {
+      continue;
+    }
+
+    if (pendingWork || ch.gracefulClosing) {
+      hasWorkSignal = true;
+    }
+
+    uint8_t weight = getPriorityWeight(effective);
+    if (!pendingWork && !ch.gracefulClosing) {
+      weight = 1;
+    }
+
+    ChannelScheduleEntry entry{ i, weight };
+    if (effective >= 2) {
+      high.push_back(entry);
+    } else if (effective == 1) {
+      normal.push_back(entry);
+    } else {
+      low.push_back(entry);
+    }
+  }
+}
+
 bool SSHTunnel::handleNewConnection() {
   if (!listener)
     return false;
@@ -980,6 +1158,8 @@ bool SSHTunnel::handleNewConnection() {
   channels[channelIndex].lastActivity = millis();
   channels[channelIndex].pendingBytes = 0;
   channels[channelIndex].flowControlPaused = false;
+  channels[channelIndex].priority = config->getConnectionConfig().defaultChannelPriority;
+  channels[channelIndex].effectivePriority = channels[channelIndex].priority;
   
   // NEW: Initialize large transfer detection variables for this channel
   channels[channelIndex].largeTransferInProgress = false;
@@ -999,7 +1179,8 @@ bool SSHTunnel::handleNewConnection() {
     LOGF_W("SSH", "Channel %d: Unable to switch to non-blocking mode (lock timeout)", channelIndex);
   }
 
-  LOGF_I("SSH", "New tunnel connection established (channel %d)", channelIndex);
+  LOGF_I("SSH", "New tunnel connection established (channel %d, priority=%u)",
+         channelIndex, channels[channelIndex].priority);
   return true;
 }
 
@@ -1164,6 +1345,8 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.totalBytesSent = 0;
   ch.lastSuccessfulWrite = 0;
   ch.lastSuccessfulRead = 0;
+  ch.priority = config->getConnectionConfig().defaultChannelPriority;
+  ch.effectivePriority = ch.priority;
   ch.gracefulClosing = false;
   ch.consecutiveErrors = 0;
   
@@ -1334,6 +1517,12 @@ void SSHTunnel::printChannelStatistics() {
   int activeCount = 0;
   int flowPausedCount = 0;
   int pendingBytesTotal = 0;
+  int basePriorityHigh = 0;
+  int basePriorityNormal = 0;
+  int basePriorityLow = 0;
+  int effectiveHigh = 0;
+  int effectiveNormal = 0;
+  int effectiveLow = 0;
   
   int maxChannels = config->getConnectionConfig().maxChannels;
   for (int i = 0; i < maxChannels; i++) {
@@ -1341,11 +1530,26 @@ void SSHTunnel::printChannelStatistics() {
       activeCount++;
       if (channels[i].flowControlPaused) flowPausedCount++;
       pendingBytesTotal += channels[i].pendingBytes;
+
+      switch (channels[i].priority) {
+        case 2: basePriorityHigh++; break;
+        case 1: basePriorityNormal++; break;
+        default: basePriorityLow++; break;
+      }
+
+      switch (channels[i].effectivePriority) {
+        case 2: effectiveHigh++; break;
+        case 1: effectiveNormal++; break;
+        default: effectiveLow++; break;
+      }
     }
   }
   
   LOGF_I("SSH", "Channel Stats: Active=%d/%d, FlowPaused=%d, TotalPending=%d bytes, Dropped=%lu bytes", 
     activeCount, maxChannels, flowPausedCount, pendingBytesTotal, droppedBytes);
+  LOGF_I("SSH", "Channel Priority: Base H/M/L=%d/%d/%d, Effective H/M/L=%d/%d/%d",
+         basePriorityHigh, basePriorityNormal, basePriorityLow,
+         effectiveHigh, effectiveNormal, effectiveLow);
   
   // Special alerts
   if (activeCount == maxChannels) {
@@ -1940,9 +2144,9 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     }
   }
 
-  // Critical backpressure: don't read more if too much is pending
-  if (ch.queuedBytesToRemote > CRITICAL_WATER_LOCAL) {
-  LOGF_W("SSH", "Channel %d: Critical backpressure (%zu bytes) - skipping local read", 
+  // Backpressure: don't read more if the backlog on Local->SSH is above HIGH watermark
+  if (ch.queuedBytesToRemote > HIGH_WATER_LOCAL) {
+    LOGF_W("SSH", "Channel %d: Critical backpressure (%zu bytes) - skipping local read", 
            channelIndex, ch.queuedBytesToRemote);
     return false;
   }
@@ -2079,7 +2283,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       suppressLocalRead = true;
     }
   }
-  if (!suppressLocalRead && ch.queuedBytesToRemote < CRITICAL_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
+  if (!suppressLocalRead && ch.queuedBytesToRemote < HIGH_WATER_LOCAL && isSocketReadable(ch.localSocket, 5)) {
     ssize_t localRead = recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
       if (localRead > 0) {
   // Attempt immediate looped write (direct drainage)
@@ -3199,6 +3403,8 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL* channel) {
   channels[channelIndex].lastActivity = millis();
   channels[channelIndex].pendingBytes = 0;
   channels[channelIndex].flowControlPaused = false;
+  channels[channelIndex].priority = config->getConnectionConfig().defaultChannelPriority;
+  channels[channelIndex].effectivePriority = channels[channelIndex].priority;
   // Reset per-channel reliability counters
   channels[channelIndex].consecutiveErrors = 0;
   channels[channelIndex].eagainErrors = 0;
@@ -3222,7 +3428,8 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL* channel) {
     LOGF_W("SSH", "Queued channel %d: Unable to switch to non-blocking mode", channelIndex);
   }
 
-  LOGF_I("SSH", "Queued tunnel connection established (channel %d)", channelIndex);
+  LOGF_I("SSH", "Queued tunnel connection established (channel %d, priority=%u)",
+         channelIndex, channels[channelIndex].priority);
   return true;
 }
 
@@ -3242,39 +3449,84 @@ void SSHTunnel::dataProcessingTaskFunction() {
       
       int maxChannels = config->getConnectionConfig().maxChannels;
       static unsigned long lastMutexProbe = 0;
-  bool doProbe = (millis() - lastMutexProbe) > 3000; // every 3s
+      bool doProbe = (millis() - lastMutexProbe) > 3000; // every 3s
       if (doProbe) lastMutexProbe = millis();
-      for (int i = 0; i < maxChannels; i++) {
-        if (channels[i].active) {
-          // Check if there's really work before processing
-          bool hasWork = false;
-          if (channels[i].sshToLocalBuffer && !channels[i].sshToLocalBuffer->empty()) hasWork = true;
-          if (channels[i].localToSshBuffer && !channels[i].localToSshBuffer->empty()) hasWork = true;
-          
-          if (hasWork) {
-            processPendingData(i);
-          }
-          
-          // Graceful handling of closing channels
-          if (channels[i].gracefulClosing) {
-            processPendingData(i);
-          }
 
-          // Gentle periodic mutex probing if reduced activity
-          if (doProbe && !channels[i].gracefulClosing) {
-            safeRetryMutexAccess(i);
+      static std::vector<ChannelScheduleEntry> lowBucket;
+      static std::vector<ChannelScheduleEntry> normalBucket;
+      static std::vector<ChannelScheduleEntry> highBucket;
+      if (lowBucket.capacity() < static_cast<size_t>(maxChannels)) {
+        lowBucket.reserve(maxChannels);
+      }
+      if (normalBucket.capacity() < static_cast<size_t>(maxChannels)) {
+        normalBucket.reserve(maxChannels);
+      }
+      if (highBucket.capacity() < static_cast<size_t>(maxChannels)) {
+        highBucket.reserve(maxChannels);
+      }
+
+      bool hasWorkSignal = false;
+      prepareChannelSchedule(lowBucket, normalBucket, highBucket, true, hasWorkSignal);
+      (void)hasWorkSignal;
+
+      auto processBucket = [&](const std::vector<ChannelScheduleEntry>& bucket) {
+        if (bucket.empty()) {
+          return;
+        }
+
+        uint8_t maxWeight = 0;
+        for (const auto& entry : bucket) {
+          if (entry.weight > maxWeight) {
+            maxWeight = entry.weight;
           }
-          
-          // Check large transfers less frequently
-          static unsigned long lastLargeTransferCheck = 0;
-          if (millis() - lastLargeTransferCheck > 5000) { // Every 5s instead of each loop
-            detectLargeTransfer(i);
-            lastLargeTransferCheck = millis();
+        }
+
+        for (uint8_t pass = 0; pass < maxWeight; ++pass) {
+          for (const auto& entry : bucket) {
+            if (pass >= entry.weight) {
+              continue;
+            }
+
+            int idx = entry.index;
+            if (idx < 0 || idx >= maxChannels) {
+              continue;
+            }
+            if (!channels[idx].active) {
+              continue;
+            }
+
+            if (pass > 0 && !channelHasPendingWork(channels[idx])) {
+              continue;
+            }
+
+            processPendingData(idx);
+          }
+        }
+      };
+
+      processBucket(highBucket);
+      processBucket(normalBucket);
+      processBucket(lowBucket);
+
+      if (doProbe) {
+        for (int i = 0; i < maxChannels; ++i) {
+          if (channels[i].active && !channels[i].gracefulClosing) {
+            safeRetryMutexAccess(i);
           }
         }
       }
+
+      static unsigned long lastLargeTransferCheck = 0;
+      if (millis() - lastLargeTransferCheck > 5000) { // Every 5s instead of each loop
+        for (int i = 0; i < maxChannels; ++i) {
+          if (channels[i].active) {
+            detectLargeTransfer(i);
+          }
+        }
+        lastLargeTransferCheck = millis();
+      }
     }
-    
+
     // Longer pause to reduce CPU usage
     vTaskDelay(pdMS_TO_TICKS(10)); // 10ms instead of 5ms
   }

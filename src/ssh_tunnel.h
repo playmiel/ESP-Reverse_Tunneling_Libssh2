@@ -45,6 +45,8 @@ struct TunnelChannel {
     size_t totalBytesSent;
     unsigned long lastSuccessfulWrite; // Last successful write
     unsigned long lastSuccessfulRead;  // Last successful read
+    uint8_t priority;          // Base priority (0=low,1=normal,2=high)
+    uint8_t effectivePriority; // Last computed effective priority
     bool gracefulClosing; // Closing in progress but with remaining data
     int consecutiveErrors; // Number of consecutive errors
     int eagainErrors; // NEW: Separate counter for EAGAIN errors
@@ -173,6 +175,19 @@ private:
 
     // Utility functions
     static int socketCallback(LIBSSH2_SESSION* session, libssh2_socket_t fd, void** abstract);
+
+    struct ChannelScheduleEntry {
+        int index;
+        uint8_t weight;
+    };
+    void prepareChannelSchedule(std::vector<ChannelScheduleEntry>& low,
+                                 std::vector<ChannelScheduleEntry>& normal,
+                                 std::vector<ChannelScheduleEntry>& high,
+                                 bool onlyWithWork,
+                                 bool &hasWorkSignal);
+    uint8_t evaluateChannelPriority(int channelIndex, unsigned long now, bool hasWork) const;
+    uint8_t getPriorityWeight(uint8_t priority) const;
+    bool channelHasPendingWork(const TunnelChannel& channel) const;
 
     // Member variables
     LIBSSH2_SESSION* session;

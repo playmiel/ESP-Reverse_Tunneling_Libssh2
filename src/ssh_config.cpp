@@ -316,6 +316,32 @@ void SSHConfiguration::setBufferConfig(int bufferSize, int maxChannels, int chan
     }
 }
 
+void SSHConfiguration::setChannelPriorityProfile(uint8_t defaultPriority, uint8_t lowWeight, uint8_t normalWeight, uint8_t highWeight) {
+    if (lockConfig()) {
+        if (lowWeight == 0) {
+            lowWeight = 1;
+        }
+        if (normalWeight == 0) {
+            normalWeight = 1;
+        }
+        if (highWeight == 0) {
+            highWeight = 1;
+        }
+
+        connectionConfig.defaultChannelPriority = (defaultPriority > 2) ? 2 : defaultPriority;
+        connectionConfig.priorityWeightLow = lowWeight;
+        connectionConfig.priorityWeightNormal = normalWeight;
+        connectionConfig.priorityWeightHigh = highWeight;
+        unlockConfig();
+
+        LOGF_I("CONFIG", "Channel priority profile: default=%u, weights(L/M/H)=%u/%u/%u",
+               connectionConfig.defaultChannelPriority,
+               connectionConfig.priorityWeightLow,
+               connectionConfig.priorityWeightNormal,
+               connectionConfig.priorityWeightHigh);
+    }
+}
+
 void SSHConfiguration::setDebugConfig(bool enabled, int baudRate) {
     if (lockConfig()) {
         debugConfig.debugEnabled = enabled;
@@ -358,6 +384,11 @@ void SSHConfiguration::printConfiguration() const {
         LOGF_I("CONFIG", "Buffer size: %d bytes", connectionConfig.bufferSize);
         LOGF_I("CONFIG", "Max channels: %d", connectionConfig.maxChannels);
         LOGF_I("CONFIG", "Channel timeout: %dms", connectionConfig.channelTimeoutMs);
+        LOGF_I("CONFIG", "Channel priority default: %u", connectionConfig.defaultChannelPriority);
+        LOGF_I("CONFIG", "Channel priority weights (L/M/H): %u/%u/%u",
+               connectionConfig.priorityWeightLow,
+               connectionConfig.priorityWeightNormal,
+               connectionConfig.priorityWeightHigh);
         
         LOG_I("CONFIG", "=== Debug Configuration ===");
         LOGF_I("CONFIG", "Debug enabled: %s", debugConfig.debugEnabled ? "true" : "false");
@@ -477,6 +508,18 @@ bool SSHConfiguration::validateConnectionConfig() const {
         LOG_E("CONFIG", "Channel timeout must be positive");
         return false;
     }
-    
+
+    if (connectionConfig.defaultChannelPriority > 2) {
+        LOG_E("CONFIG", "Default channel priority must be between 0 and 2");
+        return false;
+    }
+
+    if (connectionConfig.priorityWeightLow == 0 ||
+        connectionConfig.priorityWeightNormal == 0 ||
+        connectionConfig.priorityWeightHigh == 0) {
+        LOG_E("CONFIG", "Channel priority weights must be greater than zero");
+        return false;
+    }
+
     return true;
 }
