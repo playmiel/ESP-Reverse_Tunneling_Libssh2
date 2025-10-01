@@ -408,18 +408,12 @@ void SSHTunnel::loop() {
 
   // Handle data for existing channels with weighted prioritization
   int maxChannels = config->getConnectionConfig().maxChannels;
-  static std::vector<ChannelScheduleEntry> lowBucket;
-  static std::vector<ChannelScheduleEntry> normalBucket;
-  static std::vector<ChannelScheduleEntry> highBucket;
-  if (lowBucket.capacity() < static_cast<size_t>(maxChannels)) {
-    lowBucket.reserve(maxChannels);
-  }
-  if (normalBucket.capacity() < static_cast<size_t>(maxChannels)) {
-    normalBucket.reserve(maxChannels);
-  }
-  if (highBucket.capacity() < static_cast<size_t>(maxChannels)) {
-    highBucket.reserve(maxChannels);
-  }
+  std::vector<ChannelScheduleEntry> lowBucket;
+  std::vector<ChannelScheduleEntry> normalBucket;
+  std::vector<ChannelScheduleEntry> highBucket;
+  lowBucket.reserve(maxChannels);
+  normalBucket.reserve(maxChannels);
+  highBucket.reserve(maxChannels);
 
   bool hasWorkSignal = false;
   prepareChannelSchedule(lowBucket, normalBucket, highBucket, false, hasWorkSignal);
@@ -3452,18 +3446,12 @@ void SSHTunnel::dataProcessingTaskFunction() {
       bool doProbe = (millis() - lastMutexProbe) > 3000; // every 3s
       if (doProbe) lastMutexProbe = millis();
 
-      static std::vector<ChannelScheduleEntry> lowBucket;
-      static std::vector<ChannelScheduleEntry> normalBucket;
-      static std::vector<ChannelScheduleEntry> highBucket;
-      if (lowBucket.capacity() < static_cast<size_t>(maxChannels)) {
-        lowBucket.reserve(maxChannels);
-      }
-      if (normalBucket.capacity() < static_cast<size_t>(maxChannels)) {
-        normalBucket.reserve(maxChannels);
-      }
-      if (highBucket.capacity() < static_cast<size_t>(maxChannels)) {
-        highBucket.reserve(maxChannels);
-      }
+      std::vector<ChannelScheduleEntry> lowBucket;
+      std::vector<ChannelScheduleEntry> normalBucket;
+      std::vector<ChannelScheduleEntry> highBucket;
+      lowBucket.reserve(maxChannels);
+      normalBucket.reserve(maxChannels);
+      highBucket.reserve(maxChannels);
 
       bool hasWorkSignal = false;
       prepareChannelSchedule(lowBucket, normalBucket, highBucket, true, hasWorkSignal);
