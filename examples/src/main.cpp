@@ -154,9 +154,17 @@ void configureSSHTunnel() {
   
   // Buffer configuration
   globalSSHConfig.setBufferConfig(
-  8192,    // Buffer size
-  5,       // Max number of channels
-  1800000  // Channel timeout (ms) - 30 minutes
+    8192,    // Buffer size
+    5,       // Max number of channels
+    1800000  // Channel timeout (ms) - 30 minutes
+  );
+
+  // Channel priority profile (optional tuning)
+  globalSSHConfig.setChannelPriorityProfile(
+    1,  // Default priority for new channels (0=low, 1=normal, 2=high)
+    1,  // Weight applied to low priority channels
+    2,  // Weight applied to normal priority channels
+    4   // Weight applied to high priority channels
   );
   
   // Debug configuration
