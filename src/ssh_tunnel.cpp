@@ -366,8 +366,15 @@ void SSHTunnel::loop() {
   }
 
   // Handle reconnection if needed (after any scheduled reset)
-  if (state == TUNNEL_ERROR ||
-      (state == TUNNEL_CONNECTED && !checkConnection())) {
+  bool connectionHealthy = true;
+  if (state == TUNNEL_CONNECTED) {
+    connectionHealthy = checkConnection();
+    if (!connectionHealthy) {
+      LOG_W("SSH", "Loop: SO_ERROR signalled, scheduling reconnection");
+    }
+  }
+
+  if (state == TUNNEL_ERROR || !connectionHealthy) {
     handleReconnection();
     return;
   }
@@ -1586,6 +1593,7 @@ bool SSHTunnel::checkConnection() {
   socklen_t len = sizeof(error);
   int retval = getsockopt(socketfd, SOL_SOCKET, SO_ERROR, &error, &len);
   if (retval != 0 || error != 0) {
+    LOGF_W("SSH", "checkConnection: retval=%d so_error=%d (%s)", retval, error, strerror(error));
     return false;
   }
 
@@ -1912,8 +1920,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
     int sockError = 0;
     socklen_t errLen = sizeof(sockError);
     if (getsockopt(ch.localSocket, SOL_SOCKET, SO_ERROR, &sockError, &errLen) == 0 && sockError != 0) {
-      LOGF_I("SSH", "Channel %d: Socket error before write: %s, initiating graceful close", 
-             channelIndex, strerror(sockError));
+      LOGF_I("SSH", "Channel %d: Socket error before write: %s (queuedL=%zu queuedR=%zu)", 
+             channelIndex, strerror(sockError), ch.queuedBytesToLocal, ch.queuedBytesToRemote);
       ch.gracefulClosing = true;
       unlockChannelRead(channelIndex);
       return false;
@@ -2069,7 +2077,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
       if (channelEof) {
         bool firstEof = !ch.remoteEof;
         if (firstEof) {
-          LOGF_I("SSH", "Channel %d: SSH channel EOF", channelIndex);
+          LOGF_I("SSH", "Channel %d: SSH channel EOF (queuedL=%zu queuedR=%zu)",
+                 channelIndex, ch.queuedBytesToLocal, ch.queuedBytesToRemote);
         } else {
           LOGF_D("SSH", "Channel %d: SSH channel EOF (repeat)", channelIndex);
         }
@@ -2078,6 +2087,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         remoteEofDetected = true;
         if (firstEof && ch.localSocket >= 0) {
           shutdown(ch.localSocket, SHUT_WR);
+          LOGF_D("SSH", "Channel %d: Local shutdown(SHUT_WR) after remote EOF", channelIndex);
         }
       }
     } else if (bytesRead < 0 && bytesRead != LIBSSH2_ERROR_EAGAIN) {
@@ -2245,9 +2255,26 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
 
   // 2) Read local socket if backpressure acceptable (suppress when burst >=2 or terminal)
   bool suppressLocalRead = false;
-  if (ch.terminalSocketFailure) suppressLocalRead = true;
-  if (ch.localReadTerminated) suppressLocalRead = true;
-  else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
+  if (ch.terminalSocketFailure) {
+    suppressLocalRead = true;
+    if ((now - ch.lastErrorDetailLogMs) > 1000) {
+      ch.lastErrorDetailLogMs = now;
+      LOGF_D("SSH", "Channel %d: Local read suppressed (terminal failure)", channelIndex);
+    }
+  }
+  if (!suppressLocalRead && ch.localReadTerminated) {
+    suppressLocalRead = true;
+    if ((now - ch.lastErrorDetailLogMs) > 1000) {
+      ch.lastErrorDetailLogMs = now;
+      LOGF_D("SSH", "Channel %d: Local read suppressed (localReadTerminated)", channelIndex);
+    }
+  } else if (!suppressLocalRead && ch.socketRecvBurstCount >= 2) {
+    suppressLocalRead = true; // early limitation
+    if ((now - ch.lastErrorDetailLogMs) > 1000) {
+      ch.lastErrorDetailLogMs = now;
+      LOGF_D("SSH", "Channel %d: Local read suppressed (burst=%d)", channelIndex, ch.socketRecvBurstCount);
+    }
+  }
   if (!suppressLocalRead && ch.localSocket >= 0) {
     int sockError = 0;
     socklen_t errLen = sizeof(sockError);
@@ -2263,6 +2290,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         }
         ch.gracefulClosing = true;
         ch.localReadTerminated = true;
+        LOGF_I("SSH", "Channel %d: Graceful close due to benign local error (%s) queuedR=%zu",
+               channelIndex, strerror(sockError), ch.queuedBytesToRemote);
       } else {
         if ((nowErr - ch.lastErrorDetailLogMs) > 1000) {
           ch.lastErrorDetailLogMs = nowErr;
@@ -2376,7 +2405,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           LOGF_D("SSH","Channel %d: Direct wrote %zu/%zd bytes (+%zu queued)", channelIndex, directWrittenTotal, localRead, remaining);
         }
       } else if (localRead == 0) {
-        LOGF_I("SSH", "Channel %d: Local socket closed", channelIndex);
+        LOGF_I("SSH", "Channel %d: Local socket closed (remoteEof=%d queuedR=%zu queuedL=%zu)",
+               channelIndex, ch.remoteEof ? 1 : 0, ch.queuedBytesToRemote, ch.queuedBytesToLocal);
         ch.gracefulClosing = true;
         ch.localReadTerminated = true;
         if (ch.localSocket >= 0) {
