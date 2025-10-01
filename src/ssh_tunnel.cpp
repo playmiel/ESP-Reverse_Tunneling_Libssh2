@@ -2077,7 +2077,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         ch.gracefulClosing = true;
         remoteEofDetected = true;
         if (firstEof && ch.localSocket >= 0) {
-          shutdown(ch.localSocket, SHUT_RDWR);
+          shutdown(ch.localSocket, SHUT_WR);
         }
       }
     } else if (bytesRead < 0 && bytesRead != LIBSSH2_ERROR_EAGAIN) {
@@ -2245,7 +2245,6 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
 
   // 2) Read local socket if backpressure acceptable (suppress when burst >=2 or terminal)
   bool suppressLocalRead = false;
-  if (ch.remoteEof) suppressLocalRead = true;
   if (ch.terminalSocketFailure) suppressLocalRead = true;
   if (ch.localReadTerminated) suppressLocalRead = true;
   else if (ch.socketRecvBurstCount >= 2) suppressLocalRead = true; // early limitation
