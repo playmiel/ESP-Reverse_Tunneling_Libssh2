@@ -3,6 +3,7 @@
 #include "memory_fixes.h"
 #include "lwip/sockets.h"
 #include <errno.h>
+#include <algorithm>
 
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
@@ -73,7 +74,9 @@ SSHTunnel::SSHTunnel()
       channels(nullptr), rxBuffer(nullptr), txBuffer(nullptr),
       tunnelMutex(nullptr), statsMutex(nullptr), sessionMutex(nullptr), pendingConnectionsMutex(nullptr), 
       config(&globalSSHConfig), dataProcessingTask(nullptr), 
-      dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false) {
+      dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false),
+      globalRateLimitBytesPerSec(0), globalBurstBytes(0), globalTokens(0),
+      lastGlobalRefillMs(0), globalThrottleActive(false), lastGlobalThrottleLogMs(0) {
 
   // OPTIMIZED: Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
@@ -146,7 +149,8 @@ bool SSHTunnel::init() {
   }
   
   // Allocate memory for channels with validation
-  int maxChannels = config->getConnectionConfig().maxChannels;
+  const ConnectionConfig& connConfInit = config->getConnectionConfig();
+  int maxChannels = connConfInit.maxChannels;
   size_t channelsSize = sizeof(TunnelChannel) * maxChannels;
   channels = (TunnelChannel*)safeMalloc(channelsSize, "SSH_CHANNELS");
   if (channels == nullptr) {
@@ -169,7 +173,7 @@ bool SSHTunnel::init() {
     channels[i].totalBytesSent = 0;
     channels[i].lastSuccessfulWrite = 0;
     channels[i].lastSuccessfulRead = 0;
-    channels[i].priority = config->getConnectionConfig().defaultChannelPriority;
+    channels[i].priority = connConfInit.defaultChannelPriority;
     channels[i].effectivePriority = channels[i].priority;
     channels[i].gracefulClosing = false;
     channels[i].consecutiveErrors = 0;
@@ -238,6 +242,10 @@ bool SSHTunnel::init() {
   // Allocate RX/TX buffers (use fixed size)
   rxBuffer = (uint8_t*)safeMalloc(FIXED_BUFFER_SIZE, "SSH_RX_BUFFER");
   txBuffer = (uint8_t*)safeMalloc(FIXED_BUFFER_SIZE, "SSH_TX_BUFFER");
+
+  globalRateLimitBytesPerSec = connConfInit.globalRateLimitBytesPerSec;
+  globalBurstBytes = connConfInit.globalBurstBytes;
+  initializeGlobalThrottle();
   
   if (rxBuffer == nullptr || txBuffer == nullptr) {
     LOG_E("SSH", "Failed to allocate memory for buffers");
@@ -952,6 +960,72 @@ bool SSHTunnel::channelHasPendingWork(const TunnelChannel& channel) const {
   }
 
   return false;
+}
+
+void SSHTunnel::initializeGlobalThrottle() {
+  lastGlobalRefillMs = millis();
+  lastGlobalThrottleLogMs = 0;
+  globalThrottleActive = false;
+  if (globalRateLimitBytesPerSec == 0) {
+    globalTokens = 0;
+    return;
+  }
+  if (globalBurstBytes == 0) {
+    globalBurstBytes = globalRateLimitBytesPerSec;
+  }
+  globalTokens = globalBurstBytes;
+}
+
+void SSHTunnel::refillGlobalTokens() {
+  if (globalRateLimitBytesPerSec == 0) {
+    return;
+  }
+  unsigned long now = millis();
+  unsigned long elapsed = now - lastGlobalRefillMs;
+  if (elapsed == 0) {
+    return;
+  }
+  uint64_t add = ((uint64_t)globalRateLimitBytesPerSec * elapsed) / 1000ULL;
+  if (add > 0) {
+    size_t cap = globalBurstBytes ? globalBurstBytes : globalRateLimitBytesPerSec;
+    uint64_t newTotal = (uint64_t)globalTokens + add;
+    if (newTotal > cap) {
+      globalTokens = cap;
+    } else {
+      globalTokens = (size_t)newTotal;
+    }
+    lastGlobalRefillMs = now;
+  }
+}
+
+size_t SSHTunnel::getGlobalAllowance(size_t desired) {
+  if (globalRateLimitBytesPerSec == 0 || desired == 0) {
+    return desired;
+  }
+  refillGlobalTokens();
+  size_t available = globalTokens;
+  if (available == 0) {
+    unsigned long now = millis();
+    if (!globalThrottleActive || (now - lastGlobalThrottleLogMs) > 1000) {
+      lastGlobalThrottleLogMs = now;
+      LOGF_W("SSH", "Global throttle active (requested=%zu, rate=%zu B/s)", desired, globalRateLimitBytesPerSec);
+    }
+    globalThrottleActive = true;
+    return 0;
+  }
+  globalThrottleActive = false;
+  return (desired > available) ? available : desired;
+}
+
+void SSHTunnel::commitGlobalTokens(size_t used) {
+  if (globalRateLimitBytesPerSec == 0 || used == 0) {
+    return;
+  }
+  if (used >= globalTokens) {
+    globalTokens = 0;
+  } else {
+    globalTokens -= used;
+  }
 }
 
 uint8_t SSHTunnel::getPriorityWeight(uint8_t priority) const {
@@ -2181,6 +2255,18 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           size_t extra = ch.localToSshBuffer->read(temp + chunk, MIN_WRITE_SIZE - chunk);
           chunk += extra;
         }
+        size_t allowanceDrain = getGlobalAllowance(chunk);
+        if (allowanceDrain == 0 && globalRateLimitBytesPerSec != 0) {
+          ch.localToSshBuffer->write(temp, chunk);
+          if (!globalThrottleActive && globalRateLimitBytesPerSec != 0) {
+            globalThrottleActive = true;
+          }
+          break;
+        }
+        if (allowanceDrain < chunk) {
+          ch.localToSshBuffer->write(temp + allowanceDrain, chunk - allowanceDrain);
+          chunk = allowanceDrain;
+        }
 
         String drainErrorDetail = "";
         ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)temp, chunk);
@@ -2192,6 +2278,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           ch.lastSuccessfulWrite = now;
           ch.consecutiveErrors = 0;
           if (ch.socketRecvBurstCount) { ch.socketRecvBurstCount = 0; ch.firstSocketRecvErrorMs = 0; }
+          commitGlobalTokens((size_t)w);
           if ((size_t)w < chunk) {
             ch.localToSshBuffer->write(temp + w, chunk - w);
           }
@@ -2315,11 +2402,17 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         if (sessionLocked) {
           while (offset < (size_t)localRead && directPass < SSH_MAX_WRITES_PER_PASS) {
             size_t remain = (size_t)localRead - offset;
+            size_t allowance = getGlobalAllowance(remain);
+            if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
+              break;
+            }
+            remain = allowance;
             ssize_t w = libssh2_channel_write_ex(ch.channel, 0, (char*)txBuffer + offset, remain);
             if (w > 0) {
               offset += w; directPass++; directWrittenTotal += w;
               ch.totalBytesSent += w; ch.lastSuccessfulWrite = now; ch.consecutiveErrors = 0;
               if (lockStats()) { bytesSent += w; unlockStats(); }
+              commitGlobalTokens((size_t)w);
             } else if (w == LIBSSH2_ERROR_EAGAIN) {
               break; // Queue the remainder
             } else {
@@ -2543,27 +2636,37 @@ void SSHTunnel::processPendingData(int channelIndex) {
       int passes = 0;
       size_t totalWrittenThisPass = 0;
       if (lockSession(pdMS_TO_TICKS(200))) {
-        while (passes < maxWritesThisPass && !ch.localToSshBuffer->empty()) {
-          uint8_t tempBuffer[SSH_BUFFER_SIZE];
-          size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
-          if (bytesRead == 0) break;
-          if (bytesRead < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
-            size_t extra = ch.localToSshBuffer->read(tempBuffer + bytesRead, MIN_WRITE_SIZE - bytesRead);
-            bytesRead += extra;
-          }
-          String writeErrorDetail = "";
-          ssize_t written = libssh2_channel_write(ch.channel, (char*)tempBuffer, bytesRead);
-          if (written > 0) {
-            passes++;
-            totalWrittenThisPass += written;
-            ch.totalBytesSent += written;
-            ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
-            ch.consecutiveErrors = 0;
-            if (lockStats()) { bytesSent += written; unlockStats(); }
-            if ((size_t)written < bytesRead) {
-              ch.localToSshBuffer->write(tempBuffer + written, bytesRead - written);
-              break; // Reduced SSH window: stop draining
+          while (passes < maxWritesThisPass && !ch.localToSshBuffer->empty()) {
+            uint8_t tempBuffer[SSH_BUFFER_SIZE];
+            size_t bytesRead = ch.localToSshBuffer->read(tempBuffer, sizeof(tempBuffer));
+            if (bytesRead == 0) break;
+            if (bytesRead < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
+              size_t extra = ch.localToSshBuffer->read(tempBuffer + bytesRead, MIN_WRITE_SIZE - bytesRead);
+              bytesRead += extra;
             }
+            size_t allowance = getGlobalAllowance(bytesRead);
+            if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
+              ch.localToSshBuffer->write(tempBuffer, bytesRead);
+              break;
+            }
+            if (allowance < bytesRead) {
+              ch.localToSshBuffer->write(tempBuffer + allowance, bytesRead - allowance);
+              bytesRead = allowance;
+            }
+            String writeErrorDetail = "";
+            ssize_t written = libssh2_channel_write(ch.channel, (char*)tempBuffer, bytesRead);
+            if (written > 0) {
+              passes++;
+              totalWrittenThisPass += written;
+              ch.totalBytesSent += written;
+              ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
+              ch.consecutiveErrors = 0;
+              if (lockStats()) { bytesSent += written; unlockStats(); }
+              commitGlobalTokens((size_t)written);
+              if ((size_t)written < bytesRead) {
+                ch.localToSshBuffer->write(tempBuffer + written, bytesRead - written);
+                break; // Reduced SSH window: stop draining
+              }
           } else if (written == LIBSSH2_ERROR_EAGAIN) {
             ch.localToSshBuffer->write(tempBuffer, bytesRead);
             ch.eagainErrors++;

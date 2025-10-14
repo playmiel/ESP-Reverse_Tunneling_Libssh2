@@ -166,6 +166,12 @@ void configureSSHTunnel() {
     2,  // Weight applied to normal priority channels
     4   // Weight applied to high priority channels
   );
+
+  // Global rate limit (optional, disabled when bytesPerSecond = 0)
+  globalSSHConfig.setGlobalRateLimit(
+    64 * 1024,  // Bytes per second across all channels
+    96 * 1024   // Burst budget (optional); defaults to rate if zero
+  );
   
   // Debug configuration
   globalSSHConfig.setDebugConfig(

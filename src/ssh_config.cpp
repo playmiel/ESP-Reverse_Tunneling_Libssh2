@@ -342,6 +342,20 @@ void SSHConfiguration::setChannelPriorityProfile(uint8_t defaultPriority, uint8_
     }
 }
 
+void SSHConfiguration::setGlobalRateLimit(size_t bytesPerSecond, size_t burstBytes) {
+    if (lockConfig()) {
+        connectionConfig.globalRateLimitBytesPerSec = bytesPerSecond;
+        connectionConfig.globalBurstBytes = burstBytes;
+        unlockConfig();
+
+        if (bytesPerSecond == 0) {
+            LOG_I("CONFIG", "Global rate limit disabled");
+        } else {
+            LOGF_I("CONFIG", "Global rate limit: %zu B/s (burst=%zu)", bytesPerSecond, burstBytes ? burstBytes : bytesPerSecond);
+        }
+    }
+}
+
 void SSHConfiguration::setDebugConfig(bool enabled, int baudRate) {
     if (lockConfig()) {
         debugConfig.debugEnabled = enabled;
@@ -389,6 +403,13 @@ void SSHConfiguration::printConfiguration() const {
                connectionConfig.priorityWeightLow,
                connectionConfig.priorityWeightNormal,
                connectionConfig.priorityWeightHigh);
+        if (connectionConfig.globalRateLimitBytesPerSec > 0) {
+            LOGF_I("CONFIG", "Global rate limit: %zu B/s (burst=%zu)",
+                   connectionConfig.globalRateLimitBytesPerSec,
+                   connectionConfig.globalBurstBytes ? connectionConfig.globalBurstBytes : connectionConfig.globalRateLimitBytesPerSec);
+        } else {
+            LOG_I("CONFIG", "Global rate limit: disabled");
+        }
         
         LOG_I("CONFIG", "=== Debug Configuration ===");
         LOGF_I("CONFIG", "Debug enabled: %s", debugConfig.debugEnabled ? "true" : "false");
@@ -519,6 +540,10 @@ bool SSHConfiguration::validateConnectionConfig() const {
         connectionConfig.priorityWeightHigh == 0) {
         LOG_E("CONFIG", "Channel priority weights must be greater than zero");
         return false;
+    }
+
+    if (connectionConfig.globalRateLimitBytesPerSec == 0 && connectionConfig.globalBurstBytes > 0) {
+        LOG_W("CONFIG", "Global burst is ignored when rate limit is disabled");
     }
 
     return true;
