@@ -2522,10 +2522,6 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     }
   }
 
-  if (!success && throttledByGlobalLimit) {
-    success = true; // throttle waiting counts as activity to avoid premature timeout
-  }
-
   if (dropPending) {
       size_t droppedBytesLocal = 0;
       if (ch.localToSshBuffer) {
