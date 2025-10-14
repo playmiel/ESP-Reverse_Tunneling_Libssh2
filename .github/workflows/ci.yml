@@ -2,57 +2,6 @@ name: CI
 
 on:
   push:
-    branches: [ main, dev ]
-  pull_request:
-    branches: [ main, dev ]
-
-jobs:
-  build-and-lint:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Set up Python (PlatformIO dependency)
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.x'
-
-      - name: Cache PlatformIO
-        uses: actions/cache@v4
-        with:
-          path: ~/.platformio
-          key: pio-${{ runner.os }}-${{ hashFiles('**/platformio.ini') }}
-          restore-keys: |
-            pio-${{ runner.os }}-
-
-      - name: Install PlatformIO
-        run: pip install --upgrade platformio
-
-      - name: Language guard (no French)
-        run: bash scripts/check_no_french.sh
-
-      - name: Build (library + example)
-        run: |
-          pio run
-
-      - name: Archive firmware
-        if: success()
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware
-          path: .pio/build/**/firmware*.bin
-
-  language-only:
-    runs-on: ubuntu-latest
-    if: github.event_name == 'pull_request'
-    steps:
-      - uses: actions/checkout@v4
-      - name: Language guard
-        run: bash scripts/check_no_french.shname: CI
-
-on:
-  push:
     branches: [ main, master ]
   pull_request:
     branches: [ "**" ]
