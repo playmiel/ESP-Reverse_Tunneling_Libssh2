@@ -2238,6 +2238,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   unsigned long now = millis();
   bool dropPending = false;
   String dropReason = "";
+  bool throttledByGlobalLimit = false;
 
   if (ch.active && ch.channel && ch.localSocket >= 0) {
   // 1) Loop-drain already queued data (localToSshBuffer)
@@ -2258,9 +2259,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         size_t allowanceDrain = getGlobalAllowance(chunk);
         if (allowanceDrain == 0 && globalRateLimitBytesPerSec != 0) {
           ch.localToSshBuffer->write(temp, chunk);
-          if (!globalThrottleActive && globalRateLimitBytesPerSec != 0) {
-            globalThrottleActive = true;
-          }
+          throttledByGlobalLimit = true;
           break;
         }
         if (allowanceDrain < chunk) {
@@ -2404,6 +2403,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             size_t remain = (size_t)localRead - offset;
             size_t allowance = getGlobalAllowance(remain);
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
+              throttledByGlobalLimit = true;
               break;
             }
             remain = allowance;
@@ -2522,7 +2522,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     }
   }
 
-    if (dropPending) {
+  if (!success && throttledByGlobalLimit) {
+    success = true; // throttle waiting counts as activity to avoid premature timeout
+  }
+
+  if (dropPending) {
       size_t droppedBytesLocal = 0;
       if (ch.localToSshBuffer) {
         droppedBytesLocal += ch.localToSshBuffer->size();
