@@ -2067,6 +2067,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
           bytesReceived += written;
           unlockStats();
         }
+        ch.lastActivity = millis();
         success = true;
         
   // DIAGNOSTIC: Log to track large transfers and detect issues
@@ -2125,6 +2126,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
           }
         }
   success = true; // Consider success (no loss of already written bytes)
+        ch.lastActivity = millis();
       } else if (written < 0) {
         if (errno == EAGAIN || errno == EWOULDBLOCK) {
           // Socket full - queue all data
@@ -2147,6 +2149,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
             }
           }
           success = true;
+          ch.lastActivity = millis();
         } else if (errno == ECONNRESET || errno == EPIPE || errno == ENOTCONN || 
                    errno == ESHUTDOWN || errno == ETIMEDOUT) {
           LOGF_I("SSH", "Channel %d: Local connection closed during write (%s), initiating graceful close", 
@@ -2274,7 +2277,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         if (allowanceDrain == 0 && globalRateLimitBytesPerSec != 0) {
           ch.localToSshBuffer->write(temp, chunk);
           throttledByGlobalLimit = true;
-          ch.lastActivity = now;
+          ch.lastActivity = millis();
           if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
             if (now - lastThrottleLog[channelIndex] > 1000) {
               lastThrottleLog[channelIndex] = now;
@@ -2287,6 +2290,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         if (allowanceDrain < chunk) {
           ch.localToSshBuffer->write(temp + allowanceDrain, chunk - allowanceDrain);
           chunk = allowanceDrain;
+          ch.lastActivity = millis();
         }
 
         String drainErrorDetail = "";
@@ -2299,12 +2303,15 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           ch.lastSuccessfulWrite = now;
           ch.consecutiveErrors = 0;
           if (ch.socketRecvBurstCount) { ch.socketRecvBurstCount = 0; ch.firstSocketRecvErrorMs = 0; }
+          ch.lastActivity = millis();
           commitGlobalTokens((size_t)w);
           if ((size_t)w < chunk) {
             ch.localToSshBuffer->write(temp + w, chunk - w);
+            ch.lastActivity = millis();
           }
         } else if (w == LIBSSH2_ERROR_EAGAIN) {
           ch.localToSshBuffer->write(temp, chunk);
+          ch.lastActivity = millis();
           break;
         } else {
           ch.consecutiveErrors++;
@@ -2426,7 +2433,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             size_t allowance = getGlobalAllowance(remain);
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
               throttledByGlobalLimit = true;
-              ch.lastActivity = now;
+              ch.lastActivity = millis();
               if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
                 if (now - lastThrottleLog[channelIndex] > 1000) {
                   lastThrottleLog[channelIndex] = now;
@@ -2442,8 +2449,10 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
               offset += w; directPass++; directWrittenTotal += w;
               ch.totalBytesSent += w; ch.lastSuccessfulWrite = now; ch.consecutiveErrors = 0;
               if (lockStats()) { bytesSent += w; unlockStats(); }
+              ch.lastActivity = millis();
               commitGlobalTokens((size_t)w);
             } else if (w == LIBSSH2_ERROR_EAGAIN) {
+              ch.lastActivity = millis();
               break; // Queue the remainder
             } else {
               ch.consecutiveErrors++;
@@ -2626,10 +2635,12 @@ void SSHTunnel::processPendingData(int channelIndex) {
             bytesReceived += written; 
             unlockStats(); 
           }
+          ch.lastActivity = millis();
           
           // If not all sent, put remainder back in buffer
           if (written < bytesRead) {
             ch.sshToLocalBuffer->write(tempBuffer + written, bytesRead - written);
+            ch.lastActivity = millis();
           }
           
           LOGF_D("SSH", "Channel %d: Processed %zd/%zu bytes from SSH->Local buffer", 
@@ -2641,16 +2652,19 @@ void SSHTunnel::processPendingData(int channelIndex) {
             if ((ch.eagainErrors % 32) == 1) {
               LOGF_D("SSH", "Channel %d: Socket busy, preserved=%zu (eagain=%d)", channelIndex, bytesRead, ch.eagainErrors);
             }
+            ch.lastActivity = millis();
           } else {
             ch.sshToLocalBuffer->write(tempBuffer, bytesRead);
             ch.consecutiveErrors++;
             LOGF_W("SSH", "Channel %d: Error writing from SSH->Local buffer: %s (err=%d)", channelIndex, strerror(errno), ch.consecutiveErrors);
+            ch.lastActivity = millis();
           }
         } else {
           // written == 0 - socket closed on receive side
           ch.sshToLocalBuffer->write(tempBuffer, bytesRead);
           LOGF_I("SSH", "Channel %d: Local socket closed, %zu bytes preserved", 
                  channelIndex, bytesRead);
+          ch.lastActivity = millis();
         }
       }
     }
@@ -2683,7 +2697,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
             size_t allowance = getGlobalAllowance(bytesRead);
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
               ch.localToSshBuffer->write(tempBuffer, bytesRead);
-              ch.lastActivity = now;
+              ch.lastActivity = millis();
               if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
                 if (now - lastThrottleLog[channelIndex] > 1000) {
                   lastThrottleLog[channelIndex] = now;
@@ -2696,6 +2710,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
             if (allowance < bytesRead) {
               ch.localToSshBuffer->write(tempBuffer + allowance, bytesRead - allowance);
               bytesRead = allowance;
+              ch.lastActivity = millis();
             }
             String writeErrorDetail = "";
             ssize_t written = libssh2_channel_write(ch.channel, (char*)tempBuffer, bytesRead);
@@ -2706,9 +2721,11 @@ void SSHTunnel::processPendingData(int channelIndex) {
               ch.queuedBytesToRemote = (ch.queuedBytesToRemote > written) ? ch.queuedBytesToRemote - written : 0;
               ch.consecutiveErrors = 0;
               if (lockStats()) { bytesSent += written; unlockStats(); }
+              ch.lastActivity = millis();
               commitGlobalTokens((size_t)written);
               if ((size_t)written < bytesRead) {
                 ch.localToSshBuffer->write(tempBuffer + written, bytesRead - written);
+                ch.lastActivity = millis();
                 break; // Reduced SSH window: stop draining
               }
           } else if (written == LIBSSH2_ERROR_EAGAIN) {
@@ -2717,10 +2734,12 @@ void SSHTunnel::processPendingData(int channelIndex) {
             if ((ch.eagainErrors % 32) == 1) {
               LOGF_D("SSH", "Channel %d: SSH channel busy mid-drain (eagain=%d passes=%d total=%zu)", channelIndex, ch.eagainErrors, passes, totalWrittenThisPass);
             }
+            ch.lastActivity = millis();
             break; // SSH window full
           } else if (written == 0) {
             ch.localToSshBuffer->write(tempBuffer, bytesRead);
             LOGF_I("SSH", "Channel %d: SSH channel closed, %zu bytes preserved", channelIndex, bytesRead);
+            ch.lastActivity = millis();
             break;
           } else {
             char* errmsg = nullptr;
