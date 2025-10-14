@@ -188,6 +188,10 @@ private:
     uint8_t evaluateChannelPriority(int channelIndex, unsigned long now, bool hasWork) const;
     uint8_t getPriorityWeight(uint8_t priority) const;
     bool channelHasPendingWork(const TunnelChannel& channel) const;
+    void initializeGlobalThrottle();
+    void refillGlobalTokens();
+    size_t getGlobalAllowance(size_t desired);
+    void commitGlobalTokens(size_t used);
 
     // Member variables
     LIBSSH2_SESSION* session;
@@ -240,6 +244,12 @@ private:
     TaskHandle_t dataProcessingTask;
     SemaphoreHandle_t dataProcessingSemaphore;
     bool dataProcessingTaskRunning;
+    size_t globalRateLimitBytesPerSec;
+    size_t globalBurstBytes;
+    size_t globalTokens;
+    unsigned long lastGlobalRefillMs;
+    bool globalThrottleActive;
+    unsigned long lastGlobalThrottleLogMs;
 
     // Protection methods
     bool lockTunnel();

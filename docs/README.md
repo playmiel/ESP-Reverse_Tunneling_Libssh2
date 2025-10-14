@@ -205,6 +205,19 @@ globalSSHConfig.setChannelPriorityProfile(
 );
 ```
 
+### Global throughput
+- `setGlobalRateLimit()` caps the aggregate Local→SSH throughput (0 disables the shaper)
+- A token bucket smooths bursts; `burstBytes` configures the initial bucket size
+- When saturation occurs you’ll see `Global throttle active` in the serial log
+
+```cpp
+// Cap Local->SSH traffic to ~64 KB/s with a short 96 KB burst
+globalSSHConfig.setGlobalRateLimit(
+    64 * 1024,  // bytes per second
+    96 * 1024   // optional burst budget; defaults to rate if zero
+);
+```
+
 ### Recommended configuration
 ```cpp
 globalSSHConfig.setConnectionConfig(
