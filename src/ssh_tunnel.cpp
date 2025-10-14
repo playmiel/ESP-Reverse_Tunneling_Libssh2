@@ -1477,6 +1477,7 @@ void SSHTunnel::cleanupInactiveChannels() {
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
       unsigned long timeSinceActivity = now - channels[i].lastActivity;
+      bool pendingWork = channelHasPendingWork(channels[i]);
       
       // NEW: Detect & repair with hysteresis/cooldown to avoid noisy recoveries
       if (!isChannelHealthy(i)) {
@@ -1531,6 +1532,18 @@ void SSHTunnel::cleanupInactiveChannels() {
         }
       } else {
   // Normal timeout but more tolerant
+        if (pendingWork && globalRateLimitBytesPerSec > 0 && globalThrottleActive) {
+          channels[i].lastActivity = now;
+          static unsigned long lastThrottleSkipLog[16] = {0};
+          if (i < (int)(sizeof(lastThrottleSkipLog) / sizeof(lastThrottleSkipLog[0]))) {
+            if (now - lastThrottleSkipLog[i] > 2000) {
+              lastThrottleSkipLog[i] = now;
+              LOGF_D("SSH", "Channel %d: Timeout skipped (global throttle, queued=%zu)",
+                     i, channels[i].queuedBytesToRemote);
+            }
+          }
+          continue;
+        }
         if (timeSinceActivity > channelTimeout * 2) { // Double du timeout normal
           shouldClose = true;
           LOGF_W("SSH", "Channel %d timeout after %lums, closing", i, timeSinceActivity);
@@ -2239,6 +2252,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   bool dropPending = false;
   String dropReason = "";
   bool throttledByGlobalLimit = false;
+  static unsigned long lastThrottleLog[16] = {0};
 
   if (ch.active && ch.channel && ch.localSocket >= 0) {
   // 1) Loop-drain already queued data (localToSshBuffer)
@@ -2260,6 +2274,14 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         if (allowanceDrain == 0 && globalRateLimitBytesPerSec != 0) {
           ch.localToSshBuffer->write(temp, chunk);
           throttledByGlobalLimit = true;
+          ch.lastActivity = now;
+          if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
+            if (now - lastThrottleLog[channelIndex] > 1000) {
+              lastThrottleLog[channelIndex] = now;
+              LOGF_D("SSH", "Channel %d: Global limiter delaying drain (queued=%zu)",
+                     channelIndex, ch.queuedBytesToRemote);
+            }
+          }
           break;
         }
         if (allowanceDrain < chunk) {
@@ -2404,6 +2426,14 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             size_t allowance = getGlobalAllowance(remain);
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
               throttledByGlobalLimit = true;
+              ch.lastActivity = now;
+              if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
+                if (now - lastThrottleLog[channelIndex] > 1000) {
+                  lastThrottleLog[channelIndex] = now;
+                  LOGF_D("SSH", "Channel %d: Global limiter delaying direct write (remain=%zu queued=%zu)",
+                         channelIndex, remain, ch.queuedBytesToRemote);
+                }
+              }
               break;
             }
             remain = allowance;
@@ -2522,6 +2552,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     }
   }
 
+  if (throttledByGlobalLimit && ch.queuedBytesToRemote > 0) {
+    success = true;
+    ch.lastActivity = now;
+  }
+
   if (dropPending) {
       size_t droppedBytesLocal = 0;
       if (ch.localToSshBuffer) {
@@ -2631,6 +2666,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
   if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
     bool dropPending = false;
     String dropReason = "";
+    static unsigned long lastThrottleLog[16] = {0};
     if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
       const int maxWritesThisPass = 6; // Conservative per-loop drain cap (overrides global macro 8)
       int passes = 0;
@@ -2647,6 +2683,14 @@ void SSHTunnel::processPendingData(int channelIndex) {
             size_t allowance = getGlobalAllowance(bytesRead);
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
               ch.localToSshBuffer->write(tempBuffer, bytesRead);
+              ch.lastActivity = now;
+              if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
+                if (now - lastThrottleLog[channelIndex] > 1000) {
+                  lastThrottleLog[channelIndex] = now;
+                  LOGF_D("SSH", "Channel %d: Global limiter delaying buffered drain (queued=%zu)",
+                         channelIndex, ch.queuedBytesToRemote);
+                }
+              }
               break;
             }
             if (allowance < bytesRead) {
