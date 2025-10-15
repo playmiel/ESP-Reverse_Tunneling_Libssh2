@@ -12,7 +12,8 @@
 *.bin
 *.elf
 *.map
-
+# Ignore whole scripts folder (now handled outside of Git)
+scripts/
 # IDE files
 .vscode/
 .idea/
