@@ -4,6 +4,7 @@
 #include "lwip/sockets.h"
 #include <errno.h>
 #include <algorithm>
+#include <cstring>
 
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
@@ -73,7 +74,7 @@ SSHTunnel::SSHTunnel()
   reconnectAttempts(0), bytesReceived(0), bytesSent(0), droppedBytes(0),
       channels(nullptr), rxBuffer(nullptr), txBuffer(nullptr),
       tunnelMutex(nullptr), statsMutex(nullptr), sessionMutex(nullptr), pendingConnectionsMutex(nullptr), 
-      config(&globalSSHConfig), dataProcessingTask(nullptr), 
+      config(&globalSSHConfig), libssh2Initialized(false), dataProcessingTask(nullptr), 
       dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false),
       globalRateLimitBytesPerSec(0), globalBurstBytes(0), globalTokens(0),
       lastGlobalRefillMs(0), globalThrottleActive(false), lastGlobalThrottleLogMs(0) {
@@ -133,6 +134,11 @@ SSHTunnel::~SSHTunnel() {
   
   SAFE_FREE(rxBuffer);
   SAFE_FREE(txBuffer);
+
+  if (libssh2Initialized) {
+    libssh2_exit();
+    libssh2Initialized = false;
+  }
 }
 
 bool SSHTunnel::init() {
@@ -158,6 +164,7 @@ bool SSHTunnel::init() {
     unlockTunnel();
     return false;
   }
+  memset(channels, 0, channelsSize);
   
   // Initialize channels with ring buffers
   for (int i = 0; i < maxChannels; i++) {
@@ -216,6 +223,7 @@ bool SSHTunnel::init() {
     
     if (!channels[i].sshToLocalBuffer || !channels[i].localToSshBuffer) {
       LOGF_E("SSH", "Failed to create unified buffers for channel %d", i);
+      cleanupPartialInit(maxChannels);
       unlockTunnel();
       return false;
     }
@@ -226,6 +234,7 @@ bool SSHTunnel::init() {
     
     if (channels[i].readMutex == NULL || channels[i].writeMutex == NULL) {
       LOGF_E("SSH", "Failed to create mutexes for channel %d", i);
+      cleanupPartialInit(maxChannels);
       unlockTunnel();
       return false;
     }
@@ -249,6 +258,7 @@ bool SSHTunnel::init() {
   
   if (rxBuffer == nullptr || txBuffer == nullptr) {
     LOG_E("SSH", "Failed to allocate memory for buffers");
+    cleanupPartialInit(maxChannels);
     unlockTunnel();
     return false;
   }
@@ -257,13 +267,16 @@ bool SSHTunnel::init() {
   int rc = libssh2_init(0);
   if (rc != 0) {
     LOGF_E("SSH", "libssh2 initialization failed: %d", rc);
+    cleanupPartialInit(maxChannels);
     unlockTunnel();
     return false;
   }
+  libssh2Initialized = true;
 
   // NEW: Start dedicated data processing task
   if (!startDataProcessingTask()) {
     LOG_E("SSH", "Failed to start data processing task");
+    cleanupPartialInit(maxChannels);
     unlockTunnel();
     return false;
   }
@@ -486,12 +499,6 @@ void SSHTunnel::loop() {
 bool SSHTunnel::initializeSSH() {
   struct sockaddr_in sin;
   int rc = 0;
-  rc = libssh2_init(0);
-  if (rc != 0) {
-    LOGF_E("SSH", "libssh2 initialization failed: %d", rc);
-
-    return false; // Initialization failed
-  }
   socketfd = socket(PF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (socketfd == -1) {
     LOGF_E("SSH", "Error opening socket");
@@ -672,6 +679,24 @@ bool SSHTunnel::authenticateSSH() {
     unlockSession();
   } else {
     LOG_E("SSH", "Session lock timeout while querying authentication methods");
+    return false;
+  }
+  if (userauthlist == nullptr) {
+    String detail = "";
+    if (lockSession(pdMS_TO_TICKS(200))) {
+      char *errmsg = nullptr;
+      int errlen = 0;
+      libssh2_session_last_error(session, &errmsg, &errlen, 0);
+      if (errmsg && errlen > 0) {
+        detail = String(errmsg).substring(0, errlen);
+      }
+      unlockSession();
+    }
+    if (detail.length() > 0) {
+      LOGF_E("SSH", "Failed to query authentication methods: %s", detail.c_str());
+    } else {
+      LOG_E("SSH", "Failed to query authentication methods (no data returned)");
+    }
     return false;
   }
   LOGF_I("SSH", "Authentication methods: %s", userauthlist);
@@ -1324,11 +1349,19 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   }
 
   // PROTECTION: Avoid excessive mutex contention
-  static unsigned long lastProcessTime[10] = {0}; // Assumant max 10 canaux
-  if (channelIndex < 10 && (now - lastProcessTime[channelIndex]) < 5) {
-  return; // Skip if processed too recently
+  static std::vector<unsigned long> lastProcessTime;
+  int maxTrackedChannels = config->getConnectionConfig().maxChannels;
+  int neededSize = std::max(maxTrackedChannels, channelIndex + 1);
+  if ((int)lastProcessTime.size() < neededSize) {
+    lastProcessTime.assign(neededSize, 0);
   }
-  lastProcessTime[channelIndex] = now;
+  if (channelIndex < (int)lastProcessTime.size() &&
+      (now - lastProcessTime[channelIndex]) < 5) {
+    return; // Skip if processed too recently
+  }
+  if (channelIndex < (int)lastProcessTime.size()) {
+    lastProcessTime[channelIndex] = now;
+  }
 
   // First process pending buffered data to avoid accumulation
   processPendingData(channelIndex);
@@ -1473,6 +1506,15 @@ void SSHTunnel::cleanupInactiveChannels() {
   int maxChannels = config->getConnectionConfig().maxChannels;
   int channelTimeout = config->getConnectionConfig().channelTimeoutMs;
   int activeBefore = getActiveChannels();
+  static std::vector<unsigned long> lastGracefulLog;
+  static std::vector<unsigned long> lastThrottleSkipLog;
+  int neededSize = maxChannels;
+  if ((int)lastGracefulLog.size() < neededSize) {
+    lastGracefulLog.assign(neededSize, 0);
+  }
+  if ((int)lastThrottleSkipLog.size() < neededSize) {
+    lastThrottleSkipLog.assign(neededSize, 0);
+  }
 
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
@@ -1522,8 +1564,7 @@ void SSHTunnel::cleanupInactiveChannels() {
                  channels[i].localToSshBuffer ? channels[i].localToSshBuffer->size() : 0);
         } else {
           // Periodic log of state during graceful close
-          static unsigned long lastGracefulLog[16] = {0}; // Pour 16 canaux max
-          if (now - lastGracefulLog[i] > 5000) { // Log every 5s
+          if (i < (int)lastGracefulLog.size() && (now - lastGracefulLog[i] > 5000)) { // Log every 5s
             LOGF_I("SSH", "Channel %d graceful close in progress - buffers: ssh2local=%zu, local2ssh=%zu", i,
                    channels[i].sshToLocalBuffer ? channels[i].sshToLocalBuffer->size() : 0,
                    channels[i].localToSshBuffer ? channels[i].localToSshBuffer->size() : 0);
@@ -1534,13 +1575,10 @@ void SSHTunnel::cleanupInactiveChannels() {
   // Normal timeout but more tolerant
         if (pendingWork && globalRateLimitBytesPerSec > 0 && globalThrottleActive) {
           channels[i].lastActivity = now;
-          static unsigned long lastThrottleSkipLog[16] = {0};
-          if (i < (int)(sizeof(lastThrottleSkipLog) / sizeof(lastThrottleSkipLog[0]))) {
-            if (now - lastThrottleSkipLog[i] > 2000) {
-              lastThrottleSkipLog[i] = now;
-              LOGF_D("SSH", "Channel %d: Timeout skipped (global throttle, queued=%zu)",
-                     i, channels[i].queuedBytesToRemote);
-            }
+          if (i < (int)lastThrottleSkipLog.size() && (now - lastThrottleSkipLog[i] > 2000)) {
+            lastThrottleSkipLog[i] = now;
+            LOGF_D("SSH", "Channel %d: Timeout skipped (global throttle, queued=%zu)",
+                   i, channels[i].queuedBytesToRemote);
           }
           continue;
         }
@@ -1953,6 +1991,33 @@ void SSHTunnel::safeRetryMutexAccess(int channelIndex) {
 
 // New methods to improve transmission reliability
 
+void SSHTunnel::cleanupPartialInit(int maxChannels) {
+  if (channels != nullptr) {
+    for (int i = 0; i < maxChannels; ++i) {
+      if (channels[i].sshToLocalBuffer) {
+        delete channels[i].sshToLocalBuffer;
+        channels[i].sshToLocalBuffer = nullptr;
+      }
+      if (channels[i].localToSshBuffer) {
+        delete channels[i].localToSshBuffer;
+        channels[i].localToSshBuffer = nullptr;
+      }
+      SAFE_DELETE_SEMAPHORE(channels[i].readMutex);
+      SAFE_DELETE_SEMAPHORE(channels[i].writeMutex);
+    }
+    SAFE_FREE(channels);
+    channels = nullptr;
+  }
+
+  SAFE_FREE(rxBuffer);
+  SAFE_FREE(txBuffer);
+
+  if (libssh2Initialized) {
+    libssh2_exit();
+    libssh2Initialized = false;
+  }
+}
+
 bool SSHTunnel::processChannelRead(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active || !ch.channel || ch.localSocket < 0) {
@@ -2255,7 +2320,12 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   bool dropPending = false;
   String dropReason = "";
   bool throttledByGlobalLimit = false;
-  static unsigned long lastThrottleLog[16] = {0};
+  static std::vector<unsigned long> lastThrottleLog;
+  int throttleLogSize = config->getConnectionConfig().maxChannels;
+  int minSize = std::max(throttleLogSize, channelIndex + 1);
+  if ((int)lastThrottleLog.size() < minSize) {
+    lastThrottleLog.assign(minSize, 0);
+  }
 
   if (ch.active && ch.channel && ch.localSocket >= 0) {
   // 1) Loop-drain already queued data (localToSshBuffer)
@@ -2278,12 +2348,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           ch.localToSshBuffer->write(temp, chunk);
           throttledByGlobalLimit = true;
           ch.lastActivity = millis();
-          if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
-            if (now - lastThrottleLog[channelIndex] > 1000) {
-              lastThrottleLog[channelIndex] = now;
-              LOGF_D("SSH", "Channel %d: Global limiter delaying drain (queued=%zu)",
-                     channelIndex, ch.queuedBytesToRemote);
-            }
+          if (channelIndex < (int)lastThrottleLog.size() &&
+              (now - lastThrottleLog[channelIndex] > 1000)) {
+            lastThrottleLog[channelIndex] = now;
+            LOGF_D("SSH", "Channel %d: Global limiter delaying drain (queued=%zu)",
+                   channelIndex, ch.queuedBytesToRemote);
           }
           break;
         }
@@ -2434,12 +2503,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
               throttledByGlobalLimit = true;
               ch.lastActivity = millis();
-              if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
-                if (now - lastThrottleLog[channelIndex] > 1000) {
-                  lastThrottleLog[channelIndex] = now;
-                  LOGF_D("SSH", "Channel %d: Global limiter delaying direct write (remain=%zu queued=%zu)",
-                         channelIndex, remain, ch.queuedBytesToRemote);
-                }
+              if (channelIndex < (int)lastThrottleLog.size() &&
+                  (now - lastThrottleLog[channelIndex] > 1000)) {
+                lastThrottleLog[channelIndex] = now;
+                LOGF_D("SSH", "Channel %d: Global limiter delaying direct write (remain=%zu queued=%zu)",
+                       channelIndex, remain, ch.queuedBytesToRemote);
               }
               break;
             }
@@ -2610,11 +2678,19 @@ void SSHTunnel::processPendingData(int channelIndex) {
   unsigned long now = millis();
   
   // FIX: Increase spacing between calls to reduce contention
-  static unsigned long lastProcessTime[10] = {0};
-  if (channelIndex < 10 && (now - lastProcessTime[channelIndex]) < 20) { // 20ms au lieu de 10ms
+  static std::vector<unsigned long> lastProcessTime;
+  int maxTrackedChannels = config->getConnectionConfig().maxChannels;
+  int neededSize = std::max(maxTrackedChannels, channelIndex + 1);
+  if ((int)lastProcessTime.size() < neededSize) {
+    lastProcessTime.assign(neededSize, 0);
+  }
+  if (channelIndex < (int)lastProcessTime.size() &&
+      (now - lastProcessTime[channelIndex]) < 20) { // 20ms au lieu de 10ms
     return;
   }
-  lastProcessTime[channelIndex] = now;
+  if (channelIndex < (int)lastProcessTime.size()) {
+    lastProcessTime[channelIndex] = now;
+  }
   
   // 1) Process SSH->Local buffer (sshToLocalBuffer) - FIXED timeout
   if (xSemaphoreTake(ch.readMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
@@ -2677,10 +2753,14 @@ void SSHTunnel::processPendingData(int channelIndex) {
   }
   
   // 2) Process Local->SSH buffer (localToSshBuffer) - FIXED timeout
+  static std::vector<unsigned long> pendingThrottleLog;
+  int pendingNeeded = std::max(config->getConnectionConfig().maxChannels, channelIndex + 1);
+  if ((int)pendingThrottleLog.size() < pendingNeeded) {
+    pendingThrottleLog.assign(pendingNeeded, 0);
+  }
   if (xSemaphoreTake(ch.writeMutex, pdMS_TO_TICKS(100)) == pdTRUE) { // 100ms instead of 20ms
     bool dropPending = false;
     String dropReason = "";
-    static unsigned long lastThrottleLog[16] = {0};
     if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
       const int maxWritesThisPass = 6; // Conservative per-loop drain cap (overrides global macro 8)
       int passes = 0;
@@ -2698,12 +2778,11 @@ void SSHTunnel::processPendingData(int channelIndex) {
             if (allowance == 0 && globalRateLimitBytesPerSec != 0) {
               ch.localToSshBuffer->write(tempBuffer, bytesRead);
               ch.lastActivity = millis();
-              if (channelIndex < (int)(sizeof(lastThrottleLog) / sizeof(lastThrottleLog[0]))) {
-                if (now - lastThrottleLog[channelIndex] > 1000) {
-                  lastThrottleLog[channelIndex] = now;
-                  LOGF_D("SSH", "Channel %d: Global limiter delaying buffered drain (queued=%zu)",
-                         channelIndex, ch.queuedBytesToRemote);
-                }
+              if (channelIndex < (int)pendingThrottleLog.size() &&
+                  (now - pendingThrottleLog[channelIndex] > 1000)) {
+                pendingThrottleLog[channelIndex] = now;
+                LOGF_D("SSH", "Channel %d: Global limiter delaying buffered drain (queued=%zu)",
+                       channelIndex, ch.queuedBytesToRemote);
               }
               break;
             }
@@ -2824,8 +2903,15 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t* data, size_t size, 
   if (!data || size == 0) return 0;
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active) return 0;
-  static unsigned long lastQueueHighLogToLocal[16] = {0};
-  static unsigned long lastQueueHighLogToRemote[16] = {0};
+  static std::vector<unsigned long> lastQueueHighLogToLocal;
+  static std::vector<unsigned long> lastQueueHighLogToRemote;
+  int neededLogs = std::max(config->getConnectionConfig().maxChannels, channelIndex + 1);
+  if ((int)lastQueueHighLogToLocal.size() < neededLogs) {
+    lastQueueHighLogToLocal.assign(neededLogs, 0);
+  }
+  if ((int)lastQueueHighLogToRemote.size() < neededLogs) {
+    lastQueueHighLogToRemote.assign(neededLogs, 0);
+  }
   DataRingBuffer* targetBuffer = isRead ? ch.sshToLocalBuffer : ch.localToSshBuffer;
   SemaphoreHandle_t mutex = isRead ? ch.readMutex : ch.writeMutex;
   bool locked = false;
@@ -2843,7 +2929,7 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t* data, size_t size, 
     if (isRead) ch.queuedBytesToLocal += w; else ch.queuedBytesToRemote += w;
   }
   ch.lastActivity = millis();
-  if (channelIndex < 16 && totalQueued > 0) {
+  if (channelIndex < (int)lastQueueHighLogToLocal.size() && totalQueued > 0) {
     unsigned long nowDiag = millis();
     if (isRead) {
       if (ch.queuedBytesToLocal > HIGH_WATER_LOCAL && (nowDiag - lastQueueHighLogToLocal[channelIndex] > 2000)) {
@@ -2993,9 +3079,13 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   // If the channel is marked terminal after a -43 burst, it's immediately unhealthy
   if (ch.terminalSocketFailure) {
   // Switch to DEBUG to avoid repeated WARN spam
-    static unsigned long lastTermLog[16] = {0};
+    static std::vector<unsigned long> lastTermLog;
     unsigned long now = millis();
-    if (channelIndex < 16) {
+    int needed = std::max(config->getConnectionConfig().maxChannels, channelIndex + 1);
+    if ((int)lastTermLog.size() < needed) {
+      lastTermLog.assign(needed, 0);
+    }
+    if (channelIndex < (int)lastTermLog.size()) {
       if (now - lastTermLog[channelIndex] > 3000) {
         lastTermLog[channelIndex] = now;
         LOGF_W("SSH", "Channel %d: Unhealthy (terminal -43 burst) queuedL=%zu queuedR=%zu", channelIndex, ch.queuedBytesToLocal, ch.queuedBytesToRemote);
@@ -3275,9 +3365,12 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
   
   unsigned long now = millis();
   int maxChannels = config->getConnectionConfig().maxChannels;
-  static unsigned long lastChannelActivity[10] = {0}; // Track activity per channel (max 10)
+  static std::vector<unsigned long> lastChannelActivity;
+  if ((int)lastChannelActivity.size() < maxChannels) {
+    lastChannelActivity.assign(maxChannels, 0);
+  }
   
-  for (int i = 0; i < maxChannels && i < 10; i++) {
+  for (int i = 0; i < maxChannels; i++) {
     TunnelChannel &ch = channels[i];
     if (!ch.active) continue;
     
@@ -3319,8 +3412,10 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
              buffersOverloaded ? "YES" : "NO");
       
       recoverChannel(i);
-  lastChannelActivity[i] = now; // Reset timer
-    } else {
+      if (i < (int)lastChannelActivity.size()) {
+        lastChannelActivity[i] = now; // Reset timer
+      }
+    } else if (i < (int)lastChannelActivity.size()) {
   // Update normal activity timer
       if (ch.lastActivity > lastChannelActivity[i]) {
         lastChannelActivity[i] = ch.lastActivity;
