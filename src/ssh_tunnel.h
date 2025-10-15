@@ -221,6 +221,7 @@ private:
 
     // Configuration reference
     SSHConfiguration* config;
+    bool libssh2Initialized;
     
     // NEW: Queue for pending connections during large transfers
     struct PendingConnection {
@@ -271,6 +272,7 @@ private:
     
     // NEW: Method to force release of blocked mutexes
     void safeRetryMutexAccess(int channelIndex); // FIXED: Safe version instead of forceMutexRelease
+    void cleanupPartialInit(int maxChannels);
 
     // SSH write/drain tuning parameters
     static constexpr int SSH_MAX_WRITES_PER_PASS = 8;      // Max drain iterations per loop
