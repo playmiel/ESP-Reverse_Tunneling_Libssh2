@@ -239,7 +239,7 @@ private:
     // OPTIMIZED: Higher flow control thresholds
     static const size_t HIGH_WATER_LOCAL = 28 * 1024;  // 28KB (increased)
     static const size_t LOW_WATER_LOCAL = 14 * 1024;   // 14KB (50% of HIGH_WATER)
-    static const size_t FIXED_BUFFER_SIZE = 8 * 1024;  // Fixed 8KB buffer
+    static const size_t FIXED_BUFFER_SIZE = 32 * 1024;  // Fixed 32KB buffer for ring and scratch allocations
     
     // NEW: Dedicated task for data processing
     TaskHandle_t dataProcessingTask;
