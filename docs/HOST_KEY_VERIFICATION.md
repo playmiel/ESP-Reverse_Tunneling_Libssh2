@@ -9,10 +9,10 @@ Host key verification is a critical security mechanism that protects against **M
 ### Without host key verification
 
 ```text
-Internet → [Attaquant] → [Votre ESP32] → [Vrai serveur]
+Internet → [Attacker] → [Your ESP32] → [Real server]
            ↑
-    Se fait passer pour votre serveur
-    Peut intercepter/modifier tout le trafic
+    Impersonates your server
+    Can intercept/modify all traffic
 ```
 
 ### With verification
@@ -33,7 +33,7 @@ Internet → [Attaquant] → [Votre ESP32] → [Vrai serveur]
 ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub -E sha256
 
 # Or from a client
-ssh-keyscan -t ed25519 votre-serveur.com | ssh-keygen -lf - -E sha256
+ssh-keyscan -t ed25519 your-server.com | ssh-keygen -lf - -E sha256
 ```
 
 #### Example output
@@ -52,12 +52,12 @@ ssh-keyscan -t ed25519 votre-serveur.com | ssh-keygen -lf - -E sha256
 void setup() {
     // Standard SSH configuration
     globalSSHConfig.setSSHKeyAuthFromMemory(
-        "votre-serveur.com",
+        "your-server.com",
         22,
         "username",
         privateKey,
         publicKey,
-        ""  // Pas de passphrase
+        ""  // No passphrase
     );
 
     // Enable verification with expected fingerprint
@@ -204,7 +204,7 @@ void configureDevSSH() {
     globalSSHConfig.setHostKeyVerification(false);
     
     // TODO: Replace with real fingerprint once obtained
-    // globalSSHConfig.setHostKeyVerification("EMPREINTE_ICI", "ssh-ed25519", true);
+    // globalSSHConfig.setHostKeyVerification("FINGERPRINT_HERE", "ssh-ed25519", true);
 }
 ```
 
@@ -246,7 +246,7 @@ void configureFlexibleSSH() {
 
 3. **Specify key type**
    ```cpp
-   globalSSHConfig.setExpectedHostKey("empreinte", "ssh-ed25519");
+    globalSSHConfig.setExpectedHostKey("fingerprint", "ssh-ed25519");
    ```
 
 4. **Monitor logs**
@@ -258,7 +258,7 @@ void configureFlexibleSSH() {
 
 1. **Never disable in production**
    ```cpp
-   // DANGEREUX en production !
+    // DANGEROUS in production!
    globalSSHConfig.setHostKeyVerification(false);
    ```
 
@@ -354,7 +354,7 @@ globalSSHConfig.setHostKeyVerification(false); // Temporary discovery mode
 // Final secure configuration
 globalSSHConfig.setSSHKeyAuthFromMemory(host, port, user, privKey, pubKey, "");
 globalSSHConfig.setHostKeyVerification(
-    "empreinte_obtenue_etape_2",
+    "fingerprint_obtained_step_2",
     "ssh-ed25519", 
     true
 );
@@ -376,27 +376,27 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
     
     // SSH configuration with key authentication
     globalSSHConfig.setSSHKeyAuthFromMemory(
-        "tunnel.example.com",   // Serveur SSH
-        22,                     // Port SSH
-        "tunnel-user",          // Utilisateur
-    privateKey,             // Private key
-    publicKey,              // Public key
-        ""                      // Pas de passphrase
+        "tunnel.example.com",   // SSH server
+        22,                       // SSH port
+        "tunnel-user",           // Username
+        privateKey,               // Private key
+        publicKey,                // Public key
+        ""                       // No passphrase
     );
     
     // Reverse tunnel configuration
     globalSSHConfig.setTunnelConfig(
-        "0.0.0.0",             // Bind sur toutes les interfaces du serveur
-        8080,                  // Port distant (serveur)
-        "192.168.1.100",       // IP locale (ESP32)
-        80                     // Port local (serveur web ESP32)
+        "0.0.0.0",              // Bind on all server interfaces
+        8080,                    // Remote port (server)
+        "192.168.1.100",        // Local IP (ESP32)
+        80                       // Local port (ESP32 web server)
     );
     
     // Secure configuration with host key verification
     globalSSHConfig.setHostKeyVerification(
-        "a1b2c3d4e5f67890123456789012345678901234567890abcdef1234567890ab",  // Empreinte SHA256
-    "ssh-ed25519",                                                      // Key type
-        true                                                               // Activer
+        "a1b2c3d4e5f67890123456789012345678901234567890abcdef1234567890ab",  // SHA256 fingerprint
+        "ssh-ed25519",                                                      // Key type
+        true                                                                 // Enable
     );
     
     // Connection parameters configuration

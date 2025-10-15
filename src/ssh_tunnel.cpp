@@ -45,7 +45,7 @@ static void recordTerminalSocketFailure(unsigned long now) {
   if (g_terminalSocketFailuresRecent >= SESSION_SOCKET_RECV_FAILURE_THRESHOLD &&
       (now - g_firstTerminalFailureMs) <= SESSION_FAILURE_WINDOW_MS) {
     if (!g_sessionResetTriggered) {
-      g_sessionResetTriggered = true; // le loop() s'en chargera
+      g_sessionResetTriggered = true; // the loop() will handle it
       LOG_W("SSH", "Session escalation: multiple terminal -43 bursts -> scheduling reconnect");
     }
   }
@@ -421,7 +421,7 @@ void SSHTunnel::loop() {
 
   // NEW: Deadlock check every 30 seconds (reduced frequency)
   static unsigned long lastDeadlockCheck = 0;
-  if (now - lastDeadlockCheck > 30000) { // 30 secondes
+  if (now - lastDeadlockCheck > 30000) { // 30 seconds
     checkAndRecoverDeadlocks();
     lastDeadlockCheck = now;
   }
@@ -505,12 +505,12 @@ bool SSHTunnel::initializeSSH() {
     return false;
   }
 
-  // Optimiser le socket SSH pour de meilleures performances
+  // Optimize the SSH socket for better performance
   if (!NetworkOptimizer::optimizeSSHSocket(socketfd)) {
     LOGF_W("SSH", "Warning: Could not apply all socket optimizations");
   }
 
-  // Utiliser la configuration SSH
+  // Use SSH configuration
   const SSHServerConfig& sshConfig = config->getSSHConfig();
   
   sin.sin_family = AF_INET;
@@ -668,7 +668,7 @@ bool SSHTunnel::verifyHostKey() {
 }
 
 bool SSHTunnel::authenticateSSH() {
-  // Utiliser la configuration SSH
+  // Use SSH configuration
   const SSHServerConfig& sshConfig = config->getSSHConfig();
   
   /* check what authentication methods are available */
@@ -1180,8 +1180,8 @@ bool SSHTunnel::handleNewConnection() {
   // NEW: Decide whether to accept connection (queue system currently disabled)
   if (!shouldAcceptNewConnection()) {
     LOGF_W("SSH", "All channels busy - rejecting new connection");
-    closeLibssh2Channel(channel);
-    return false; // Rejeter directement au lieu de mettre en queue
+  closeLibssh2Channel(channel);
+  return false; // Reject immediately instead of queuing
   }
 
   // Find available channel slot with aggressive reuse
@@ -1556,7 +1556,7 @@ void SSHTunnel::cleanupInactiveChannels() {
             (channels[i].localToSshBuffer ? channels[i].localToSshBuffer->empty() : true)) {
           shouldClose = true;
           LOGF_I("SSH", "Channel %d graceful close completed", i);
-        } else if (timeSinceActivity > 60000) { // 60 secondes au lieu de 30 pour graceful close
+  } else if (timeSinceActivity > 60000) { // 60 seconds instead of 30 for graceful close
           shouldClose = true;
           LOGF_W("SSH", "Channel %d graceful close timeout - forcing close with pending data", i);
           LOGF_W("SSH", "Channel %d buffers: ssh2local=%zu, local2ssh=%zu", i,
@@ -2685,7 +2685,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
     lastProcessTime.assign(neededSize, 0);
   }
   if (channelIndex < (int)lastProcessTime.size() &&
-      (now - lastProcessTime[channelIndex]) < 20) { // 20ms au lieu de 10ms
+    (now - lastProcessTime[channelIndex]) < 20) { // 20ms instead of 10ms
     return;
   }
   if (channelIndex < (int)lastProcessTime.size()) {
@@ -3309,7 +3309,7 @@ bool SSHTunnel::isSocketReadable(int sockfd, int timeoutMs) {
   FD_ZERO(&rfds);
   FD_ZERO(&errfds);
   FD_SET(sockfd, &rfds);
-  FD_SET(sockfd, &errfds); // Surveiller aussi les erreurs
+  FD_SET(sockfd, &errfds); // Also monitor errors
   
   struct timeval tv;
   tv.tv_sec  = timeoutMs / 1000;
@@ -3401,7 +3401,7 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
     
   // Check if unified buffers are abnormally full
     bool buffersOverloaded = false;
-    if (ch.sshToLocalBuffer && ch.sshToLocalBuffer->size() > 45 * 1024) buffersOverloaded = true; // Plus de 45KB en attente
+  if (ch.sshToLocalBuffer && ch.sshToLocalBuffer->size() > 45 * 1024) buffersOverloaded = true; // More than 45KB pending
     if (ch.localToSshBuffer && ch.localToSshBuffer->size() > 45 * 1024) buffersOverloaded = true;
     
     if (deadlockDetected || buffersOverloaded) {
@@ -3634,10 +3634,10 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL* channel) {
   // If none free, look for reclaimable (long inactive) channels
   if (channelIndex == -1) {
     for (int i = 0; i < maxChannels; i++) {
-      if (channels[i].active && (now - channels[i].lastActivity) > 30000) { // 30 secondes
+  if (channels[i].active && (now - channels[i].lastActivity) > 30000) { // 30 seconds
         LOGF_I("SSH", "Reusing inactive channel slot %d (inactive for %lums)", 
                i, now - channels[i].lastActivity);
-        closeChannel(i); // Force la fermeture
+  closeChannel(i); // Force close
         channelIndex = i;
         break;
       }
@@ -3908,7 +3908,7 @@ void SSHTunnel::gracefulRecoverChannel(int channelIndex) {
   // Try processing remaining data
       processPendingData(channelIndex);
       
-      vTaskDelay(pdMS_TO_TICKS(100)); // Attendre 100ms entre les tentatives
+  vTaskDelay(pdMS_TO_TICKS(100)); // Wait 100ms between attempts
     }
   }
   
