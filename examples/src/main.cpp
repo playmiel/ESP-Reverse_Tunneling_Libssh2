@@ -26,7 +26,7 @@ void setup() {
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 
-  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Version améliorée avec configuration dynamique");
+  LOG_I("MAIN", "ESP32 SSH Reverse Tunnel - Enhanced version with dynamic configuration");
 
   // SSH tunnel configuration
   configureSSHTunnel();
@@ -154,9 +154,23 @@ void configureSSHTunnel() {
   
   // Buffer configuration
   globalSSHConfig.setBufferConfig(
-  8192,    // Buffer size
-  5,       // Max number of channels
-  1800000  // Channel timeout (ms) - 30 minutes
+    8192,    // Buffer size
+    5,       // Max number of channels
+    1800000  // Channel timeout (ms) - 30 minutes
+  );
+
+  // Channel priority profile (optional tuning)
+  globalSSHConfig.setChannelPriorityProfile(
+    1,  // Default priority for new channels (0=low, 1=normal, 2=high)
+    1,  // Weight applied to low priority channels
+    2,  // Weight applied to normal priority channels
+    4   // Weight applied to high priority channels
+  );
+
+  // Global rate limit (optional, disabled when bytesPerSecond = 0)
+  globalSSHConfig.setGlobalRateLimit(
+    64 * 1024,  // Bytes per second across all channels
+    96 * 1024   // Burst budget (optional); defaults to rate if zero
   );
   
   // Debug configuration

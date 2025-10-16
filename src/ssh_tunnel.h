@@ -45,6 +45,8 @@ struct TunnelChannel {
     size_t totalBytesSent;
     unsigned long lastSuccessfulWrite; // Last successful write
     unsigned long lastSuccessfulRead;  // Last successful read
+    uint8_t priority;          // Base priority (0=low,1=normal,2=high)
+    uint8_t effectivePriority; // Last computed effective priority
     bool gracefulClosing; // Closing in progress but with remaining data
     int consecutiveErrors; // Number of consecutive errors
     int eagainErrors; // NEW: Separate counter for EAGAIN errors
@@ -83,11 +85,11 @@ struct TunnelChannel {
     bool localReadTerminated;           // local side no longer readable (socket closed/error)
 
     // NEW (partial enqueue protection): deferred buffers for residual data that
-    // n'a pas pu être placé dans les ring buffers (évitant toute perte).
-    uint8_t* deferredToLocal;      // SSH->Local résidu en attente d'enqueue
-    size_t deferredToLocalSize;    // taille totale du résidu
-    size_t deferredToLocalOffset;  // offset déjà enqueue
-    uint8_t* deferredToRemote;     // Local->SSH résidu en attente
+    // could not be placed into the ring buffers (avoids any data loss).
+    uint8_t* deferredToLocal;      // SSH->Local residual awaiting enqueue
+    size_t deferredToLocalSize;    // total size of residual
+    size_t deferredToLocalOffset;  // already enqueued offset
+    uint8_t* deferredToRemote;     // Local->SSH residual awaiting enqueue
     size_t deferredToRemoteSize;
     size_t deferredToRemoteOffset;
 
@@ -174,6 +176,23 @@ private:
     // Utility functions
     static int socketCallback(LIBSSH2_SESSION* session, libssh2_socket_t fd, void** abstract);
 
+    struct ChannelScheduleEntry {
+        int index;
+        uint8_t weight;
+    };
+    void prepareChannelSchedule(std::vector<ChannelScheduleEntry>& low,
+                                 std::vector<ChannelScheduleEntry>& normal,
+                                 std::vector<ChannelScheduleEntry>& high,
+                                 bool onlyWithWork,
+                                 bool &hasWorkSignal);
+    uint8_t evaluateChannelPriority(int channelIndex, unsigned long now, bool hasWork) const;
+    uint8_t getPriorityWeight(uint8_t priority) const;
+    bool channelHasPendingWork(const TunnelChannel& channel) const;
+    void initializeGlobalThrottle();
+    void refillGlobalTokens();
+    size_t getGlobalAllowance(size_t desired);
+    void commitGlobalTokens(size_t used);
+
     // Member variables
     LIBSSH2_SESSION* session;
     LIBSSH2_LISTENER* listener;
@@ -202,6 +221,7 @@ private:
 
     // Configuration reference
     SSHConfiguration* config;
+    bool libssh2Initialized;
     
     // NEW: Queue for pending connections during large transfers
     struct PendingConnection {
@@ -219,12 +239,18 @@ private:
     // OPTIMIZED: Higher flow control thresholds
     static const size_t HIGH_WATER_LOCAL = 28 * 1024;  // 28KB (increased)
     static const size_t LOW_WATER_LOCAL = 14 * 1024;   // 14KB (50% of HIGH_WATER)
-    static const size_t FIXED_BUFFER_SIZE = 8 * 1024;  // Fixed 8KB buffer
+    static const size_t FIXED_BUFFER_SIZE = 32 * 1024;  // Fixed 32KB buffer for ring and scratch allocations
     
     // NEW: Dedicated task for data processing
     TaskHandle_t dataProcessingTask;
     SemaphoreHandle_t dataProcessingSemaphore;
     bool dataProcessingTaskRunning;
+    size_t globalRateLimitBytesPerSec;
+    size_t globalBurstBytes;
+    size_t globalTokens;
+    unsigned long lastGlobalRefillMs;
+    bool globalThrottleActive;
+    unsigned long lastGlobalThrottleLogMs;
 
     // Protection methods
     bool lockTunnel();
@@ -246,6 +272,7 @@ private:
     
     // NEW: Method to force release of blocked mutexes
     void safeRetryMutexAccess(int channelIndex); // FIXED: Safe version instead of forceMutexRelease
+    void cleanupPartialInit(int maxChannels);
 
     // SSH write/drain tuning parameters
     static constexpr int SSH_MAX_WRITES_PER_PASS = 8;      // Max drain iterations per loop

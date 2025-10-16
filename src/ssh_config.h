@@ -60,7 +60,13 @@ struct ConnectionConfig {
     int bufferSize;
     int maxChannels;
     int channelTimeoutMs;
-    
+    uint8_t defaultChannelPriority;
+    uint8_t priorityWeightLow;
+    uint8_t priorityWeightNormal;
+    uint8_t priorityWeightHigh;
+    size_t globalRateLimitBytesPerSec;
+    size_t globalBurstBytes;
+
     // Default constructor
     ConnectionConfig() :
         keepAliveIntervalSec(30),
@@ -69,7 +75,13 @@ struct ConnectionConfig {
         connectionTimeoutSec(30),
         bufferSize(8192),
     maxChannels(10),  // Increased from 5 to 10 for large transfers
-        channelTimeoutMs(1800000) {}
+        channelTimeoutMs(1800000),
+        defaultChannelPriority(1),
+        priorityWeightLow(1),
+        priorityWeightNormal(2),
+        priorityWeightHigh(4),
+        globalRateLimitBytesPerSec(0),
+        globalBurstBytes(0) {}
 };
 
 // Structure for debug configuration
@@ -112,7 +124,9 @@ public:
     // Connection configuration methods
     void setConnectionConfig(int keepAliveInterval, int reconnectDelay, int maxReconnectAttempts, int connectionTimeout);
     void setBufferConfig(int bufferSize, int maxChannels, int channelTimeout);
-    
+    void setChannelPriorityProfile(uint8_t defaultPriority, uint8_t lowWeight = 1, uint8_t normalWeight = 2, uint8_t highWeight = 4);
+    void setGlobalRateLimit(size_t bytesPerSecond, size_t burstBytes = 0);
+
     // Debug configuration methods
     void setDebugConfig(bool enabled, int baudRate);
     

@@ -56,7 +56,7 @@ public:
         }
 #endif
 
-        // Configurer les timeouts
+    // Configure timeouts
         struct timeval timeout;
         timeout.tv_sec = 300;  // 5 minutes
         timeout.tv_usec = 0;
@@ -87,7 +87,7 @@ public:
         }
 #endif
 
-        // Activer SO_KEEPALIVE pour maintenir les connexions
+    // Enable SO_KEEPALIVE to keep connections alive
         int keepalive = 1;
         attempted++;
         if (setsockopt(socket_fd, SOL_SOCKET, SO_KEEPALIVE, &keepalive, sizeof(keepalive)) == 0) {
