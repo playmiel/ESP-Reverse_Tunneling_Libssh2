@@ -41,13 +41,7 @@ The PlatformIO build system automatically uses `src/main.cpp` and ignores `.ino`
    ```bash
    cd examples
    ```
-
-2. **If you encounter compilation errors**, run the fix script:
-   ```bash
-   ../fix_libssh2_simple.sh
-   ```
-
-3. **Compile and upload**:
+2. **Compile and upload**:
    ```bash
    pio run                    # Compile
    pio run --target upload    # Upload to ESP32
@@ -103,13 +97,6 @@ Bytes Received: xxxxx
 ```
 
 ## 🛠️ Troubleshooting
-
-### Compilation Errors
-If you encounter `libssh2.h: No such file or directory`:
-```bash
-# Run the fix script from the examples directory
-../fix_libssh2_simple.sh
-```
 
 ### WiFi Connection Issues
 - Verify SSID and password
