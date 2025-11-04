@@ -11,7 +11,8 @@ void Logger::init() {
 }
 
 void Logger::log(LogLevel level, const char* tag, const char* message) {
-    if (!globalSSHConfig.getDebugConfig().debugEnabled && level > LOG_WARN) {
+    const DebugConfig& debugConfig = globalSSHConfig.getDebugConfig();
+    if (level > debugConfig.minLogLevel) {
         return;
     }
     
@@ -20,16 +21,17 @@ void Logger::log(LogLevel level, const char* tag, const char* message) {
 }
 
 void Logger::logf(LogLevel level, const char* tag, const char* format, ...) {
-    if (!globalSSHConfig.getDebugConfig().debugEnabled && level > LOG_WARN) {
+    const DebugConfig& debugConfig = globalSSHConfig.getDebugConfig();
+    if (level > debugConfig.minLogLevel) {
         return;
     }
-    
+
     char buffer[256];
     va_list args;
     va_start(args, format);
     vsnprintf(buffer, sizeof(buffer), format, args);
     va_end(args);
-    
+
     log(level, tag, buffer);
 }
 

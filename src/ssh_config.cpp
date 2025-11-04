@@ -278,6 +278,16 @@ void SSHConfiguration::setHostKeyVerification(const String& fingerprint, const S
     }
 }
 
+void SSHConfiguration::setHostKeyMismatchCallback(HostKeyMismatchCallback callback, void* context) {
+    if (lockConfig()) {
+        sshConfig.onHostKeyMismatch = callback;
+        sshConfig.hostKeyMismatchContext = context;
+        unlockConfig();
+
+        LOGF_I("CONFIG", "Host key mismatch callback %s", callback ? "registered" : "cleared");
+    }
+}
+
 void SSHConfiguration::setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort) {
     if (lockConfig()) {
         tunnelConfig.remoteBindHost = remoteBindHost;
@@ -294,6 +304,7 @@ void SSHConfiguration::setTunnelConfig(const String& remoteBindHost, int remoteB
 void SSHConfiguration::setConnectionConfig(int keepAliveInterval, int reconnectDelay, int maxReconnectAttempts, int connectionTimeout) {
     if (lockConfig()) {
         connectionConfig.keepAliveIntervalSec = keepAliveInterval;
+        connectionConfig.libssh2KeepAliveIntervalSec = keepAliveInterval;
         connectionConfig.reconnectDelayMs = reconnectDelay;
         connectionConfig.maxReconnectAttempts = maxReconnectAttempts;
         connectionConfig.connectionTimeoutSec = connectionTimeout;
@@ -304,15 +315,42 @@ void SSHConfiguration::setConnectionConfig(int keepAliveInterval, int reconnectD
     }
 }
 
-void SSHConfiguration::setBufferConfig(int bufferSize, int maxChannels, int channelTimeout) {
+void SSHConfiguration::setBufferConfig(int bufferSize, int maxChannels, int channelTimeout, size_t tunnelRingBufferSize) {
     if (lockConfig()) {
         connectionConfig.bufferSize = bufferSize;
         connectionConfig.maxChannels = maxChannels;
         connectionConfig.channelTimeoutMs = channelTimeout;
+        connectionConfig.tunnelRingBufferSize = tunnelRingBufferSize;
         unlockConfig();
         
-        LOGF_I("CONFIG", "Buffer config: size=%d, max_channels=%d, channel_timeout=%dms",
-               bufferSize, maxChannels, channelTimeout);
+        LOGF_I("CONFIG", "Buffer config: size=%d, max_channels=%d, channel_timeout=%dms, ring_buffer=%u bytes",
+               bufferSize, maxChannels, channelTimeout, (unsigned)tunnelRingBufferSize);
+    }
+}
+
+void SSHConfiguration::setKeepAliveOptions(bool enableLibssh2, int intervalSeconds) {
+    if (intervalSeconds <= 0) {
+        intervalSeconds = connectionConfig.keepAliveIntervalSec;
+    }
+    if (lockConfig()) {
+        connectionConfig.libssh2KeepAliveEnabled = enableLibssh2;
+        connectionConfig.libssh2KeepAliveIntervalSec = intervalSeconds;
+        unlockConfig();
+
+        LOGF_I("CONFIG", "libssh2 keepalive: %s (interval=%ds)", enableLibssh2 ? "enabled" : "disabled", intervalSeconds);
+    }
+}
+
+void SSHConfiguration::setDataTaskConfig(uint16_t stackSize, int8_t coreAffinity) {
+    if (stackSize == 0) {
+        stackSize = connectionConfig.dataTaskStackSize;
+    }
+    if (lockConfig()) {
+        connectionConfig.dataTaskStackSize = stackSize;
+        connectionConfig.dataTaskCoreAffinity = coreAffinity;
+        unlockConfig();
+
+        LOGF_I("CONFIG", "Data task config: stack=%u bytes, core=%d", stackSize, coreAffinity);
     }
 }
 
@@ -360,10 +398,20 @@ void SSHConfiguration::setDebugConfig(bool enabled, int baudRate) {
     if (lockConfig()) {
         debugConfig.debugEnabled = enabled;
         debugConfig.serialBaudRate = baudRate;
+        debugConfig.minLogLevel = enabled ? LOG_DEBUG : LOG_WARN;
         unlockConfig();
         
-        LOGF_I("CONFIG", "Debug config: enabled=%s, baud_rate=%d", 
-               enabled ? "true" : "false", baudRate);
+        LOGF_I("CONFIG", "Debug config: enabled=%s, baud_rate=%d, min_level=%d", 
+               enabled ? "true" : "false", baudRate, debugConfig.minLogLevel);
+    }
+}
+
+void SSHConfiguration::setLogLevel(LogLevel level) {
+    if (lockConfig()) {
+        debugConfig.minLogLevel = level;
+        unlockConfig();
+
+        LOGF_I("CONFIG", "Log level set to %d", level);
     }
 }
 
@@ -392,17 +440,20 @@ void SSHConfiguration::printConfiguration() const {
         
         LOG_I("CONFIG", "=== Connection Configuration ===");
         LOGF_I("CONFIG", "Keep-alive: %ds", connectionConfig.keepAliveIntervalSec);
+        LOGF_I("CONFIG", "libssh2 keep-alive: %s (%ds)", connectionConfig.libssh2KeepAliveEnabled ? "enabled" : "disabled", connectionConfig.libssh2KeepAliveIntervalSec);
         LOGF_I("CONFIG", "Reconnect delay: %dms", connectionConfig.reconnectDelayMs);
         LOGF_I("CONFIG", "Max reconnect attempts: %d", connectionConfig.maxReconnectAttempts);
         LOGF_I("CONFIG", "Connection timeout: %ds", connectionConfig.connectionTimeoutSec);
         LOGF_I("CONFIG", "Buffer size: %d bytes", connectionConfig.bufferSize);
         LOGF_I("CONFIG", "Max channels: %d", connectionConfig.maxChannels);
         LOGF_I("CONFIG", "Channel timeout: %dms", connectionConfig.channelTimeoutMs);
+        LOGF_I("CONFIG", "Tunnel ring buffer: %u bytes", (unsigned)connectionConfig.tunnelRingBufferSize);
         LOGF_I("CONFIG", "Channel priority default: %u", connectionConfig.defaultChannelPriority);
         LOGF_I("CONFIG", "Channel priority weights (L/M/H): %u/%u/%u",
                connectionConfig.priorityWeightLow,
                connectionConfig.priorityWeightNormal,
                connectionConfig.priorityWeightHigh);
+        LOGF_I("CONFIG", "Data task stack/core: %u / %d", connectionConfig.dataTaskStackSize, connectionConfig.dataTaskCoreAffinity);
         if (connectionConfig.globalRateLimitBytesPerSec > 0) {
             LOGF_I("CONFIG", "Global rate limit: %zu B/s (burst=%zu)",
                    connectionConfig.globalRateLimitBytesPerSec,
@@ -414,6 +465,7 @@ void SSHConfiguration::printConfiguration() const {
         LOG_I("CONFIG", "=== Debug Configuration ===");
         LOGF_I("CONFIG", "Debug enabled: %s", debugConfig.debugEnabled ? "true" : "false");
         LOGF_I("CONFIG", "Serial baud rate: %d", debugConfig.serialBaudRate);
+        LOGF_I("CONFIG", "Log level threshold: %d", debugConfig.minLogLevel);
         
         unlockConfig();
     }
@@ -544,6 +596,26 @@ bool SSHConfiguration::validateConnectionConfig() const {
 
     if (connectionConfig.globalRateLimitBytesPerSec == 0 && connectionConfig.globalBurstBytes > 0) {
         LOG_W("CONFIG", "Global burst is ignored when rate limit is disabled");
+    }
+
+    if (connectionConfig.libssh2KeepAliveEnabled && connectionConfig.libssh2KeepAliveIntervalSec <= 0) {
+        LOG_E("CONFIG", "libssh2 keep-alive interval must be positive when enabled");
+        return false;
+    }
+
+    if (connectionConfig.tunnelRingBufferSize == 0) {
+        LOG_E("CONFIG", "Tunnel ring buffer size must be positive");
+        return false;
+    }
+
+    if (connectionConfig.dataTaskStackSize == 0) {
+        LOG_E("CONFIG", "Data task stack size must be positive");
+        return false;
+    }
+
+    if (connectionConfig.dataTaskCoreAffinity < -1) {
+        LOG_E("CONFIG", "Data task core affinity must be -1 (no pin) or a valid core index");
+        return false;
     }
 
     return true;

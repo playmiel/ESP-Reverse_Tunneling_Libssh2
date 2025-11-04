@@ -9,7 +9,7 @@ Library for ESP32 Arduino enabling creation of reverse SSH tunnels using libssh2
 # Add to your platformio.ini
 lib_deps = 
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
-    https://github.com/playmiel/libssh2_esp32
+    https://github.com/playmiel/libssh2_esp
 ```
 
 **Option B: Arduino IDE**
@@ -71,9 +71,16 @@ globalSSHConfig.setSSHKeyAuthFromMemory("server.com", 22, "user", privateKey, pu
 
 // Enable host key verification (recommended for production)
 globalSSHConfig.setHostKeyVerification(
-    "a1b2c3d4e5f67890123456789012345678901234567890abcdef1234567890ab",  // SHA256 fingerprint
-    "ssh-ed25519",                                                      // Key type
-    true                                                               // Enable verification
+    "SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56",  // Accept OpenSSH format or 64-char hex
+    "ssh-ed25519",
+    true
+);
+
+// Optional: receive a diagnostic callback if the fingerprint changes
+globalSSHConfig.setHostKeyMismatchCallback(
+    [](const String& expected, const String& actual, const String& keyType, void*) {
+        LOGF_W("HOSTKEY", "Mismatch for %s (expected %s, got %s)", keyType.c_str(), expected.c_str(), actual.c_str());
+    }
 );
 ```
 
@@ -121,3 +128,26 @@ Contributions are welcome! See documentation guides for more details.
 ## 📄 License
 
 See LICENSE file for details.
+### 6. Connection Tuning
+
+```cpp
+// Configure libssh2 keepalives alongside the existing periodic send
+globalSSHConfig.setKeepAliveOptions(true, 30); // want-reply=1, 30s
+
+// Adjust logging without toggling the debugEnabled flag
+globalSSHConfig.setLogLevel(LOG_INFO);
+
+// Advanced data-path tuning
+globalSSHConfig.setBufferConfig(8192, 10, 1800000, 16 * 1024); // adjust ring buffer size
+globalSSHConfig.setDataTaskConfig(6144, 1);                    // grow stack + pin task to core 1
+```
+
+Retrieve the effective reverse tunnel port when you bind to `remoteBindPort = 0`:
+
+```cpp
+SSHTunnel tunnel;
+tunnel.init();
+if (tunnel.connectSSH()) {
+    LOGF_I("SSH", "Remote listener bound on %d", tunnel.getBoundPort());
+}
+```

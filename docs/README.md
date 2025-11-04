@@ -49,7 +49,7 @@ globalSSHConfig.setSSHKeyAuthFromMemory(
 
 // Server identity verification
 globalSSHConfig.setHostKeyVerification(
-    "server_sha256_fingerprint",
+    "SHA256:server_fingerprint",
     "ssh-ed25519",
     true
 );
