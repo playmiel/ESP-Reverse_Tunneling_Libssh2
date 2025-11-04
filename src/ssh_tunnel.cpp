@@ -5,6 +5,7 @@
 #include <errno.h>
 #include <algorithm>
 #include <cstring>
+#include <ctype.h>
 
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
@@ -77,7 +78,8 @@ SSHTunnel::SSHTunnel()
       config(&globalSSHConfig), libssh2Initialized(false), dataProcessingTask(nullptr), 
       dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false),
       globalRateLimitBytesPerSec(0), globalBurstBytes(0), globalTokens(0),
-      lastGlobalRefillMs(0), globalThrottleActive(false), lastGlobalThrottleLogMs(0) {
+      lastGlobalRefillMs(0), globalThrottleActive(false), lastGlobalThrottleLogMs(0),
+      boundPort(-1) {
 
   // OPTIMIZED: Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
@@ -166,6 +168,9 @@ bool SSHTunnel::init() {
   }
   memset(channels, 0, channelsSize);
   
+  size_t ringBufferSize = getConfiguredRingBufferSize();
+  LOGF_I("SSH", "Configuring %d channels with ring buffers of %u bytes", maxChannels, (unsigned)ringBufferSize);
+
   // Initialize channels with ring buffers
   for (int i = 0; i < maxChannels; i++) {
     channels[i].channel = nullptr;
@@ -213,13 +218,13 @@ bool SSHTunnel::init() {
   // OPTIMIZED: Create unified buffers (simpler & efficient)
     char ringName[32];
     
-  // Unified buffer for SSH->Local (FIXED_BUFFER_SIZE = 32KB)
+  // Unified buffer for SSH->Local (configurable size)
     snprintf(ringName, sizeof(ringName), "CH%d_SSH2LOC", i);
-    channels[i].sshToLocalBuffer = new DataRingBuffer(FIXED_BUFFER_SIZE, ringName);
-    
-  // Unified buffer for Local->SSH (FIXED_BUFFER_SIZE = 32KB)
+    channels[i].sshToLocalBuffer = new DataRingBuffer(ringBufferSize, ringName);
+
+  // Unified buffer for Local->SSH (configurable size)
     snprintf(ringName, sizeof(ringName), "CH%d_LOC2SSH", i);
-    channels[i].localToSshBuffer = new DataRingBuffer(FIXED_BUFFER_SIZE, ringName);
+    channels[i].localToSshBuffer = new DataRingBuffer(ringBufferSize, ringName);
     
     if (!channels[i].sshToLocalBuffer || !channels[i].localToSshBuffer) {
       LOGF_E("SSH", "Failed to create unified buffers for channel %d", i);
@@ -248,9 +253,9 @@ bool SSHTunnel::init() {
     channels[i].deferredToRemoteOffset = 0;
   }
   
-  // Allocate RX/TX buffers (use fixed size)
-  rxBuffer = (uint8_t*)safeMalloc(FIXED_BUFFER_SIZE, "SSH_RX_BUFFER");
-  txBuffer = (uint8_t*)safeMalloc(FIXED_BUFFER_SIZE, "SSH_TX_BUFFER");
+  // Allocate RX/TX buffers (match ring buffer capacity)
+  rxBuffer = (uint8_t*)safeMalloc(ringBufferSize, "SSH_RX_BUFFER");
+  txBuffer = (uint8_t*)safeMalloc(ringBufferSize, "SSH_TX_BUFFER");
 
   globalRateLimitBytesPerSec = connConfInit.globalRateLimitBytesPerSec;
   globalBurstBytes = connConfInit.globalBurstBytes;
@@ -548,6 +553,17 @@ bool SSHTunnel::initializeSSH() {
     return false;
   }
 
+  const ConnectionConfig& connectionConfig = config->getConnectionConfig();
+  if (connectionConfig.libssh2KeepAliveEnabled) {
+    if (lockSession(pdMS_TO_TICKS(200))) {
+      libssh2_keepalive_config(session, 1, connectionConfig.libssh2KeepAliveIntervalSec);
+      unlockSession();
+      LOGF_I("SSH", "libssh2 keepalive configured (interval=%ds)", connectionConfig.libssh2KeepAliveIntervalSec);
+    } else {
+      LOG_W("SSH", "Session lock timeout while configuring libssh2 keepalive");
+    }
+  }
+
 
   // libssh2_trace(session, LIBSSH2_TRACE_SOCKET | LIBSSH2_TRACE_ERROR);
 
@@ -562,54 +578,106 @@ bool SSHTunnel::initializeSSH() {
   return true;
 }
 
+static String encodeFingerprintHex(const unsigned char* data, size_t len) {
+  static const char kHexDigits[] = "0123456789abcdef";
+  String out;
+  out.reserve(len * 2);
+  for (size_t i = 0; i < len; ++i) {
+    unsigned char value = data[i];
+    out += kHexDigits[(value >> 4) & 0x0F];
+    out += kHexDigits[value & 0x0F];
+  }
+  return out;
+}
+
+static String encodeFingerprintBase64(const unsigned char* data, size_t len) {
+  static const char kBase64Table[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  String out;
+  out.reserve(((len + 2) / 3) * 4);
+
+  size_t index = 0;
+  while (index < len) {
+    uint32_t octet_a = data[index++];
+    uint32_t octet_b = 0;
+    uint32_t octet_c = 0;
+    bool have_b = false;
+    bool have_c = false;
+
+    if (index < len) {
+      octet_b = data[index++];
+      have_b = true;
+    }
+    if (index < len) {
+      octet_c = data[index++];
+      have_c = true;
+    }
+
+    uint32_t triple = (octet_a << 16) | (octet_b << 8) | octet_c;
+
+    out += kBase64Table[(triple >> 18) & 0x3F];
+    out += kBase64Table[(triple >> 12) & 0x3F];
+    out += have_b ? kBase64Table[(triple >> 6) & 0x3F] : '=';
+    out += have_c ? kBase64Table[triple & 0x3F] : '=';
+  }
+
+  while (out.length() > 0 && out.charAt(out.length() - 1) == '=') {
+    out.remove(out.length() - 1);
+  }
+  return out;
+}
+
+static bool isValidHexFingerprint(const String& value) {
+  if (value.length() != 64) {
+    return false;
+  }
+  for (size_t i = 0; i < value.length(); ++i) {
+    char c = value.charAt(i);
+    if (!isxdigit(static_cast<unsigned char>(c))) {
+      return false;
+    }
+  }
+  return true;
+}
+
 bool SSHTunnel::verifyHostKey() {
   const SSHServerConfig& sshConfig = config->getSSHConfig();
-  
-  // If verification disabled, accept any host key
+
   if (!sshConfig.verifyHostKey) {
     LOG_W("SSH", "Host key verification disabled - connection accepted without verification");
     return true;
   }
-  
-  // Get server host key
-  size_t host_key_len;
-  int host_key_type;
+
+  size_t host_key_len = 0;
+  int host_key_type = 0;
   if (!lockSession(pdMS_TO_TICKS(200))) {
     LOG_E("SSH", "Session lock timeout while reading host key");
     return false;
   }
   const char* host_key = libssh2_session_hostkey(session, &host_key_len, &host_key_type);
-  
-  if (!host_key) {
-    unlockSession();
+  const unsigned char* fingerprint_raw = reinterpret_cast<const unsigned char*>(
+      libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256));
+  unlockSession();
+
+  if (!host_key || host_key_len == 0) {
     LOG_E("SSH", "Failed to get host key from server");
     return false;
   }
-  
-  // Get SHA256 fingerprint
-  const char *fingerprint_sha256 = libssh2_hostkey_hash(session, LIBSSH2_HOSTKEY_HASH_SHA256);
-  unlockSession();
-  if (!fingerprint_sha256) {
+  if (!fingerprint_raw) {
     LOG_E("SSH", "Failed to get host key fingerprint");
     return false;
   }
-  
-  // Convert fingerprint to hexadecimal string
-  String currentFingerprint = "";
-  for (int i = 0; i < 32; i++) {  // SHA256 = 32 bytes
-    char hex[3];
-    sprintf(hex, "%02x", (unsigned char)fingerprint_sha256[i]);
-    currentFingerprint += hex;
-  }
-  
-  // Validate key type if specified
-  String keyTypeStr = "";
+
+  String fingerprintHex = encodeFingerprintHex(fingerprint_raw, 32);
+  String fingerprintBase64 = encodeFingerprintBase64(fingerprint_raw, 32);
+  String fingerprintOpenSSH = String("SHA256:") + fingerprintBase64;
+
+  String keyTypeStr;
   switch (host_key_type) {
     case LIBSSH2_HOSTKEY_TYPE_RSA:
       keyTypeStr = "ssh-rsa";
       break;
     case LIBSSH2_HOSTKEY_TYPE_DSS:
-      keyTypeStr = "ssh-dss"; 
+      keyTypeStr = "ssh-dss";
       break;
     case LIBSSH2_HOSTKEY_TYPE_ECDSA_256:
       keyTypeStr = "ecdsa-sha2-nistp256";
@@ -627,42 +695,91 @@ bool SSHTunnel::verifyHostKey() {
       keyTypeStr = "unknown";
       break;
   }
-  
+
   LOGF_I("SSH", "Server host key: %s", keyTypeStr.c_str());
-  LOGF_I("SSH", "Server fingerprint (SHA256): %s", currentFingerprint.c_str());
-  
-  // Validate key type again if user provided a filter
+  LOGF_I("SSH", "Server fingerprint (SHA256 hex): %s", fingerprintHex.c_str());
+  LOGF_I("SSH", "Server fingerprint (OpenSSH): %s", fingerprintOpenSSH.c_str());
+
   if (sshConfig.hostKeyType.length() > 0 && sshConfig.hostKeyType != keyTypeStr) {
-    LOGF_E("SSH", "Host key type mismatch! Expected: %s, Got: %s", 
+    LOGF_E("SSH", "Host key type mismatch! Expected: %s, Got: %s",
            sshConfig.hostKeyType.c_str(), keyTypeStr.c_str());
     return false;
   }
-  
-  // Verify fingerprint
+
   if (sshConfig.expectedHostKeyFingerprint.length() == 0) {
     LOG_W("SSH", "No expected fingerprint configured - accepting and storing current fingerprint");
-    LOGF_I("SSH", "Store this fingerprint in your configuration: %s", currentFingerprint.c_str());
+    LOGF_I("SSH", "Store this fingerprint (hex): %s", fingerprintHex.c_str());
+    LOGF_I("SSH", "Store this fingerprint (OpenSSH): %s", fingerprintOpenSSH.c_str());
     return true;
   }
-  
-  // Normalize fingerprints (remove spaces & colons, lowercase)
-  String expectedFP = sshConfig.expectedHostKeyFingerprint;
-  expectedFP.toLowerCase();
-  expectedFP.replace(" ", "");
-  expectedFP.replace(":", "");
-  
-  String currentFP = currentFingerprint;
-  currentFP.toLowerCase();
-  
-  if (expectedFP != currentFP) {
+
+  String expectedRaw = sshConfig.expectedHostKeyFingerprint;
+  expectedRaw.trim();
+  expectedRaw.replace("\r", "");
+  expectedRaw.replace("\n", "");
+
+  bool expectedIsBase64 = false;
+  String expectedComparable;
+
+  String lowered = expectedRaw;
+  lowered.toLowerCase();
+  if (lowered.startsWith("sha256:")) {
+    expectedIsBase64 = true;
+    expectedComparable = expectedRaw.substring(expectedRaw.indexOf(':') + 1);
+  } else {
+    String candidate = expectedRaw;
+    candidate.replace(" ", "");
+    candidate.replace(":", "");
+    String candidateLower = candidate;
+    candidateLower.toLowerCase();
+    if (isValidHexFingerprint(candidateLower)) {
+      expectedComparable = candidateLower;
+    } else {
+      expectedIsBase64 = true;
+      expectedComparable = expectedRaw;
+    }
+  }
+
+  if (expectedIsBase64) {
+    expectedComparable.trim();
+    if (expectedComparable.startsWith("SHA256:")) {
+      expectedComparable.remove(0, 7);
+    } else if (expectedComparable.startsWith("sha256:")) {
+      expectedComparable.remove(0, 7);
+    }
+    expectedComparable.replace(" ", "");
+    expectedComparable.replace("\r", "");
+    expectedComparable.replace("\n", "");
+    expectedComparable.replace("=", "");
+  } else {
+    expectedComparable.toLowerCase();
+    expectedComparable.replace(" ", "");
+    expectedComparable.replace(":", "");
+  }
+
+  bool fingerprintsMatch = expectedIsBase64
+                                ? (expectedComparable == fingerprintBase64)
+                                : (expectedComparable == fingerprintHex);
+
+  if (!fingerprintsMatch) {
     LOG_E("SSH", "HOST KEY VERIFICATION FAILED!");
     LOG_E("SSH", "This could indicate a Man-in-the-Middle attack!");
-    LOGF_E("SSH", "Expected: %s", expectedFP.c_str());
-    LOGF_E("SSH", "Got:      %s", currentFP.c_str());
+    if (expectedIsBase64) {
+      LOGF_E("SSH", "Expected (OpenSSH): SHA256:%s", expectedComparable.c_str());
+      LOGF_E("SSH", "Got      (OpenSSH): %s", fingerprintOpenSSH.c_str());
+    } else {
+      LOGF_E("SSH", "Expected (hex): %s", expectedComparable.c_str());
+      LOGF_E("SSH", "Got      (hex): %s", fingerprintHex.c_str());
+    }
     LOGF_E("SSH", "Key type: %s", keyTypeStr.c_str());
+
+    if (sshConfig.onHostKeyMismatch) {
+      const String actualForCallback = expectedIsBase64 ? fingerprintOpenSSH : fingerprintHex;
+      sshConfig.onHostKeyMismatch(expectedRaw, actualForCallback, keyTypeStr, sshConfig.hostKeyMismatchContext);
+    }
     return false;
   }
-  
+
   LOG_I("SSH", "Host key verification successful");
   return true;
 }
@@ -917,7 +1034,8 @@ bool SSHTunnel::createReverseTunnel() {
     return false;
   }
 
-  LOGF_I("SSH", "Reverse tunnel listener created on port %d", bound_port);
+  boundPort = bound_port;
+  LOGF_I("SSH", "Reverse tunnel listener created on port %d", boundPort);
   return true;
 }
 
@@ -929,6 +1047,7 @@ void SSHTunnel::cleanupSSH() {
     }
     listener = nullptr;
   }
+  boundPort = -1;
 
   if (session) {
     if (lockSession(pdMS_TO_TICKS(500))) {
@@ -1755,6 +1874,8 @@ void SSHTunnel::handleReconnection() {
 
 TunnelState SSHTunnel::getState() { return state; }
 
+int SSHTunnel::getBoundPort() const { return boundPort; }
+
 String SSHTunnel::getStateString() {
   switch (state) {
   case TUNNEL_DISCONNECTED:
@@ -2018,6 +2139,26 @@ void SSHTunnel::cleanupPartialInit(int maxChannels) {
   }
 }
 
+size_t SSHTunnel::getConfiguredRingBufferSize() const {
+  size_t configured = config->getConnectionConfig().tunnelRingBufferSize;
+  if (configured == 0) {
+    configured = 32 * 1024;
+  }
+  return configured;
+}
+
+uint16_t SSHTunnel::getDataTaskStackSize() const {
+  uint16_t configured = config->getConnectionConfig().dataTaskStackSize;
+  if (configured == 0) {
+    configured = 4096;
+  }
+  return configured;
+}
+
+int8_t SSHTunnel::getDataTaskCoreAffinity() const {
+  return config->getConnectionConfig().dataTaskCoreAffinity;
+}
+
 bool SSHTunnel::processChannelRead(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active || !ch.channel || ch.localSocket < 0) {
@@ -2039,7 +2180,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
   }
 
   bool success = false;
-  size_t bufferSize = FIXED_BUFFER_SIZE; // Use fixed buffer instead of adaptive
+  size_t bufferSize = getConfiguredRingBufferSize();
   unsigned long now = millis();
   bool remoteEofDetected = false;
 
@@ -3820,15 +3961,28 @@ bool SSHTunnel::startDataProcessingTask() {
   }
   
   dataProcessingTaskRunning = true;
-  
-  BaseType_t result = xTaskCreate(
-    dataProcessingTaskWrapper,
-    "SSH_DataProcessing",
-    4096, // Stack size
-    this,
-    tskIDLE_PRIORITY + 1, // FIXED: Reduced priority to avoid contention
-    &dataProcessingTask
-  );
+  uint16_t stackSize = getDataTaskStackSize();
+  int8_t coreAffinity = getDataTaskCoreAffinity();
+  BaseType_t result;
+
+  if (coreAffinity >= 0) {
+    result = xTaskCreatePinnedToCore(
+        dataProcessingTaskWrapper,
+        "SSH_DataProcessing",
+        stackSize,
+        this,
+        tskIDLE_PRIORITY + 1,
+        &dataProcessingTask,
+        coreAffinity);
+  } else {
+    result = xTaskCreate(
+        dataProcessingTaskWrapper,
+        "SSH_DataProcessing",
+        stackSize,
+        this,
+        tskIDLE_PRIORITY + 1,
+        &dataProcessingTask);
+  }
   
   if (result != pdPASS) {
     LOG_E("SSH", "Failed to create data processing task");
@@ -3836,7 +3990,7 @@ bool SSHTunnel::startDataProcessingTask() {
     return false;
   }
   
-  LOG_I("SSH", "Data processing task started successfully with reduced priority");
+  LOGF_I("SSH", "Data processing task started (stack=%u, core=%d)", stackSize, coreAffinity);
   return true;
 }
 

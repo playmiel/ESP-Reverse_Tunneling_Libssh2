@@ -4,6 +4,12 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include "logger.h"
+
+typedef void (*HostKeyMismatchCallback)(const String& expectedFingerprint,
+                                        const String& actualFingerprint,
+                                        const String& keyType,
+                                        void* context);
 
 // Structure for SSH configuration
 struct SSHServerConfig {
@@ -20,6 +26,8 @@ struct SSHServerConfig {
     bool verifyHostKey;     // Enable/disable verification
     String expectedHostKeyFingerprint; // Expected SHA256 fingerprint
     String hostKeyType;     // Expected key type (ssh-ed25519, ssh-rsa, etc.)
+    HostKeyMismatchCallback onHostKeyMismatch;
+    void* hostKeyMismatchContext;
     
     // Default constructor
     SSHServerConfig() : 
@@ -33,7 +41,9 @@ struct SSHServerConfig {
         publicKeyData(""),
         verifyHostKey(false),
         expectedHostKeyFingerprint(""),
-        hostKeyType("") {}
+        hostKeyType(""),
+        onHostKeyMismatch(nullptr),
+        hostKeyMismatchContext(nullptr) {}
 };
 
 // Structure for tunnel configuration
@@ -64,6 +74,11 @@ struct ConnectionConfig {
     uint8_t priorityWeightLow;
     uint8_t priorityWeightNormal;
     uint8_t priorityWeightHigh;
+    bool libssh2KeepAliveEnabled;
+    int libssh2KeepAliveIntervalSec;
+    size_t tunnelRingBufferSize;
+    uint16_t dataTaskStackSize;
+    int8_t dataTaskCoreAffinity; // -1 = no pinning
     size_t globalRateLimitBytesPerSec;
     size_t globalBurstBytes;
 
@@ -74,12 +89,17 @@ struct ConnectionConfig {
         maxReconnectAttempts(5),
         connectionTimeoutSec(30),
         bufferSize(8192),
-    maxChannels(10),  // Increased from 5 to 10 for large transfers
+        maxChannels(10),  // Increased from 5 to 10 for large transfers
         channelTimeoutMs(1800000),
         defaultChannelPriority(1),
         priorityWeightLow(1),
         priorityWeightNormal(2),
         priorityWeightHigh(4),
+        libssh2KeepAliveEnabled(true),
+        libssh2KeepAliveIntervalSec(30),
+        tunnelRingBufferSize(32 * 1024),
+        dataTaskStackSize(4096),
+        dataTaskCoreAffinity(-1),
         globalRateLimitBytesPerSec(0),
         globalBurstBytes(0) {}
 };
@@ -88,11 +108,13 @@ struct ConnectionConfig {
 struct DebugConfig {
     bool debugEnabled;
     int serialBaudRate;
+    LogLevel minLogLevel;
     
     // Default constructor
     DebugConfig() :
         debugEnabled(true),
-        serialBaudRate(115200) {}
+        serialBaudRate(115200),
+        minLogLevel(LOG_INFO) {}
 };
 
 // Main configuration class
@@ -117,24 +139,30 @@ public:
     void setHostKeyVerification(bool enable);
     void setExpectedHostKey(const String& fingerprint, const String& keyType = "");
     void setHostKeyVerification(const String& fingerprint, const String& keyType = "", bool enable = true);
-    
+    void setHostKeyMismatchCallback(HostKeyMismatchCallback callback, void* context = nullptr);
+
     // Tunnel configuration methods
     void setTunnelConfig(const String& remoteBindHost, int remoteBindPort, const String& localHost, int localPort);
     
     // Connection configuration methods
     void setConnectionConfig(int keepAliveInterval, int reconnectDelay, int maxReconnectAttempts, int connectionTimeout);
-    void setBufferConfig(int bufferSize, int maxChannels, int channelTimeout);
+    void setBufferConfig(int bufferSize, int maxChannels, int channelTimeout, size_t tunnelRingBufferSize = 32 * 1024);
+    void setKeepAliveOptions(bool enableLibssh2, int intervalSeconds);
+    void setDataTaskConfig(uint16_t stackSize, int8_t coreAffinity = -1);
     void setChannelPriorityProfile(uint8_t defaultPriority, uint8_t lowWeight = 1, uint8_t normalWeight = 2, uint8_t highWeight = 4);
     void setGlobalRateLimit(size_t bytesPerSecond, size_t burstBytes = 0);
 
     // Debug configuration methods
     void setDebugConfig(bool enabled, int baudRate);
+    void setLogLevel(LogLevel level);
     
     // Getters to access configurations
     const SSHServerConfig& getSSHConfig() const { return sshConfig; }
     const TunnelConfig& getTunnelConfig() const { return tunnelConfig; }
     const ConnectionConfig& getConnectionConfig() const { return connectionConfig; }
     const DebugConfig& getDebugConfig() const { return debugConfig; }
+    HostKeyMismatchCallback getHostKeyMismatchCallback() const { return sshConfig.onHostKeyMismatch; }
+    void* getHostKeyMismatchContext() const { return sshConfig.hostKeyMismatchContext; }
     
     // Validation methods
     bool validateConfiguration() const;

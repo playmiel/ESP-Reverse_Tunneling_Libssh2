@@ -109,6 +109,7 @@ public:
     void loop();
     TunnelState getState();
     String getStateString();
+    int getBoundPort() const;
     
     // Statistics
     unsigned long getBytesReceived();
@@ -239,7 +240,6 @@ private:
     // OPTIMIZED: Higher flow control thresholds
     static const size_t HIGH_WATER_LOCAL = 28 * 1024;  // 28KB (increased)
     static const size_t LOW_WATER_LOCAL = 14 * 1024;   // 14KB (50% of HIGH_WATER)
-    static const size_t FIXED_BUFFER_SIZE = 32 * 1024;  // Fixed 32KB buffer for ring and scratch allocations
     
     // NEW: Dedicated task for data processing
     TaskHandle_t dataProcessingTask;
@@ -251,6 +251,7 @@ private:
     unsigned long lastGlobalRefillMs;
     bool globalThrottleActive;
     unsigned long lastGlobalThrottleLogMs;
+    int boundPort;
 
     // Protection methods
     bool lockTunnel();
@@ -273,6 +274,9 @@ private:
     // NEW: Method to force release of blocked mutexes
     void safeRetryMutexAccess(int channelIndex); // FIXED: Safe version instead of forceMutexRelease
     void cleanupPartialInit(int maxChannels);
+    size_t getConfiguredRingBufferSize() const;
+    uint16_t getDataTaskStackSize() const;
+    int8_t getDataTaskCoreAffinity() const;
 
     // SSH write/drain tuning parameters
     static constexpr int SSH_MAX_WRITES_PER_PASS = 8;      // Max drain iterations per loop

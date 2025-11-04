@@ -12,7 +12,7 @@
 // 1 = LIGHT: error logs if malloc fails, no heap check or memset
 // 2 = FULL (default): periodic heap check and memset of allocated buffers
 #ifndef MEMFIX_LEVEL
-#define MEMFIX_LEVEL 0
+#define MEMFIX_LEVEL 2
 #endif
 
 // Macros to improve memory management
