@@ -88,7 +88,7 @@ SSHTunnel::SSHTunnel()
       dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false),
       globalRateLimitBytesPerSec(0), globalBurstBytes(0), globalTokens(0),
       lastGlobalRefillMs(0), globalThrottleActive(false),
-      lastGlobalThrottleLogMs(0), boundPort(-1) {
+      lastGlobalThrottleLogMs(0), boundPort(-1), ringBufferCapacity(0) {
 
   // OPTIMIZED: Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
@@ -146,6 +146,8 @@ SSHTunnel::~SSHTunnel() {
   SAFE_FREE(rxBuffer);
   SAFE_FREE(txBuffer);
 
+  ringBufferCapacity = 0;
+
   if (libssh2Initialized) {
     libssh2_exit();
     libssh2Initialized = false;
@@ -178,6 +180,7 @@ bool SSHTunnel::init() {
   memset(channels, 0, channelsSize);
 
   size_t ringBufferSize = getConfiguredRingBufferSize();
+  ringBufferCapacity = ringBufferSize;
   LOGF_I("SSH", "Configuring %d channels with ring buffers of %u bytes",
          maxChannels, (unsigned)ringBufferSize);
 
@@ -2318,6 +2321,10 @@ void SSHTunnel::cleanupPartialInit(int maxChannels) {
 }
 
 size_t SSHTunnel::getConfiguredRingBufferSize() const {
+  if (ringBufferCapacity > 0) {
+    return ringBufferCapacity;
+  }
+
   size_t configured = config->getConnectionConfig().tunnelRingBufferSize;
   if (configured == 0) {
     configured = 32 * 1024;

@@ -264,6 +264,7 @@ private:
   bool globalThrottleActive;
   unsigned long lastGlobalThrottleLogMs;
   int boundPort;
+  size_t ringBufferCapacity;
 
   // Protection methods
   bool lockTunnel();
