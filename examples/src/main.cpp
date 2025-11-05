@@ -161,22 +161,22 @@ void configureSSHTunnel() {
 
   // Channel priority profile (optional tuning)
   globalSSHConfig.setChannelPriorityProfile(
-    1,  // Default priority for new channels (0=low, 1=normal, 2=high)
-    1,  // Weight applied to low priority channels
-    2,  // Weight applied to normal priority channels
-    4   // Weight applied to high priority channels
+      1,  // Default priority for new channels (0=low, 1=normal, 2=high)
+      1,  // Weight applied to low priority channels
+      2,  // Weight applied to normal priority channels
+      4   // Weight applied to high priority channels
   );
 
   // Global rate limit (optional, disabled when bytesPerSecond = 0)
   globalSSHConfig.setGlobalRateLimit(
-    64 * 1024,  // Bytes per second across all channels
-    96 * 1024   // Burst budget (optional); defaults to rate if zero
+      64 * 1024,  // Bytes per second across all channels
+      96 * 1024   // Burst budget (optional); defaults to rate if zero
   );
   
   // Debug configuration
   globalSSHConfig.setDebugConfig(
-  true,   // Debug enabled
-  115200  // Serial baud rate
+      true,    // Debug enabled
+      115200   // Serial baud rate
   );
   
   LOG_I("CONFIG", "Configuration complete");
@@ -199,9 +199,9 @@ void reportStats() {
   if (freeHeap > 10000) { // Only if we have enough memory
     LOGF_I("STATS", "Tunnel State: %s", tunnel.getStateString().c_str());
     LOGF_I("STATS", "Active Channels: %d", tunnel.getActiveChannels());
-  LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
-  LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
-  LOGF_I("STATS", "Bytes Dropped: %lu", tunnel.getBytesDropped());
+    LOGF_I("STATS", "Bytes Sent: %lu", tunnel.getBytesSent());
+    LOGF_I("STATS", "Bytes Received: %lu", tunnel.getBytesReceived());
+    LOGF_I("STATS", "Bytes Dropped: %lu", tunnel.getBytesDropped());
   }
 
   // Throughput calculation (approximate)
