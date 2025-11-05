@@ -3,25 +3,20 @@
 
 #include <Arduino.h>
 
-enum LogLevel {
-    LOG_ERROR = 0,
-    LOG_WARN = 1,
-    LOG_INFO = 2,
-    LOG_DEBUG = 3
-};
+enum LogLevel { LOG_ERROR = 0, LOG_WARN = 1, LOG_INFO = 2, LOG_DEBUG = 3 };
 
 class Logger {
 public:
-    static void init();
-    static void log(LogLevel level, const char* tag, const char* message);
-    static void logf(LogLevel level, const char* tag, const char* format, ...);
-    static void error(const char* tag, const char* message);
-    static void warn(const char* tag, const char* message);
-    static void info(const char* tag, const char* message);
-    static void debug(const char* tag, const char* message);
+  static void init();
+  static void log(LogLevel level, const char *tag, const char *message);
+  static void logf(LogLevel level, const char *tag, const char *format, ...);
+  static void error(const char *tag, const char *message);
+  static void warn(const char *tag, const char *message);
+  static void info(const char *tag, const char *message);
+  static void debug(const char *tag, const char *message);
 
 private:
-    static const char* getLevelString(LogLevel level);
+  static const char *getLevelString(LogLevel level);
 };
 
 // Convenience macros
