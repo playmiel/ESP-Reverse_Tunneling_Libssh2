@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, develop, dev ]
   pull_request:
     branches: [ "**" ]
   workflow_dispatch:
@@ -13,11 +13,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: arduino-3
-            platform_url: https://github.com/pioarduino/platform-espressif32/releases/download/55.03.30-2/platform-espressif32.zip
-          - name: arduino-rc
-            platform_url: https://github.com/pioarduino/platform-espressif32/releases/download/53.03.10-rc3/platform-espressif32.zip
+        environment:
+          - arduino-3
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -25,14 +22,14 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.x'
+          python-version: '3.11'
 
       - name: Cache PlatformIO
         uses: actions/cache@v4
         with:
           path: |
-            ~/.platformio/.cache
-          key: pio-${{ runner.os }}-${{ hashFiles('**/platformio.ini') }}
+            ~/.platformio
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini', 'examples/platformio.ini') }}
           restore-keys: |
             pio-${{ runner.os }}-
 
@@ -41,11 +38,39 @@ jobs:
           python -m pip install --upgrade pip
           pip install platformio
 
-      - name: Show PlatformIO Core version
-        run: pio --version
-
-      - name: Build ${{ matrix.name }}
+      - name: Install dependencies
         run: |
-          pio run -e ${{ matrix.name }}
+          pio pkg install
+          pio pkg install -d examples
 
-      # Optional: build both envs in matrix already covers examples
+      - name: Build ${{ matrix.environment }}
+        run: pio run -e ${{ matrix.environment }}
+
+      - name: Build PlatformIO example
+        run: pio run -e esp32dev -d examples
+
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install lint tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install codespell
+          sudo apt-get update
+          sudo apt-get install -y clang-format
+
+      - name: Run codespell
+        run: |
+          codespell --quiet-level=2 --skip=".git,.pio,build,lib" --ignore-words-list=hte
+
+      - name: Run clang-format dry-run
+        run: |
+          find src include examples -type f \( -name '*.c' -o -name '*.cpp' -o -name '*.h' -o -name '*.hpp' \) -print0 | xargs -0 -r clang-format --dry-run --Werror

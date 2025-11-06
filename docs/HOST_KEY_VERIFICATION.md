@@ -116,7 +116,7 @@ public:
 
 | Parameter | Type | Description |
 |-----------|------|-------------|
-| `fingerprint` | String | SHA256 fingerprint (64 hex characters) |
+| `fingerprint` | String | SHA256 fingerprint (`SHA256:base64` or 64 hex characters) |
 | `keyType` | String | Key type: "ssh-ed25519", "ssh-rsa", "ecdsa-sha2-*" |
 | `enable` | bool | Enable/disable verification |
 
@@ -137,7 +137,8 @@ public:
 
 ```text
 [INFO] Server host key: ssh-ed25519
-[INFO] Server fingerprint (SHA256): abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
+[INFO] Server fingerprint (SHA256 hex): abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
+[INFO] Server fingerprint (OpenSSH): SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
 [INFO] Host key verification successful
 ```
 
@@ -146,8 +147,8 @@ public:
 ```text
 [ERROR] HOST KEY VERIFICATION FAILED!
 [ERROR] This could indicate a Man-in-the-Middle attack!
-[ERROR] Expected: abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
-[ERROR] Got:      xyz9876fedcba5432109876543210abcdef1234567890abcdef12
+[ERROR] Expected (OpenSSH): SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
+[ERROR] Got      (OpenSSH): SHA256:xyz9876fedcba5432109876543210abcdef1234567890abcdef12
 [ERROR] Key type: ssh-ed25519
 ```
 
@@ -156,9 +157,10 @@ public:
 ```text
 [WARN] Host key verification disabled - connection accepted without verification
 [INFO] Server host key: ssh-ed25519
-[INFO] Server fingerprint (SHA256): abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
+[INFO] Server fingerprint (SHA256 hex): abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
+[INFO] Server fingerprint (OpenSSH): SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
 [WARN] No expected fingerprint configured - accepting and storing current fingerprint
-[INFO] Store this fingerprint in your configuration: abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
+[INFO] Store this fingerprint in your configuration: SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56
 ```
 
 ## Usage Examples
@@ -186,7 +188,7 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
     
     // Mandatory verification in production
     globalSSHConfig.setHostKeyVerification(
-        "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+        "SHA256:a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef",
         "ssh-ed25519",
         true
     );
@@ -206,7 +208,25 @@ void configureDevSSH() {
     // TODO: Replace with real fingerprint once obtained
     // globalSSHConfig.setHostKeyVerification("FINGERPRINT_HERE", "ssh-ed25519", true);
 }
+
+### Host key mismatch callback (optional)
+
+Register `setHostKeyMismatchCallback()` to be notified when the fingerprint on the wire does not
+match the expected value. The callback runs on the SSH worker context and is intended for logging or
+telemetry; it does not override the verification result.
+
+```cpp
+globalSSHConfig.setHostKeyMismatchCallback(
+    [](const String& expected, const String& actual, const String& keyType, void* ctx) {
+        (void)ctx; // Optional user context pointer
+        LOGF_W("HOSTKEY", "Expected %s for %s, got %s", expected.c_str(), keyType.c_str(), actual.c_str());
+    },
+    myContextPointer
+);
 ```
+
+The `expected` string mirrors what you configured (hex or `SHA256:` syntax) while `actual` follows
+the OpenSSH format (`SHA256:...`).
 
 ### Example 3: Flexible configuration
 
@@ -218,7 +238,7 @@ void configureFlexibleSSH() {
     #ifdef PRODUCTION
     // Strict verification in production
         globalSSHConfig.setHostKeyVerification(
-            "a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef123456",
+            "SHA256:a1b2c3d4e5f6789012345678901234567890abcdef1234567890abcdef",
             "ssh-ed25519",
             true
         );
@@ -241,7 +261,7 @@ void configureFlexibleSSH() {
 
 2. **Use full fingerprints**
 
-    - Prefer SHA256 (64 hex chars)
+    - Prefer SHA256 (`SHA256:base64` or 64 hex chars)
     - Avoid SHA1 (deprecated)
 
 3. **Specify key type**

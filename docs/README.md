@@ -49,7 +49,7 @@ globalSSHConfig.setSSHKeyAuthFromMemory(
 
 // Server identity verification
 globalSSHConfig.setHostKeyVerification(
-    "server_sha256_fingerprint",
+    "SHA256:server_fingerprint",
     "ssh-ed25519",
     true
 );
@@ -232,6 +232,7 @@ globalSSHConfig.setBufferConfig(
     5,     // Max channels: 5
     300000 // Channel timeout: 5min
 );
+// Optional 4th argument lets you override the per-channel ring buffer size.
 ```
 
 ## 📞 Support
@@ -246,4 +247,4 @@ For questions or issues:
 ---
 
 **Documentation version:** 1.0  
-**Last update:** 2025-01-31
+**Last update:** 2025-02-04
