@@ -5,6 +5,10 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
+#ifndef ENABLE_MULTI_TUNNEL_DEMO
+#define ENABLE_MULTI_TUNNEL_DEMO 1
+#endif
+
 // WiFi configuration
 const char *ssid = "YOUR_WIFI_SSID";
 const char *password = "YOUR_WIFI_PASSWORD";
@@ -19,6 +23,18 @@ const unsigned long STATS_INTERVAL = 10000; // 10 seconds
 void connectWiFi();
 void reportStats();
 void configureSSHTunnel();
+void configureMultiTunnelMappings();
+void registerTunnelCallbacks();
+const char *closeReasonToString(ChannelCloseReason reason);
+
+// Simple event handlers to showcase the callback surface
+void onSessionConnected();
+void onSessionDisconnected();
+void onChannelOpened(int channel);
+void onChannelClosed(int channel, ChannelCloseReason reason);
+void onTunnelError(int code, const char *detail);
+void onLargeTransferStart(int channel);
+void onLargeTransferEnd(int channel);
 
 void setup() {
   Serial.begin(115200);
@@ -139,12 +155,14 @@ void configureSSHTunnel() {
   //   LOG_E("CONFIG", "Failed to load SSH keys from LittleFS");
   // }
 
-  // Tunnel configuration
-  globalSSHConfig.setTunnelConfig("0.0.0.0", // Bind address on remote server
-                                  8080,      // Bind port on remote server
-                                  "192.168.1.100", // Local address to tunnel
-                                  80               // Local port to tunnel
-  );
+  if (ENABLE_MULTI_TUNNEL_DEMO) {
+    configureMultiTunnelMappings();
+  } else {
+    globalSSHConfig.setTunnelConfig("0.0.0.0",      // Bind address on remote
+                                    8080,           // Remote bind port
+                                    "192.168.1.100", // Local host
+                                    80);            // Local port
+  }
 
   // Connection configuration
   globalSSHConfig.setConnectionConfig(30,   // Keep-alive interval (seconds)
@@ -178,7 +196,36 @@ void configureSSHTunnel() {
                                  115200 // Serial baud rate
   );
 
+  registerTunnelCallbacks();
   LOG_I("CONFIG", "Configuration complete");
+}
+
+void configureMultiTunnelMappings() {
+  LOG_I("CONFIG", "Configuring multi-tunnel demo mappings");
+
+  globalSSHConfig.clearTunnelMappings();
+  globalSSHConfig.setMaxReverseListeners(3);
+
+  globalSSHConfig.addTunnelMapping("0.0.0.0", 22080, // Remote listener #1
+                                   "192.168.1.100", 80); // HTTP cam
+
+  globalSSHConfig.addTunnelMapping("0.0.0.0", 22081, // Remote listener #2
+                                   "192.168.1.150", 5020); // Modbus TCP
+
+  globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, // Localhost bind
+                                   "192.168.1.200", 22); // SSH hop
+}
+
+void registerTunnelCallbacks() {
+  SSHTunnelEvents events{};
+  events.onSessionConnected = onSessionConnected;
+  events.onSessionDisconnected = onSessionDisconnected;
+  events.onChannelOpened = onChannelOpened;
+  events.onChannelClosed = onChannelClosed;
+  events.onError = onTunnelError;
+  events.onLargeTransferStart = onLargeTransferStart;
+  events.onLargeTransferEnd = onLargeTransferEnd;
+  tunnel.setEventHandlers(events);
 }
 
 void reportStats() {
@@ -239,4 +286,48 @@ void reportStats() {
   if (largestFreeBlock < freeHeap / 2) {
     LOG_W("MEMORY", "HEAP FRAGMENTATION DETECTED!");
   }
+}
+
+const char *closeReasonToString(ChannelCloseReason reason) {
+  switch (reason) {
+  case ChannelCloseReason::RemoteClosed:
+    return "RemoteClosed";
+  case ChannelCloseReason::LocalClosed:
+    return "LocalClosed";
+  case ChannelCloseReason::Error:
+    return "Error";
+  case ChannelCloseReason::Timeout:
+    return "Timeout";
+  case ChannelCloseReason::Manual:
+    return "Manual";
+  default:
+    return "Unknown";
+  }
+}
+
+void onSessionConnected() { LOG_I("CALLBACK", "SSH session established"); }
+
+void onSessionDisconnected() {
+  LOG_I("CALLBACK", "SSH session disconnected");
+}
+
+void onChannelOpened(int channel) {
+  LOGF_I("CALLBACK", "Channel %d opened", channel);
+}
+
+void onChannelClosed(int channel, ChannelCloseReason reason) {
+  LOGF_I("CALLBACK", "Channel %d closed (%s)", channel,
+         closeReasonToString(reason));
+}
+
+void onTunnelError(int code, const char *detail) {
+  LOGF_W("CALLBACK", "Tunnel error %d: %s", code, detail ? detail : "(none)");
+}
+
+void onLargeTransferStart(int channel) {
+  LOGF_I("CALLBACK", "Channel %d started a large transfer", channel);
+}
+
+void onLargeTransferEnd(int channel) {
+  LOGF_I("CALLBACK", "Channel %d finished the large transfer", channel);
 }

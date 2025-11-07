@@ -33,6 +33,35 @@ Edit `src/main.cpp` and adjust:
 - Tunnel parameters (`setTunnelConfig`)
 - Optional tuning (`setBufferConfig`, `setKeepAliveOptions`, `setLogLevel`, …)
 
+### Multi-tunnel demo
+
+`src/main.cpp` now ships with an optional multi-tunnel scenario guarded by the
+`ENABLE_MULTI_TUNNEL_DEMO` flag at the top of the file. When the flag is set to
+`1` (default), `configureMultiTunnelMappings()` clears the legacy single tunnel,
+enables up to three reverse listeners via `setMaxReverseListeners()`, and adds
+several sample mappings:
+
+```cpp
+globalSSHConfig.clearTunnelMappings();
+globalSSHConfig.setMaxReverseListeners(3);
+
+globalSSHConfig.addTunnelMapping("0.0.0.0", 22080, "192.168.1.100", 80);
+globalSSHConfig.addTunnelMapping("0.0.0.0", 22081, "192.168.1.150", 5020);
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, "192.168.1.200", 22);
+```
+
+If you prefer the original single-listener behaviour, set
+`#define ENABLE_MULTI_TUNNEL_DEMO 0` and the sketch will revert to
+`setTunnelConfig()`.
+
+### Callback helpers
+
+To illustrate the new `SSHTunnelEvents` interface, the example registers a
+handful of lightweight callbacks (`registerTunnelCallbacks()`), printing when
+the SSH session connects/disconnects, when channels open/close (with reasons),
+and when large transfers start or end. Replace the logging lambdas with your
+own application logic if you need deeper integration.
+
 ## Troubleshooting
 
 - Make sure the root library dependencies are installed (`pio pkg install`,
