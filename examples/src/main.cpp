@@ -158,10 +158,10 @@ void configureSSHTunnel() {
   if (ENABLE_MULTI_TUNNEL_DEMO) {
     configureMultiTunnelMappings();
   } else {
-    globalSSHConfig.setTunnelConfig("0.0.0.0",      // Bind address on remote
-                                    8080,           // Remote bind port
+    globalSSHConfig.setTunnelConfig("0.0.0.0",       // Bind address on remote
+                                    8080,            // Remote bind port
                                     "192.168.1.100", // Local host
-                                    80);            // Local port
+                                    80);             // Local port
   }
 
   // Connection configuration
@@ -206,13 +206,13 @@ void configureMultiTunnelMappings() {
   globalSSHConfig.clearTunnelMappings();
   globalSSHConfig.setMaxReverseListeners(3);
 
-  globalSSHConfig.addTunnelMapping("0.0.0.0", 22080, // Remote listener #1
+  globalSSHConfig.addTunnelMapping("0.0.0.0", 22080,     // Remote listener #1
                                    "192.168.1.100", 80); // HTTP cam
 
-  globalSSHConfig.addTunnelMapping("0.0.0.0", 22081, // Remote listener #2
+  globalSSHConfig.addTunnelMapping("0.0.0.0", 22081,      // Remote listener #2
                                    "192.168.1.150", 502); // Modbus TCP
 
-  globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, // Localhost bind
+  globalSSHConfig.addTunnelMapping("127.0.0.1", 22082,   // Localhost bind
                                    "192.168.1.200", 22); // SSH hop
 }
 
@@ -307,9 +307,7 @@ const char *closeReasonToString(ChannelCloseReason reason) {
 
 void onSessionConnected() { LOG_I("CALLBACK", "SSH session established"); }
 
-void onSessionDisconnected() {
-  LOG_I("CALLBACK", "SSH session disconnected");
-}
+void onSessionDisconnected() { LOG_I("CALLBACK", "SSH session disconnected"); }
 
 void onChannelOpened(int channel) {
   LOGF_I("CALLBACK", "Channel %d opened", channel);

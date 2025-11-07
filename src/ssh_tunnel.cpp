@@ -1082,8 +1082,7 @@ bool SSHTunnel::createReverseTunnel() {
   }
 
   int listenerLimit = config->getConnectionConfig().maxReverseListeners;
-  int desired = std::min(listenerLimit,
-                         static_cast<int>(mappings.size()));
+  int desired = std::min(listenerLimit, static_cast<int>(mappings.size()));
   if (desired <= 0) {
     LOG_E("SSH", "maxReverseListeners must be positive to create listeners");
     return false;
@@ -1095,9 +1094,8 @@ bool SSHTunnel::createReverseTunnel() {
     if (!createListenerForMapping(entry.mapping, entry)) {
       LOGF_E("SSH",
              "Failed to create reverse listener for mapping %s:%d -> %s:%d",
-             entry.mapping.remoteBindHost.c_str(),
-             entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
-             entry.mapping.localPort);
+             entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
+             entry.mapping.localHost.c_str(), entry.mapping.localPort);
       cancelAllListeners();
       return false;
     }
@@ -1250,8 +1248,7 @@ void SSHTunnel::commitGlobalTokens(size_t used) {
 
 bool SSHTunnel::createListenerForMapping(const TunnelConfig &mapping,
                                          ListenerEntry &entry) {
-  const int maxlisten =
-      std::max(1, config->getConnectionConfig().maxChannels);
+  const int maxlisten = std::max(1, config->getConnectionConfig().maxChannels);
   const char *bindHost = mapping.remoteBindHost.c_str();
   int bindPort = mapping.remoteBindPort;
   int boundPortResult = 0;
@@ -1323,8 +1320,7 @@ int SSHTunnel::acquireChannelSlot() {
   }
 
   for (int i = 0; i < maxChannels; ++i) {
-    if (channels[i].active &&
-        (now - channels[i].lastActivity) > 30000) {
+    if (channels[i].active && (now - channels[i].lastActivity) > 30000) {
       LOGF_I("SSH", "Recycling inactive channel %d", i);
       closeChannel(i, ChannelCloseReason::Timeout);
       return i;
@@ -1445,9 +1441,8 @@ bool SSHTunnel::bindChannelToMapping(LIBSSH2_CHANNEL *channel,
   }
 
   LOGF_I("SSH", "New tunnel connection channel %d (%s:%d -> %s:%d)",
-         channelIndex, mapping.remoteBindHost.c_str(),
-         mapping.remoteBindPort, mapping.localHost.c_str(),
-         mapping.localPort);
+         channelIndex, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+         mapping.localHost.c_str(), mapping.localPort);
   emitChannelOpened(channelIndex);
   return true;
 }
@@ -1470,8 +1465,7 @@ void SSHTunnel::emitChannelOpened(int channelIndex) {
   }
 }
 
-void SSHTunnel::emitChannelClosed(int channelIndex,
-                                  ChannelCloseReason reason) {
+void SSHTunnel::emitChannelClosed(int channelIndex, ChannelCloseReason reason) {
   if (eventHandlers.onChannelClosed) {
     eventHandlers.onChannelClosed(channelIndex, reason);
   }
@@ -1792,8 +1786,7 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   }
 }
 
-void SSHTunnel::closeChannel(int channelIndex,
-                                        ChannelCloseReason reason) {
+void SSHTunnel::closeChannel(int channelIndex, ChannelCloseReason reason) {
   if (!channels || channelIndex < 0 ||
       channelIndex >= config->getConnectionConfig().maxChannels) {
     return;
@@ -1830,8 +1823,8 @@ void SSHTunnel::closeChannel(int channelIndex,
     vTaskDelay(pdMS_TO_TICKS(10));
     close(socketToClose);
 
-    LOGF_D("SSH", "Channel %d: Local socket %d closed safely",
-           channelIndex, socketToClose);
+    LOGF_D("SSH", "Channel %d: Local socket %d closed safely", channelIndex,
+           socketToClose);
   }
 
   if (ch.largeTransferInProgress) {
@@ -1893,7 +1886,6 @@ void SSHTunnel::closeChannel(int channelIndex,
   memset(&ch.endpoint, 0, sizeof(ch.endpoint));
   emitChannelClosed(channelIndex, reason);
 }
-
 
 void SSHTunnel::cleanupInactiveChannels() {
   unsigned long now = millis();
