@@ -3,6 +3,7 @@
 #include "memory_fixes.h"
 #include "network_optimizations.h"
 #include <algorithm>
+#include <cstdio>
 #include <cstring>
 #include <ctype.h>
 #include <errno.h>
@@ -78,17 +79,18 @@ static const unsigned long kInteractiveActivityWindowMs = 800;
 #endif
 
 SSHTunnel::SSHTunnel()
-    : session(nullptr), listener(nullptr), socketfd(-1),
-      state(TUNNEL_DISCONNECTED), lastKeepAlive(0), lastConnectionAttempt(0),
-      reconnectAttempts(0), bytesReceived(0), bytesSent(0), droppedBytes(0),
-      channels(nullptr), rxBuffer(nullptr), txBuffer(nullptr),
-      tunnelMutex(nullptr), statsMutex(nullptr), sessionMutex(nullptr),
+    : session(nullptr), socketfd(-1), state(TUNNEL_DISCONNECTED),
+      lastKeepAlive(0), lastConnectionAttempt(0), reconnectAttempts(0),
+      bytesReceived(0), bytesSent(0), droppedBytes(0), channels(nullptr),
+      rxBuffer(nullptr), txBuffer(nullptr), tunnelMutex(nullptr),
+      statsMutex(nullptr), sessionMutex(nullptr),
       pendingConnectionsMutex(nullptr), config(&globalSSHConfig),
       libssh2Initialized(false), dataProcessingTask(nullptr),
       dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false),
       globalRateLimitBytesPerSec(0), globalBurstBytes(0), globalTokens(0),
       lastGlobalRefillMs(0), globalThrottleActive(false),
-      lastGlobalThrottleLogMs(0), boundPort(-1), ringBufferCapacity(0) {
+      lastGlobalThrottleLogMs(0), boundPort(-1), ringBufferCapacity(0),
+      eventHandlers() {
 
   // OPTIMIZED: Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
@@ -354,16 +356,26 @@ bool SSHTunnel::connectSSH() {
   reconnectAttempts = 0;
   lastKeepAlive = millis();
 
-  TunnelConfig tunnelConf = config->getTunnelConfig();
-  LOGF_I("SSH", "Reverse tunnel established: %s:%d -> %s:%d",
-         tunnelConf.remoteBindHost.c_str(), tunnelConf.remoteBindPort,
-         tunnelConf.localHost.c_str(), tunnelConf.localPort);
+  if (listeners.empty()) {
+    LOG_W("SSH", "Reverse tunnel established without active listeners");
+  } else {
+    for (size_t i = 0; i < listeners.size(); ++i) {
+      const ListenerEntry &entry = listeners[i];
+      LOGF_I("SSH", "Reverse tunnel #%u: %s:%d (bound %d) -> %s:%d",
+             (unsigned)i, entry.mapping.remoteBindHost.c_str(),
+             entry.mapping.remoteBindPort, entry.boundPort,
+             entry.mapping.localHost.c_str(), entry.mapping.localPort);
+    }
+  }
+
+  emitSessionConnected();
 
   return true;
 }
 
 void SSHTunnel::disconnect() {
   LOG_I("SSH", "Disconnecting SSH tunnel...");
+  bool wasConnected = (state == TUNNEL_CONNECTED);
 
   // Close all channels with protection to avoid NULL pointer issues
   if (channels != nullptr) {
@@ -381,6 +393,9 @@ void SSHTunnel::disconnect() {
     socketfd = -1;
   }
   state = TUNNEL_DISCONNECTED;
+  if (wasConnected) {
+    emitSessionDisconnected();
+  }
 
   LOG_I("SSH", "SSH tunnel disconnected");
 }
@@ -1057,47 +1072,53 @@ bool SSHTunnel::authenticateSSH() {
 }
 
 bool SSHTunnel::createReverseTunnel() {
-  int bound_port;
-  int maxlisten = 10; // Max number of connections to listen for
+  cancelAllListeners();
+  boundPort = -1;
 
-  // Use runtime configuration instead of hardcoded constants
-  const TunnelConfig &tunnelConfig = config->getTunnelConfig();
-  int ssh_port = tunnelConfig.remoteBindPort;
-  const char *bind_host = tunnelConfig.remoteBindHost.c_str();
-
-  do {
-    if (!lockSession(pdMS_TO_TICKS(500))) {
-      LOG_W("SSH",
-            "Session lock timeout while creating reverse tunnel listener");
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
-    }
-    listener = libssh2_channel_forward_listen_ex(session, bind_host, ssh_port,
-                                                 &bound_port, maxlisten);
-    unlockSession();
-    if (!listener) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
-  } while (!listener);
-
-  if (!listener) {
-    LOG_E("SSH", "Failed to create reverse tunnel listener");
+  const std::vector<TunnelConfig> &mappings = config->getTunnelMappings();
+  if (mappings.empty()) {
+    LOG_E("SSH", "No tunnel mappings configured");
     return false;
   }
 
-  boundPort = bound_port;
-  LOGF_I("SSH", "Reverse tunnel listener created on port %d", boundPort);
-  return true;
+  int listenerLimit = config->getConnectionConfig().maxReverseListeners;
+  int desired = std::min(listenerLimit,
+                         static_cast<int>(mappings.size()));
+  if (desired <= 0) {
+    LOG_E("SSH", "maxReverseListeners must be positive to create listeners");
+    return false;
+  }
+
+  for (int i = 0; i < desired; ++i) {
+    ListenerEntry entry;
+    entry.mapping = mappings[i];
+    if (!createListenerForMapping(entry.mapping, entry)) {
+      LOGF_E("SSH",
+             "Failed to create reverse listener for mapping %s:%d -> %s:%d",
+             entry.mapping.remoteBindHost.c_str(),
+             entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+             entry.mapping.localPort);
+      cancelAllListeners();
+      return false;
+    }
+    listeners.push_back(entry);
+    if (boundPort < 0) {
+      boundPort = entry.boundPort;
+    }
+  }
+
+  if (static_cast<int>(mappings.size()) > desired) {
+    LOGF_W("SSH",
+           "Only %d/%zu reverse listeners created due to "
+           "maxReverseListeners limit",
+           desired, mappings.size());
+  }
+
+  return !listeners.empty();
 }
 
 void SSHTunnel::cleanupSSH() {
-  if (listener) {
-    if (lockSession(pdMS_TO_TICKS(500))) {
-      libssh2_channel_forward_cancel(listener);
-      unlockSession();
-    }
-    listener = nullptr;
-  }
+  cancelAllListeners();
   boundPort = -1;
 
   if (session) {
@@ -1227,6 +1248,253 @@ void SSHTunnel::commitGlobalTokens(size_t used) {
   }
 }
 
+bool SSHTunnel::createListenerForMapping(const TunnelConfig &mapping,
+                                         ListenerEntry &entry) {
+  const int maxlisten =
+      std::max(1, config->getConnectionConfig().maxChannels);
+  const char *bindHost = mapping.remoteBindHost.c_str();
+  int bindPort = mapping.remoteBindPort;
+  int boundPortResult = 0;
+  LIBSSH2_LISTENER *handle = nullptr;
+  const int maxAttempts = 50;
+  int attempts = 0;
+
+  while (!handle && attempts < maxAttempts) {
+    ++attempts;
+    if (!lockSession(pdMS_TO_TICKS(500))) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    handle = libssh2_channel_forward_listen_ex(session, bindHost, bindPort,
+                                               &boundPortResult, maxlisten);
+    unlockSession();
+    if (!handle) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+  }
+
+  if (!handle) {
+    LOGF_E("SSH", "Unable to create reverse listener for %s:%d -> %s:%d",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+           mapping.localHost.c_str(), mapping.localPort);
+    emitErrorEvent(-1, "Failed to create reverse listener");
+    return false;
+  }
+
+  entry.listener = handle;
+  entry.mapping = mapping;
+  entry.boundPort = boundPortResult;
+  LOGF_I("SSH", "Reverse listener ready %s:%d (bound %d) -> %s:%d",
+         mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+         boundPortResult, mapping.localHost.c_str(), mapping.localPort);
+  return true;
+}
+
+void SSHTunnel::cancelListener(ListenerEntry &entry) {
+  if (!entry.listener) {
+    return;
+  }
+  if (lockSession(pdMS_TO_TICKS(500))) {
+    libssh2_channel_forward_cancel(entry.listener);
+    unlockSession();
+  }
+  entry.listener = nullptr;
+}
+
+void SSHTunnel::cancelAllListeners() {
+  for (auto &entry : listeners) {
+    cancelListener(entry);
+  }
+  listeners.clear();
+  boundPort = -1;
+}
+
+int SSHTunnel::acquireChannelSlot() {
+  if (!channels) {
+    return -1;
+  }
+  int maxChannels = config->getConnectionConfig().maxChannels;
+  unsigned long now = millis();
+  for (int i = 0; i < maxChannels; ++i) {
+    if (!channels[i].active) {
+      LOGF_D("SSH", "Channel slot %d selected (inactive)", i);
+      return i;
+    }
+  }
+
+  for (int i = 0; i < maxChannels; ++i) {
+    if (channels[i].active &&
+        (now - channels[i].lastActivity) > 30000) {
+      LOGF_I("SSH", "Recycling inactive channel %d", i);
+      closeChannel(i, ChannelCloseReason::Timeout);
+      return i;
+    }
+  }
+
+  return -1;
+}
+
+int SSHTunnel::connectToLocalEndpoint(const TunnelConfig &mapping) {
+  int localSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+  if (localSocket < 0) {
+    LOG_E("SSH", "Failed to create local socket");
+    emitErrorEvent(errno, "Failed to create local socket");
+    return -1;
+  }
+
+  struct sockaddr_in addr;
+  memset(&addr, 0, sizeof(addr));
+  addr.sin_family = AF_INET;
+  addr.sin_port = htons(mapping.localPort);
+  if (inet_pton(AF_INET, mapping.localHost.c_str(), &addr.sin_addr) != 1) {
+    LOGF_E("SSH", "Invalid local host address %s", mapping.localHost.c_str());
+    emitErrorEvent(-2, "Invalid local host address");
+    close(localSocket);
+    return -1;
+  }
+
+  if (::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d",
+           mapping.localHost.c_str(), mapping.localPort);
+    emitErrorEvent(errno, "Failed to connect to local endpoint");
+    close(localSocket);
+    return -1;
+  }
+
+  if (!NetworkOptimizer::optimizeSocket(localSocket)) {
+    LOG_W("SSH", "Failed to optimize local socket");
+  }
+
+  int flags = fcntl(localSocket, F_GETFL, 0);
+  fcntl(localSocket, F_SETFL, flags | O_NONBLOCK);
+  return localSocket;
+}
+
+void SSHTunnel::snapshotEndpoint(TunnelChannel &channel,
+                                 const TunnelConfig &mapping) {
+  snprintf(channel.endpoint.localHost, SSH_TUNNEL_ENDPOINT_HOST_MAX, "%s",
+           mapping.localHost.c_str());
+  channel.endpoint.localPort = mapping.localPort;
+  snprintf(channel.endpoint.remoteHost, SSH_TUNNEL_ENDPOINT_HOST_MAX, "%s",
+           mapping.remoteBindHost.c_str());
+  channel.endpoint.remotePort = mapping.remoteBindPort;
+}
+
+bool SSHTunnel::bindChannelToMapping(LIBSSH2_CHANNEL *channel,
+                                     const TunnelConfig &mapping) {
+  int channelIndex = acquireChannelSlot();
+  if (channelIndex == -1) {
+    LOGF_W("SSH",
+           "No available channel slots (active: %d/%d), closing new connection",
+           getActiveChannels(), config->getConnectionConfig().maxChannels);
+    emitErrorEvent(-3, "No available channel slots");
+    return false;
+  }
+
+  int localSocket = connectToLocalEndpoint(mapping);
+  if (localSocket < 0) {
+    return false;
+  }
+
+  TunnelChannel &slot = channels[channelIndex];
+  slot.channel = channel;
+  slot.localSocket = localSocket;
+  slot.active = true;
+  slot.lastActivity = millis();
+  slot.pendingBytes = 0;
+  slot.flowControlPaused = false;
+  slot.priority = config->getConnectionConfig().defaultChannelPriority;
+  slot.effectivePriority = slot.priority;
+  slot.largeTransferInProgress = false;
+  slot.transferStartTime = slot.lastActivity;
+  slot.transferredBytes = 0;
+  slot.peakBytesPerSecond = 0;
+  slot.healthUnhealthyCount = 0;
+  slot.lastHardRecoveryMs = 0;
+  slot.lastHealthWarnMs = 0;
+  slot.consecutiveErrors = 0;
+  slot.eagainErrors = 0;
+  slot.readMutexFailures = 0;
+  slot.writeMutexFailures = 0;
+  slot.queuedBytesToLocal = 0;
+  slot.queuedBytesToRemote = 0;
+  slot.remoteEof = false;
+  slot.lostWriteChunks = 0;
+  slot.bytesDropped = 0;
+  slot.socketRecvErrors = 0;
+  slot.fatalCryptoErrors = 0;
+  slot.lastWriteErrorMs = 0;
+  slot.lastErrorDetailLogMs = 0;
+  slot.stuckProbeCount = 0;
+  slot.socketRecvBurstCount = 0;
+  slot.firstSocketRecvErrorMs = 0;
+  slot.terminalSocketFailure = false;
+  slot.readProbeFailCount = 0;
+  slot.writeProbeFailCount = 0;
+  slot.localReadTerminated = false;
+  slot.gracefulClosing = false;
+  snapshotEndpoint(slot, mapping);
+
+  if (lockSession(pdMS_TO_TICKS(200))) {
+    libssh2_channel_set_blocking(channel, 0);
+    unlockSession();
+  } else {
+    LOGF_W("SSH",
+           "Channel %d: Unable to switch to non-blocking mode (lock timeout)",
+           channelIndex);
+  }
+
+  LOGF_I("SSH", "New tunnel connection channel %d (%s:%d -> %s:%d)",
+         channelIndex, mapping.remoteBindHost.c_str(),
+         mapping.remoteBindPort, mapping.localHost.c_str(),
+         mapping.localPort);
+  emitChannelOpened(channelIndex);
+  return true;
+}
+
+void SSHTunnel::emitSessionConnected() {
+  if (eventHandlers.onSessionConnected) {
+    eventHandlers.onSessionConnected();
+  }
+}
+
+void SSHTunnel::emitSessionDisconnected() {
+  if (eventHandlers.onSessionDisconnected) {
+    eventHandlers.onSessionDisconnected();
+  }
+}
+
+void SSHTunnel::emitChannelOpened(int channelIndex) {
+  if (eventHandlers.onChannelOpened) {
+    eventHandlers.onChannelOpened(channelIndex);
+  }
+}
+
+void SSHTunnel::emitChannelClosed(int channelIndex,
+                                  ChannelCloseReason reason) {
+  if (eventHandlers.onChannelClosed) {
+    eventHandlers.onChannelClosed(channelIndex, reason);
+  }
+}
+
+void SSHTunnel::emitErrorEvent(int code, const char *detail) {
+  if (eventHandlers.onError) {
+    eventHandlers.onError(code, detail);
+  }
+}
+
+void SSHTunnel::emitLargeTransferEvent(int channelIndex, bool started) {
+  if (started) {
+    if (eventHandlers.onLargeTransferStart) {
+      eventHandlers.onLargeTransferStart(channelIndex);
+    }
+  } else {
+    if (eventHandlers.onLargeTransferEnd) {
+      eventHandlers.onLargeTransferEnd(channelIndex);
+    }
+  }
+}
+
 uint8_t SSHTunnel::getPriorityWeight(uint8_t priority) const {
   const ConnectionConfig &connConf = config->getConnectionConfig();
   switch (priority) {
@@ -1344,133 +1612,45 @@ void SSHTunnel::prepareChannelSchedule(
 }
 
 bool SSHTunnel::handleNewConnection() {
-  if (!listener)
-    return false;
-
-  LIBSSH2_CHANNEL *channel = nullptr;
-  if (lockSession(pdMS_TO_TICKS(200))) {
-    channel = libssh2_channel_forward_accept(listener);
-    unlockSession();
-  } else {
+  bool acceptedAny = false;
+  if (listeners.empty()) {
     return false;
   }
 
-  if (!channel) {
-    return false; // No new connection or error
-  }
+  for (auto &entry : listeners) {
+    if (!entry.listener) {
+      continue;
+    }
 
-  // NEW: Decide whether to accept connection (queue system currently disabled)
-  if (!shouldAcceptNewConnection()) {
-    LOGF_W("SSH", "All channels busy - rejecting new connection");
-    closeLibssh2Channel(channel);
-    return false; // Reject immediately instead of queuing
-  }
+    LIBSSH2_CHANNEL *channel = nullptr;
+    if (lockSession(pdMS_TO_TICKS(200))) {
+      channel = libssh2_channel_forward_accept(entry.listener);
+      unlockSession();
+    } else {
+      continue;
+    }
 
-  // Find available channel slot with aggressive reuse
-  int channelIndex = -1;
-  int maxChannels = config->getConnectionConfig().maxChannels;
-  unsigned long now = millis();
+    if (!channel) {
+      continue;
+    }
 
-  // First pass: search for a truly free channel
-  for (int i = 0; i < maxChannels; i++) {
-    LOGF_D("SSH", "Trying to open new channel slot %d (active=%d)", i,
-           channels[i].active);
-    if (!channels[i].active) {
-      channelIndex = i;
-      LOGF_I("SSH", "Channel slot %d is free and will be used", i);
-      break;
+    acceptedAny = true;
+
+    if (!shouldAcceptNewConnection()) {
+      LOGF_W("SSH",
+             "All channels busy - rejecting new connection for mapping %s:%d",
+             entry.mapping.remoteBindHost.c_str(),
+             entry.mapping.remoteBindPort);
+      closeLibssh2Channel(channel);
+      continue;
+    }
+
+    if (!bindChannelToMapping(channel, entry.mapping)) {
+      closeLibssh2Channel(channel);
     }
   }
 
-  // If none free, look for long inactive channels to recycle
-  if (channelIndex == -1) {
-    for (int i = 0; i < maxChannels; i++) {
-      if (channels[i].active &&
-          (now - channels[i].lastActivity > 30000)) { // 30 seconds inactivity
-        LOGF_I("SSH", "Recycling inactive channel %d for new connection", i);
-        closeChannel(i); // Closes and releases the channel
-        channelIndex = i;
-        LOGF_I("SSH", "Channel slot %d reused after cleanup", i);
-        break;
-      }
-    }
-  }
-
-  if (channelIndex == -1) {
-    LOGF_W("SSH",
-           "No available channel slots (active: %d/%d), closing new connection",
-           getActiveChannels(), maxChannels);
-    closeLibssh2Channel(channel);
-    return false;
-  }
-
-  // Create socket and connect to local endpoint
-  int localSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (localSocket < 0) {
-    LOG_E("SSH", "Failed to create local socket");
-    closeLibssh2Channel(channel);
-    return false;
-  }
-
-  // Use config for local endpoint
-  const TunnelConfig &tunnelConfig = config->getTunnelConfig();
-  struct sockaddr_in addr;
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(tunnelConfig.localPort);
-  inet_pton(AF_INET, tunnelConfig.localHost.c_str(), &addr.sin_addr);
-
-  if (::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d",
-           tunnelConfig.localHost.c_str(), tunnelConfig.localPort);
-    close(localSocket);
-    closeLibssh2Channel(channel);
-    return false;
-  }
-
-  // Optimize local socket for performance
-  if (!NetworkOptimizer::optimizeSocket(localSocket)) {
-    LOGF_W("SSH", "Warning: Could not optimize local socket for channel %d",
-           channelIndex);
-  }
-
-  // Set socket non-blocking
-  int flags = fcntl(localSocket, F_GETFL, 0);
-  fcntl(localSocket, F_SETFL, flags | O_NONBLOCK);
-
-  // Set up channel
-  channels[channelIndex].channel = channel;
-  channels[channelIndex].localSocket = localSocket;
-  channels[channelIndex].active = true;
-  channels[channelIndex].lastActivity = millis();
-  channels[channelIndex].pendingBytes = 0;
-  channels[channelIndex].flowControlPaused = false;
-  channels[channelIndex].priority =
-      config->getConnectionConfig().defaultChannelPriority;
-  channels[channelIndex].effectivePriority = channels[channelIndex].priority;
-
-  // NEW: Initialize large transfer detection variables for this channel
-  channels[channelIndex].largeTransferInProgress = false;
-  channels[channelIndex].transferStartTime = millis();
-  channels[channelIndex].transferredBytes = 0;
-  channels[channelIndex].peakBytesPerSecond = 0;
-
-  // Health tracking init
-  channels[channelIndex].healthUnhealthyCount = 0;
-  channels[channelIndex].lastHardRecoveryMs = 0;
-  channels[channelIndex].lastHealthWarnMs = 0;
-
-  if (lockSession(pdMS_TO_TICKS(200))) {
-    libssh2_channel_set_blocking(channel, 0);
-    unlockSession();
-  } else {
-    LOGF_W("SSH",
-           "Channel %d: Unable to switch to non-blocking mode (lock timeout)",
-           channelIndex);
-  }
-
-  LOGF_I("SSH", "New tunnel connection established (channel %d, priority=%u)",
-         channelIndex, channels[channelIndex].priority);
-  return true;
+  return acceptedAny;
 }
 
 void SSHTunnel::handleChannelData(int channelIndex) {
@@ -1612,23 +1792,25 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   }
 }
 
-void SSHTunnel::closeChannel(int channelIndex) {
+void SSHTunnel::closeChannel(int channelIndex,
+                                        ChannelCloseReason reason) {
+  if (!channels || channelIndex < 0 ||
+      channelIndex >= config->getConnectionConfig().maxChannels) {
+    return;
+  }
+
   TunnelChannel &ch = channels[channelIndex];
   if (!ch.active)
     return;
 
   unsigned long sessionDuration = millis() - ch.lastActivity;
 
-  // Detailed log for debugging with extended statistics
   LOGF_I("SSH",
          "Closing channel %d (session: %lums, rx: %d bytes, tx: %d bytes, "
          "errors: %d)",
          channelIndex, sessionDuration, ch.totalBytesReceived,
          ch.totalBytesSent, ch.consecutiveErrors);
 
-  // Removed blocking/stuck probe here to avoid priority inheritance assert.
-
-  // Flush pending data before closing
   flushPendingData(channelIndex);
 
   if (ch.channel) {
@@ -1641,21 +1823,22 @@ void SSHTunnel::closeChannel(int channelIndex) {
   }
 
   if (ch.localSocket >= 0) {
-    // Atomic protection: mark socket as closed before actual shutdown
     int socketToClose = ch.localSocket;
-    ch.localSocket = -1; // Prevent race conditions
+    ch.localSocket = -1;
 
-    // Clean shutdown
     shutdown(socketToClose, SHUT_RDWR);
-    vTaskDelay(pdMS_TO_TICKS(
-        10)); // Laisser le temps aux threads de voir le changement
+    vTaskDelay(pdMS_TO_TICKS(10));
     close(socketToClose);
 
-    LOGF_D("SSH", "Channel %d: Local socket %d closed safely", channelIndex,
-           socketToClose);
+    LOGF_D("SSH", "Channel %d: Local socket %d closed safely",
+           channelIndex, socketToClose);
   }
 
-  // Full reset of channel state for reuse
+  if (ch.largeTransferInProgress) {
+    ch.largeTransferInProgress = false;
+    emitLargeTransferEvent(channelIndex, false);
+  }
+
   ch.active = false;
   ch.lastActivity = 0;
   ch.pendingBytes = 0;
@@ -1668,9 +1851,6 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.effectivePriority = ch.priority;
   ch.gracefulClosing = false;
   ch.consecutiveErrors = 0;
-
-  // OPTIMIZED: Reset large transfer detection and EAGAIN counters
-  ch.largeTransferInProgress = false;
   ch.transferStartTime = 0;
   ch.transferredBytes = 0;
   ch.peakBytesPerSecond = 0;
@@ -1689,35 +1869,31 @@ void SSHTunnel::closeChannel(int channelIndex) {
   ch.readProbeFailCount = 0;
   ch.writeProbeFailCount = 0;
   ch.localReadTerminated = false;
+  ch.lostWriteChunks = 0;
+  ch.queuedBytesToLocal = 0;
+  ch.queuedBytesToRemote = 0;
+  ch.remoteEof = false;
 
-  // OPTIMIZED: Clear unified buffers
   if (ch.sshToLocalBuffer) {
     ch.sshToLocalBuffer->clear();
-    ch.queuedBytesToLocal = 0;
   }
   if (ch.localToSshBuffer) {
     ch.localToSshBuffer->clear();
-    ch.queuedBytesToRemote = 0;
   }
-  ch.remoteEof = false;
 
-  ch.lostWriteChunks = 0;
+  SAFE_FREE(ch.deferredToLocal);
+  ch.deferredToLocal = nullptr;
+  ch.deferredToLocalSize = 0;
+  ch.deferredToLocalOffset = 0;
+  SAFE_FREE(ch.deferredToRemote);
+  ch.deferredToRemote = nullptr;
+  ch.deferredToRemoteSize = 0;
+  ch.deferredToRemoteOffset = 0;
 
-  // Free deferred buffers if any
-  if (ch.deferredToLocal) {
-    SAFE_FREE(ch.deferredToLocal);
-    ch.deferredToLocal = nullptr;
-  }
-  ch.deferredToLocalSize = ch.deferredToLocalOffset = 0;
-  if (ch.deferredToRemote) {
-    SAFE_FREE(ch.deferredToRemote);
-    ch.deferredToRemote = nullptr;
-  }
-  ch.deferredToRemoteSize = ch.deferredToRemoteOffset = 0;
-
-  LOGF_I("SSH", "Channel %d closed and ready for reuse (slot now free)",
-         channelIndex);
+  memset(&ch.endpoint, 0, sizeof(ch.endpoint));
+  emitChannelClosed(channelIndex, reason);
 }
+
 
 void SSHTunnel::cleanupInactiveChannels() {
   unsigned long now = millis();
@@ -2065,6 +2241,79 @@ int SSHTunnel::getActiveChannels() {
       count++;
   }
   return count;
+}
+
+void SSHTunnel::setEventHandlers(const SSHTunnelEvents &handlers) {
+  eventHandlers = handlers;
+}
+
+bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
+  config->addTunnelMapping(mapping);
+
+  if (state != TUNNEL_CONNECTED) {
+    return true;
+  }
+
+  if ((int)listeners.size() >=
+      config->getConnectionConfig().maxReverseListeners) {
+    LOG_W("SSH", "Cannot add reverse tunnel: listener limit reached");
+    emitErrorEvent(-4, "Reverse listener limit reached");
+    return false;
+  }
+
+  ListenerEntry entry;
+  entry.mapping = mapping;
+  if (!createListenerForMapping(mapping, entry)) {
+    return false;
+  }
+
+  listeners.push_back(entry);
+  if (boundPort < 0) {
+    boundPort = entry.boundPort;
+  }
+
+  LOGF_I("SSH", "Dynamic reverse listener added: %s:%d (bound %d) -> %s:%d",
+         mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+         entry.boundPort, mapping.localHost.c_str(), mapping.localPort);
+  return true;
+}
+
+bool SSHTunnel::removeReverseTunnel(const String &remoteHost, int remotePort) {
+  const std::vector<TunnelConfig> &mappings = config->getTunnelMappings();
+  size_t mappingIndex = mappings.size();
+  for (size_t i = 0; i < mappings.size(); ++i) {
+    if (mappings[i].remoteBindHost == remoteHost &&
+        mappings[i].remoteBindPort == remotePort) {
+      mappingIndex = i;
+      break;
+    }
+  }
+
+  if (mappingIndex < mappings.size()) {
+    config->removeTunnelMapping(mappingIndex);
+  }
+
+  bool removed = false;
+  for (auto it = listeners.begin(); it != listeners.end(); ++it) {
+    if (it->mapping.remoteBindHost == remoteHost &&
+        it->mapping.remoteBindPort == remotePort) {
+      cancelListener(*it);
+      listeners.erase(it);
+      removed = true;
+      break;
+    }
+  }
+
+  if (removed) {
+    boundPort = listeners.empty() ? -1 : listeners.front().boundPort;
+    LOGF_I("SSH", "Reverse listener removed: %s:%d", remoteHost.c_str(),
+           remotePort);
+  } else {
+    LOGF_W("SSH", "Reverse listener not found for %s:%d", remoteHost.c_str(),
+           remotePort);
+  }
+
+  return removed;
 }
 
 int SSHTunnel::socketCallback(LIBSSH2_SESSION *session, libssh2_socket_t fd,
@@ -4150,11 +4399,13 @@ void SSHTunnel::detectLargeTransfer(int channelIndex) {
              "Channel %d: Large transfer detected - Rate: %zu B/s, Total: %zu "
              "bytes",
              channelIndex, currentRate, totalTransferred);
+      emitLargeTransferEvent(channelIndex, true);
     } else if (!ch.largeTransferInProgress && wasLargeTransfer) {
       LOGF_I("SSH",
              "Channel %d: Large transfer completed - Peak: %zu B/s, Total: %zu "
              "bytes",
              channelIndex, ch.peakBytesPerSecond, totalTransferred);
+      emitLargeTransferEvent(channelIndex, false);
     }
   }
 }
@@ -4194,7 +4445,8 @@ bool SSHTunnel::shouldAcceptNewConnection() {
   return true;
 }
 
-void SSHTunnel::queuePendingConnection(LIBSSH2_CHANNEL *channel) {
+void SSHTunnel::queuePendingConnection(LIBSSH2_CHANNEL *channel,
+                                       const TunnelConfig &mapping) {
   if (!channel)
     return;
 
@@ -4217,6 +4469,7 @@ void SSHTunnel::queuePendingConnection(LIBSSH2_CHANNEL *channel) {
     PendingConnection pending;
     pending.channel = channel;
     pending.timestamp = millis();
+    pending.mapping = mapping;
     pendingConnections.push_back(pending);
 
     LOGF_I("SSH", "Connection queued - %zu connections waiting",
@@ -4253,6 +4506,7 @@ bool SSHTunnel::processPendingConnections() {
       // Try to process this pending connection
       if (shouldAcceptNewConnection()) {
         LIBSSH2_CHANNEL *channel = it->channel;
+        TunnelConfig mapping = it->mapping;
         LOGF_I("SSH", "Processing pending connection - %zu remaining",
                pendingConnections.size() - 1);
 
@@ -4263,7 +4517,7 @@ bool SSHTunnel::processPendingConnections() {
         xSemaphoreGive(pendingConnectionsMutex);
 
         // Process the connection (same logic as handleNewConnection subset)
-        if (!processQueuedConnection(channel)) {
+        if (!processQueuedConnection(channel, mapping)) {
           // On failure, close the connection
           closeLibssh2Channel(channel);
         }
@@ -4280,115 +4534,9 @@ bool SSHTunnel::processPendingConnections() {
   return false;
 }
 
-bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL *channel) {
-  // Identical to the portion of handleNewConnection that processes a connection
-  // Find available channel slot with aggressive reuse
-  int channelIndex = -1;
-  int maxChannels = config->getConnectionConfig().maxChannels;
-  unsigned long now = millis();
-
-  // First pass: find a truly free channel
-  for (int i = 0; i < maxChannels; i++) {
-    LOGF_D("SSH", "Trying to open new channel slot %d (active=%d)", i,
-           channels[i].active);
-    if (!channels[i].active) {
-      channelIndex = i;
-      LOGF_I("SSH", "Found available channel slot %d", i);
-      break;
-    }
-  }
-
-  // If none free, look for reclaimable (long inactive) channels
-  if (channelIndex == -1) {
-    for (int i = 0; i < maxChannels; i++) {
-      if (channels[i].active &&
-          (now - channels[i].lastActivity) > 30000) { // 30 seconds
-        LOGF_I("SSH", "Reusing inactive channel slot %d (inactive for %lums)",
-               i, now - channels[i].lastActivity);
-        closeChannel(i); // Force close
-        channelIndex = i;
-        break;
-      }
-    }
-  }
-
-  if (channelIndex == -1) {
-    LOGF_W(
-        "SSH",
-        "No available channel slots (active: %d/%d), closing queued connection",
-        getActiveChannels(), maxChannels);
-    return false;
-  }
-
-  // Create socket and connect to local endpoint
-  int localSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (localSocket < 0) {
-    LOG_E("SSH", "Failed to create local socket");
-    return false;
-  }
-
-  // Use configuration for local endpoint
-  const TunnelConfig &tunnelConfig = config->getTunnelConfig();
-  struct sockaddr_in addr;
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(tunnelConfig.localPort);
-  inet_pton(AF_INET, tunnelConfig.localHost.c_str(), &addr.sin_addr);
-
-  if (::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d",
-           tunnelConfig.localHost.c_str(), tunnelConfig.localPort);
-    close(localSocket);
-    return false;
-  }
-
-  // Optimize local socket for performance
-  if (!NetworkOptimizer::optimizeSocket(localSocket)) {
-    LOGF_W("SSH", "Warning: Could not optimize local socket for channel %d",
-           channelIndex);
-  }
-
-  // Set socket non-blocking
-  int flags = fcntl(localSocket, F_GETFL, 0);
-  fcntl(localSocket, F_SETFL, flags | O_NONBLOCK);
-
-  // Set up channel
-  channels[channelIndex].channel = channel;
-  channels[channelIndex].localSocket = localSocket;
-  channels[channelIndex].active = true;
-  channels[channelIndex].lastActivity = millis();
-  channels[channelIndex].pendingBytes = 0;
-  channels[channelIndex].flowControlPaused = false;
-  channels[channelIndex].priority =
-      config->getConnectionConfig().defaultChannelPriority;
-  channels[channelIndex].effectivePriority = channels[channelIndex].priority;
-  // Reset per-channel reliability counters
-  channels[channelIndex].consecutiveErrors = 0;
-  channels[channelIndex].eagainErrors = 0;
-  channels[channelIndex].readMutexFailures = 0;
-  channels[channelIndex].writeMutexFailures = 0;
-  channels[channelIndex].lostWriteChunks = 0;
-  channels[channelIndex].queuedBytesToLocal = 0;
-  channels[channelIndex].queuedBytesToRemote = 0;
-  channels[channelIndex].remoteEof = false;
-
-  // Initialize large transfer detection variables
-  channels[channelIndex].largeTransferInProgress = false;
-  channels[channelIndex].transferStartTime = millis();
-  channels[channelIndex].transferredBytes = 0;
-  channels[channelIndex].peakBytesPerSecond = 0;
-
-  if (lockSession(pdMS_TO_TICKS(200))) {
-    libssh2_channel_set_blocking(channel, 0);
-    unlockSession();
-  } else {
-    LOGF_W("SSH", "Queued channel %d: Unable to switch to non-blocking mode",
-           channelIndex);
-  }
-
-  LOGF_I("SSH",
-         "Queued tunnel connection established (channel %d, priority=%u)",
-         channelIndex, channels[channelIndex].priority);
-  return true;
+bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL *channel,
+                                        const TunnelConfig &mapping) {
+  return bindChannelToMapping(channel, mapping);
 }
 
 // ====== NEW OPTIMIZED METHODS ======
