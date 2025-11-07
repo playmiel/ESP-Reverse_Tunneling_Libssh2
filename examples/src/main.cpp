@@ -210,7 +210,7 @@ void configureMultiTunnelMappings() {
                                    "192.168.1.100", 80); // HTTP cam
 
   globalSSHConfig.addTunnelMapping("0.0.0.0", 22081, // Remote listener #2
-                                   "192.168.1.150", 5020); // Modbus TCP
+                                   "192.168.1.150", 502); // Modbus TCP
 
   globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, // Localhost bind
                                    "192.168.1.200", 22); // SSH hop
