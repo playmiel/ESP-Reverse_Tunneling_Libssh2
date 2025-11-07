@@ -5,6 +5,7 @@
 #include <Arduino.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
+#include <vector>
 
 typedef void (*HostKeyMismatchCallback)(const String &expectedFingerprint,
                                         const String &actualFingerprint,
@@ -70,6 +71,7 @@ struct ConnectionConfig {
   int8_t dataTaskCoreAffinity; // -1 = no pinning
   size_t globalRateLimitBytesPerSec;
   size_t globalBurstBytes;
+  int maxReverseListeners;
 
   // Default constructor
   ConnectionConfig()
@@ -81,7 +83,7 @@ struct ConnectionConfig {
         libssh2KeepAliveEnabled(true), libssh2KeepAliveIntervalSec(30),
         tunnelRingBufferSize(32 * 1024), dataTaskStackSize(4096),
         dataTaskCoreAffinity(-1), globalRateLimitBytesPerSec(0),
-        globalBurstBytes(0) {}
+        globalBurstBytes(0), maxReverseListeners(1) {}
 };
 
 // Structure for debug configuration
@@ -133,12 +135,18 @@ public:
   // Tunnel configuration methods
   void setTunnelConfig(const String &remoteBindHost, int remoteBindPort,
                        const String &localHost, int localPort);
+  void addTunnelMapping(const String &remoteBindHost, int remoteBindPort,
+                        const String &localHost, int localPort);
+  void addTunnelMapping(const TunnelConfig &mapping);
+  bool removeTunnelMapping(size_t index);
+  void clearTunnelMappings();
 
   // Connection configuration methods
   void setConnectionConfig(int keepAliveInterval, int reconnectDelay,
                            int maxReconnectAttempts, int connectionTimeout);
   void setBufferConfig(int bufferSize, int maxChannels, int channelTimeout,
                        size_t tunnelRingBufferSize = 32 * 1024);
+  void setMaxReverseListeners(int maxListeners);
   void setKeepAliveOptions(bool enableLibssh2, int intervalSeconds);
   void setDataTaskConfig(uint16_t stackSize, int8_t coreAffinity = -1);
   void setChannelPriorityProfile(uint8_t defaultPriority, uint8_t lowWeight = 1,
@@ -152,7 +160,11 @@ public:
 
   // Getters to access configurations
   const SSHServerConfig &getSSHConfig() const { return sshConfig; }
-  const TunnelConfig &getTunnelConfig() const { return tunnelConfig; }
+  const TunnelConfig &getTunnelConfig(size_t index = 0) const;
+  const std::vector<TunnelConfig> &getTunnelMappings() const {
+    return tunnelMappings;
+  }
+  size_t getTunnelMappingCount() const { return tunnelMappings.size(); }
   const ConnectionConfig &getConnectionConfig() const {
     return connectionConfig;
   }
@@ -174,7 +186,7 @@ public:
 
 private:
   SSHServerConfig sshConfig;
-  TunnelConfig tunnelConfig;
+  std::vector<TunnelConfig> tunnelMappings;
   ConnectionConfig connectionConfig;
   DebugConfig debugConfig;
 
