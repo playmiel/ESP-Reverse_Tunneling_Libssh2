@@ -689,14 +689,14 @@ bool SSHConfiguration::validateTunnelConfig() const {
       return false;
     }
     if (mapping.remoteBindPort <= 0 || mapping.remoteBindPort > 65535) {
-      LOGF_E("CONFIG", "Mapping #%u: Remote bind port must be between 1 and "
-                       "65535",
+      LOGF_E("CONFIG",
+             "Mapping #%u: Remote bind port must be between 1 and "
+             "65535",
              (unsigned)i);
       return false;
     }
     if (mapping.localHost.length() == 0) {
-      LOGF_E("CONFIG", "Mapping #%u: Local host cannot be empty",
-             (unsigned)i);
+      LOGF_E("CONFIG", "Mapping #%u: Local host cannot be empty", (unsigned)i);
       return false;
     }
     if (mapping.localPort <= 0 || mapping.localPort > 65535) {

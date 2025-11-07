@@ -254,8 +254,7 @@ private:
                             const TunnelConfig &mapping);
   int acquireChannelSlot();
   int connectToLocalEndpoint(const TunnelConfig &mapping);
-  void snapshotEndpoint(TunnelChannel &channel,
-                        const TunnelConfig &mapping);
+  void snapshotEndpoint(TunnelChannel &channel, const TunnelConfig &mapping);
   void emitSessionConnected();
   void emitSessionDisconnected();
   void emitChannelOpened(int channelIndex);
