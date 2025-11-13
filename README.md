@@ -9,7 +9,7 @@ Library for ESP32 Arduino enabling creation of reverse SSH tunnels using libssh2
 # Add to your platformio.ini
 lib_deps = 
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
-    https://github.com/playmiel/libssh2_esp
+    https://github.com/playmiel/libssh2_esp  # libssh2 backend for ESP32
 ```
 
 **Option B: Arduino IDE**
