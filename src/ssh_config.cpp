@@ -11,6 +11,7 @@ SSHConfiguration::SSHConfiguration() {
   if (configMutex == NULL) {
     LOG_E("CONFIG", "Failed to create configuration mutex");
   }
+  tunnelMappings.emplace_back();
 }
 
 SSHConfiguration::~SSHConfiguration() {
@@ -322,16 +323,69 @@ void SSHConfiguration::setHostKeyMismatchCallback(
 void SSHConfiguration::setTunnelConfig(const String &remoteBindHost,
                                        int remoteBindPort,
                                        const String &localHost, int localPort) {
+  TunnelConfig mapping;
+  mapping.remoteBindHost = remoteBindHost;
+  mapping.remoteBindPort = remoteBindPort;
+  mapping.localHost = localHost;
+  mapping.localPort = localPort;
+
   if (lockConfig()) {
-    tunnelConfig.remoteBindHost = remoteBindHost;
-    tunnelConfig.remoteBindPort = remoteBindPort;
-    tunnelConfig.localHost = localHost;
-    tunnelConfig.localPort = localPort;
+    tunnelMappings.clear();
+    tunnelMappings.push_back(mapping);
     unlockConfig();
 
-    LOGF_I("CONFIG", "Tunnel configured: %s:%d -> %s:%d",
+    LOGF_I("CONFIG",
+           "Tunnel configuration reset to single mapping: %s:%d -> %s:%d",
            remoteBindHost.c_str(), remoteBindPort, localHost.c_str(),
            localPort);
+  }
+}
+
+void SSHConfiguration::addTunnelMapping(const String &remoteBindHost,
+                                        int remoteBindPort,
+                                        const String &localHost,
+                                        int localPort) {
+  TunnelConfig mapping;
+  mapping.remoteBindHost = remoteBindHost;
+  mapping.remoteBindPort = remoteBindPort;
+  mapping.localHost = localHost;
+  mapping.localPort = localPort;
+  addTunnelMapping(mapping);
+}
+
+void SSHConfiguration::addTunnelMapping(const TunnelConfig &mapping) {
+  if (lockConfig()) {
+    tunnelMappings.push_back(mapping);
+    size_t idx = tunnelMappings.size() - 1;
+    unlockConfig();
+
+    LOGF_I("CONFIG", "Tunnel mapping #%u added: %s:%d -> %s:%d", (unsigned)idx,
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+           mapping.localHost.c_str(), mapping.localPort);
+  }
+}
+
+bool SSHConfiguration::removeTunnelMapping(size_t index) {
+  bool removed = false;
+  if (lockConfig()) {
+    if (index < tunnelMappings.size()) {
+      tunnelMappings.erase(tunnelMappings.begin() + index);
+      removed = true;
+      LOGF_I("CONFIG", "Tunnel mapping #%u removed", (unsigned)index);
+    } else {
+      LOGF_W("CONFIG", "Cannot remove tunnel mapping #%u (out of range)",
+             (unsigned)index);
+    }
+    unlockConfig();
+  }
+  return removed;
+}
+
+void SSHConfiguration::clearTunnelMappings() {
+  if (lockConfig()) {
+    tunnelMappings.clear();
+    unlockConfig();
+    LOG_I("CONFIG", "All tunnel mappings cleared");
   }
 }
 
@@ -370,6 +424,18 @@ void SSHConfiguration::setBufferConfig(int bufferSize, int maxChannels,
            "ring_buffer=%u bytes",
            bufferSize, maxChannels, channelTimeout,
            (unsigned)tunnelRingBufferSize);
+  }
+}
+
+void SSHConfiguration::setMaxReverseListeners(int maxListeners) {
+  if (maxListeners <= 0) {
+    LOG_W("CONFIG", "Max reverse listeners must be positive");
+    return;
+  }
+  if (lockConfig()) {
+    connectionConfig.maxReverseListeners = maxListeners;
+    unlockConfig();
+    LOGF_I("CONFIG", "Max reverse listeners set to %d", maxListeners);
   }
 }
 
@@ -496,10 +562,17 @@ void SSHConfiguration::printConfiguration() const {
     }
 
     LOG_I("CONFIG", "=== Tunnel Configuration ===");
-    LOGF_I("CONFIG", "Remote Bind: %s:%d", tunnelConfig.remoteBindHost.c_str(),
-           tunnelConfig.remoteBindPort);
-    LOGF_I("CONFIG", "Local Target: %s:%d", tunnelConfig.localHost.c_str(),
-           tunnelConfig.localPort);
+    if (tunnelMappings.empty()) {
+      LOG_W("CONFIG", "No tunnel mappings configured");
+    } else {
+      for (size_t i = 0; i < tunnelMappings.size(); ++i) {
+        const TunnelConfig &mapping = tunnelMappings[i];
+        LOGF_I("CONFIG", "#%u Remote Bind: %s:%d", (unsigned)i,
+               mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+        LOGF_I("CONFIG", "#%u Local Target: %s:%d", (unsigned)i,
+               mapping.localHost.c_str(), mapping.localPort);
+      }
+    }
 
     LOG_I("CONFIG", "=== Connection Configuration ===");
     LOGF_I("CONFIG", "Keep-alive: %ds", connectionConfig.keepAliveIntervalSec);
@@ -527,6 +600,8 @@ void SSHConfiguration::printConfiguration() const {
     LOGF_I("CONFIG", "Data task stack/core: %u / %d",
            connectionConfig.dataTaskStackSize,
            connectionConfig.dataTaskCoreAffinity);
+    LOGF_I("CONFIG", "Max reverse listeners: %d",
+           connectionConfig.maxReverseListeners);
     if (connectionConfig.globalRateLimitBytesPerSec > 0) {
       LOGF_I("CONFIG", "Global rate limit: %zu B/s (burst=%zu)",
              connectionConfig.globalRateLimitBytesPerSec,
@@ -601,24 +676,34 @@ bool SSHConfiguration::validateSSHConfig() const {
 }
 
 bool SSHConfiguration::validateTunnelConfig() const {
-  if (tunnelConfig.remoteBindHost.length() == 0) {
-    LOG_E("CONFIG", "Remote bind host cannot be empty");
+  if (tunnelMappings.empty()) {
+    LOG_E("CONFIG", "At least one tunnel mapping must be configured");
     return false;
   }
 
-  if (tunnelConfig.remoteBindPort <= 0 || tunnelConfig.remoteBindPort > 65535) {
-    LOG_E("CONFIG", "Remote bind port must be between 1 and 65535");
-    return false;
-  }
-
-  if (tunnelConfig.localHost.length() == 0) {
-    LOG_E("CONFIG", "Local host cannot be empty");
-    return false;
-  }
-
-  if (tunnelConfig.localPort <= 0 || tunnelConfig.localPort > 65535) {
-    LOG_E("CONFIG", "Local port must be between 1 and 65535");
-    return false;
+  for (size_t i = 0; i < tunnelMappings.size(); ++i) {
+    const TunnelConfig &mapping = tunnelMappings[i];
+    if (mapping.remoteBindHost.length() == 0) {
+      LOGF_E("CONFIG", "Mapping #%u: Remote bind host cannot be empty",
+             (unsigned)i);
+      return false;
+    }
+    if (mapping.remoteBindPort <= 0 || mapping.remoteBindPort > 65535) {
+      LOGF_E("CONFIG",
+             "Mapping #%u: Remote bind port must be between 1 and "
+             "65535",
+             (unsigned)i);
+      return false;
+    }
+    if (mapping.localHost.length() == 0) {
+      LOGF_E("CONFIG", "Mapping #%u: Local host cannot be empty", (unsigned)i);
+      return false;
+    }
+    if (mapping.localPort <= 0 || mapping.localPort > 65535) {
+      LOGF_E("CONFIG", "Mapping #%u: Local port must be between 1 and 65535",
+             (unsigned)i);
+      return false;
+    }
   }
 
   return true;
@@ -700,5 +785,21 @@ bool SSHConfiguration::validateConnectionConfig() const {
     return false;
   }
 
+  if (connectionConfig.maxReverseListeners <= 0) {
+    LOG_E("CONFIG", "Max reverse listeners must be positive");
+    return false;
+  }
+
   return true;
+}
+
+const TunnelConfig &SSHConfiguration::getTunnelConfig(size_t index) const {
+  static TunnelConfig fallback;
+  if (tunnelMappings.empty()) {
+    return fallback;
+  }
+  if (index >= tunnelMappings.size()) {
+    return tunnelMappings.front();
+  }
+  return tunnelMappings[index];
 }

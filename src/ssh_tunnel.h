@@ -24,6 +24,34 @@ enum TunnelState {
   TUNNEL_ERROR = 3
 };
 
+enum class ChannelCloseReason {
+  Unknown = 0,
+  RemoteClosed,
+  LocalClosed,
+  Error,
+  Timeout,
+  Manual
+};
+
+struct SSHTunnelEvents {
+  void (*onSessionConnected)() = nullptr;
+  void (*onSessionDisconnected)() = nullptr;
+  void (*onChannelOpened)(int) = nullptr;
+  void (*onChannelClosed)(int, ChannelCloseReason) = nullptr;
+  void (*onError)(int, const char *) = nullptr;
+  void (*onLargeTransferStart)(int) = nullptr;
+  void (*onLargeTransferEnd)(int) = nullptr;
+};
+
+static constexpr size_t SSH_TUNNEL_ENDPOINT_HOST_MAX = 64;
+
+struct ChannelEndpointInfo {
+  char remoteHost[SSH_TUNNEL_ENDPOINT_HOST_MAX];
+  int remotePort;
+  char localHost[SSH_TUNNEL_ENDPOINT_HOST_MAX];
+  int localPort;
+};
+
 struct TunnelChannel {
   // Lost write chunks counter on Local->SSH side (diagnostic)
   int lostWriteChunks;
@@ -102,6 +130,7 @@ struct TunnelChannel {
 
   // NEW: Metrics for dropped bytes (only when we truly drop data)
   size_t bytesDropped; // Per-channel dropped bytes counter
+  ChannelEndpointInfo endpoint;
 };
 
 class SSHTunnel {
@@ -123,8 +152,17 @@ public:
   unsigned long getBytesSent();
   unsigned long getBytesDropped();
   int getActiveChannels();
+  void setEventHandlers(const SSHTunnelEvents &handlers);
+  bool addReverseTunnel(const TunnelConfig &mapping);
+  bool removeReverseTunnel(const String &remoteHost, int remotePort);
 
 private:
+  struct ListenerEntry {
+    LIBSSH2_LISTENER *listener;
+    TunnelConfig mapping;
+    int boundPort;
+  };
+
   // SSH connection management
   bool initializeSSH();
   bool authenticateSSH();
@@ -135,7 +173,8 @@ private:
   // Channel management
   bool handleNewConnection();
   void handleChannelData(int channelIndex);
-  void closeChannel(int channelIndex);
+  void closeChannel(int channelIndex,
+                    ChannelCloseReason reason = ChannelCloseReason::Unknown);
   void cleanupInactiveChannels();
   void printChannelStatistics();
 
@@ -170,9 +209,11 @@ private:
   bool isLargeTransferActive();
   void detectLargeTransfer(int channelIndex);
   bool shouldAcceptNewConnection();
-  void queuePendingConnection(LIBSSH2_CHANNEL *channel);
+  void queuePendingConnection(LIBSSH2_CHANNEL *channel,
+                              const TunnelConfig &mapping);
   bool processPendingConnections();
-  bool processQueuedConnection(LIBSSH2_CHANNEL *channel);
+  bool processQueuedConnection(LIBSSH2_CHANNEL *channel,
+                               const TunnelConfig &mapping);
   void closeLibssh2Channel(LIBSSH2_CHANNEL *channel);
   bool channelEofLocked(LIBSSH2_CHANNEL *channel);
 
@@ -205,10 +246,25 @@ private:
   void refillGlobalTokens();
   size_t getGlobalAllowance(size_t desired);
   void commitGlobalTokens(size_t used);
+  bool createListenerForMapping(const TunnelConfig &mapping,
+                                ListenerEntry &entry);
+  void cancelListener(ListenerEntry &entry);
+  void cancelAllListeners();
+  bool bindChannelToMapping(LIBSSH2_CHANNEL *channel,
+                            const TunnelConfig &mapping);
+  int acquireChannelSlot();
+  int connectToLocalEndpoint(const TunnelConfig &mapping);
+  void snapshotEndpoint(TunnelChannel &channel, const TunnelConfig &mapping);
+  void emitSessionConnected();
+  void emitSessionDisconnected();
+  void emitChannelOpened(int channelIndex);
+  void emitChannelClosed(int channelIndex, ChannelCloseReason reason);
+  void emitErrorEvent(int code, const char *detail);
+  void emitLargeTransferEvent(int channelIndex, bool started);
 
   // Member variables
   LIBSSH2_SESSION *session;
-  LIBSSH2_LISTENER *listener;
+  std::vector<ListenerEntry> listeners;
   int socketfd;
 
   TunnelChannel *channels; // Dynamic allocation based on config
@@ -240,6 +296,7 @@ private:
   struct PendingConnection {
     LIBSSH2_CHANNEL *channel;
     unsigned long timestamp;
+    TunnelConfig mapping;
   };
   std::vector<PendingConnection> pendingConnections;
   SemaphoreHandle_t pendingConnectionsMutex;
@@ -265,6 +322,7 @@ private:
   unsigned long lastGlobalThrottleLogMs;
   int boundPort;
   size_t ringBufferCapacity;
+  SSHTunnelEvents eventHandlers;
 
   // Protection methods
   bool lockTunnel();
