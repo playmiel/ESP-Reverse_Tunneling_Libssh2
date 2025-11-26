@@ -92,7 +92,7 @@ SSHTunnel::SSHTunnel()
       lastGlobalThrottleLogMs(0), boundPort(-1), ringBufferCapacity(0),
       eventHandlers() {
 
-  // OPTIMIZED: Use mutexes instead of binary semaphores for better performance
+  //   Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
   statsMutex = xSemaphoreCreateMutex();
   sessionMutex = xSemaphoreCreateMutex();
@@ -129,7 +129,7 @@ SSHTunnel::~SSHTunnel() {
   // Free dynamically allocated memory with ring buffers
   if (channels != nullptr) {
     for (int i = 0; i < config->getConnectionConfig().maxChannels; i++) {
-      // OPTIMIZED: Clean unified buffers
+      //   Clean unified buffers
       if (channels[i].sshToLocalBuffer) {
         delete channels[i].sshToLocalBuffer;
         channels[i].sshToLocalBuffer = nullptr;
@@ -204,8 +204,8 @@ bool SSHTunnel::init() {
     channels[i].effectivePriority = channels[i].priority;
     channels[i].gracefulClosing = false;
     channels[i].consecutiveErrors = 0;
-    channels[i].eagainErrors = 0;      // NEW: Separate counter for EAGAIN
-    channels[i].readMutexFailures = 0; // FIXED: Initialize new failure counters
+    channels[i].eagainErrors = 0;      // Separate counter for EAGAIN
+    channels[i].readMutexFailures = 0; // Initialize new failure counters
     channels[i].writeMutexFailures = 0;
     channels[i].queuedBytesToLocal = 0;
     channels[i].queuedBytesToRemote = 0;
@@ -213,7 +213,7 @@ bool SSHTunnel::init() {
     channels[i].lostWriteChunks = 0;
     channels[i].bytesDropped = 0;
 
-    // NEW: Initialize large-transfer detection variables
+    // Initialize large-transfer detection variables
     channels[i].largeTransferInProgress = false;
     channels[i].transferStartTime = 0;
     channels[i].transferredBytes = 0;
@@ -230,7 +230,7 @@ bool SSHTunnel::init() {
     channels[i].writeProbeFailCount = 0;
     channels[i].localReadTerminated = false;
 
-    // OPTIMIZED: Create unified buffers (simpler & efficient)
+    //   Create unified buffers (simpler & efficient)
     char ringName[32];
 
     // Unified buffer for SSH->Local (configurable size)
@@ -248,7 +248,7 @@ bool SSHTunnel::init() {
       return false;
     }
 
-    // OPTIMIZED: Create mutexes instead of binary semaphores
+    //   Create mutexes instead of binary semaphores
     channels[i].readMutex = xSemaphoreCreateMutex();
     channels[i].writeMutex = xSemaphoreCreateMutex();
 
@@ -259,7 +259,7 @@ bool SSHTunnel::init() {
       return false;
     }
 
-    // NEW: init deferred residual buffers (partial enqueue protection)
+    //   init deferred residual buffers (partial enqueue protection)
     channels[i].deferredToLocal = nullptr;
     channels[i].deferredToLocalSize = 0;
     channels[i].deferredToLocalOffset = 0;
@@ -293,7 +293,7 @@ bool SSHTunnel::init() {
   }
   libssh2Initialized = true;
 
-  // NEW: Start dedicated data processing task
+  //   Start dedicated data processing task
   if (!startDataProcessingTask()) {
     LOG_E("SSH", "Failed to start data processing task");
     cleanupPartialInit(maxChannels);
@@ -448,7 +448,7 @@ void SSHTunnel::loop() {
     lastKeepAlive = now;
   }
 
-  // OPTIMIZED: Reduce log frequency in the hot loop
+  //   Reduce log frequency in the hot loop
   // Periodic statistics (every 5 minutes instead of 2)
   static unsigned long lastStatsTime = 0;
   if (now - lastStatsTime > 300000) { // 5 minutes
@@ -456,7 +456,7 @@ void SSHTunnel::loop() {
     lastStatsTime = now;
   }
 
-  // NEW: Deadlock check every 30 seconds (reduced frequency)
+  //   Deadlock check every 30 seconds (reduced frequency)
   static unsigned long lastDeadlockCheck = 0;
   if (now - lastDeadlockCheck > 30000) { // 30 seconds
     checkAndRecoverDeadlocks();
@@ -466,7 +466,7 @@ void SSHTunnel::loop() {
   // Handle new connections
   handleNewConnection();
 
-  // NEW: Process pending connections only if no large transfer is active
+  //   Process pending connections only if no large transfer is active
   if (!isLargeTransferActive()) {
     processPendingConnections();
   }
@@ -530,7 +530,7 @@ void SSHTunnel::loop() {
   // Cleanup inactive channels
   cleanupInactiveChannels();
 
-  // OPTIMIZED: Slightly increase delay to reduce CPU contention
+  //   Slightly increase delay to reduce CPU contention
   vTaskDelay(pdMS_TO_TICKS(10)); // 10ms instead of 5ms
 }
 
@@ -1748,7 +1748,7 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   // Local -> SSH (read from local socket and write to SSH channel)
   bool writeSuccess = processChannelWrite(channelIndex);
 
-  // NEW: Detect large transfers based on activity
+  //   Detect large transfers based on activity
   if (readSuccess || writeSuccess) {
     detectLargeTransfer(channelIndex);
   }
@@ -1907,7 +1907,7 @@ void SSHTunnel::cleanupInactiveChannels() {
       unsigned long timeSinceActivity = now - channels[i].lastActivity;
       bool pendingWork = channelHasPendingWork(channels[i]);
 
-      // NEW: Detect & repair with hysteresis/cooldown to avoid noisy recoveries
+      //   Detect & repair with hysteresis/cooldown to avoid noisy recoveries
       if (!isChannelHealthy(i)) {
         channels[i].healthUnhealthyCount++;
         if (channels[i].healthUnhealthyCount < HEALTH_UNHEALTHY_THRESHOLD) {
@@ -2614,7 +2614,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
   unsigned long now = millis();
   bool remoteEofDetected = false;
 
-  // OPTIMIZED: Flow control with optimized high/low watermarks for ESP32
+  //   Flow control with optimized high/low watermarks for ESP32
   if (ch.flowControlPaused) {
     // Check whether we can resume
     if (ch.queuedBytesToLocal < LOW_WATER_LOCAL) {
@@ -3681,7 +3681,7 @@ bool SSHTunnel::queueData(int channelIndex, uint8_t *data, size_t size,
   return q == size;
 }
 
-// NEW: queueData version returning the number of bytes actually enqueued
+//   queueData version returning the number of bytes actually enqueued
 size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
                             bool isRead) {
   if (channelIndex < 0 ||
@@ -3797,23 +3797,65 @@ void SSHTunnel::flushPendingData(int channelIndex) {
   if (ch.sshToLocalBuffer && !ch.sshToLocalBuffer->empty() &&
       ch.localSocket >= 0) {
     if (lockChannelRead(channelIndex)) {
-      uint8_t temp[SSH_BUFFER_SIZE];
-      size_t peeked = ch.sshToLocalBuffer->peek(temp, sizeof(temp));
-      if (peeked > 0) {
-        ssize_t w = send(ch.localSocket, temp, peeked, MSG_DONTWAIT);
-        if (w > 0) {
-          uint8_t dump[SSH_BUFFER_SIZE];
-          ch.sshToLocalBuffer->read(dump, (size_t)w);
-          ch.queuedBytesToLocal = (ch.queuedBytesToLocal > (size_t)w)
-                                      ? ch.queuedBytesToLocal - (size_t)w
-                                      : 0;
-          if ((size_t)w < peeked) {
-            // remainder stays in the ring, nothing to do
+      const uint8_t *chunkPtr = nullptr;
+      size_t chunkSize =
+          ch.sshToLocalBuffer->acquire(&chunkPtr, SSH_BUFFER_SIZE);
+      if (chunkSize > 0 && chunkPtr) {
+        size_t sentTotal = 0;
+        while (sentTotal < chunkSize) {
+          ssize_t w = send(ch.localSocket, chunkPtr + sentTotal,
+                           chunkSize - sentTotal, MSG_DONTWAIT);
+          if (w > 0) {
+            sentTotal += (size_t)w;
+          } else if (w < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) {
+            break; // socket temporarily full
+          } else {
+            LOGF_W("SSH", "Channel %d: flushPendingData local send err %s",
+                   channelIndex, strerror(errno));
+            break;
           }
-        } else if (w < 0 && !(errno == EAGAIN || errno == EWOULDBLOCK)) {
-          LOGF_W("SSH", "Channel %d: flushPendingData local send err %s",
-                 channelIndex, strerror(errno));
         }
+
+        // Update counters for bytes actually delivered
+        if (sentTotal > 0) {
+          ch.totalBytesReceived += sentTotal;
+          if (lockStats()) {
+            bytesReceived += sentTotal;
+            unlockStats();
+          }
+        }
+
+        // If not everything was written, stash remainder into deferred buffer
+        size_t remaining = chunkSize - sentTotal;
+        if (remaining > 0) {
+          uint8_t *newBuf =
+              (uint8_t *)safeMalloc(remaining, "DEFER_LOC_FLUSH");
+          if (newBuf) {
+            memcpy(newBuf, chunkPtr + sentTotal, remaining);
+            SAFE_FREE(ch.deferredToLocal);
+            ch.deferredToLocal = newBuf;
+            ch.deferredToLocalSize = remaining;
+            ch.deferredToLocalOffset = 0;
+            LOGF_W("SSH",
+                   "Channel %d: Deferred %zu bytes during flush (SSH->Local)",
+                   channelIndex, remaining);
+          } else {
+            LOGF_E("SSH",
+                   "Channel %d: Allocation failed deferring %zu bytes (drop)",
+                   channelIndex, remaining);
+            ch.bytesDropped += remaining;
+            if (lockStats()) {
+              droppedBytes += remaining;
+              unlockStats();
+            }
+          }
+        }
+
+        // Release the chunk back to the ringbuffer
+        ch.sshToLocalBuffer->release(chunkPtr);
+        // Ring buffer no longer holds this chunk
+        ch.queuedBytesToLocal =
+            (ch.queuedBytesToLocal > chunkSize) ? (ch.queuedBytesToLocal - chunkSize) : 0;
       }
       unlockChannelRead(channelIndex);
     }
@@ -3824,52 +3866,80 @@ void SSHTunnel::flushPendingData(int channelIndex) {
     if (lockChannelWrite(channelIndex)) {
       bool dropPending = false;
       String dropReason = "";
-      uint8_t temp[SSH_BUFFER_SIZE];
-      size_t peeked = ch.localToSshBuffer->peek(temp, sizeof(temp));
-      if (peeked > 0) {
-        ssize_t w =
-            libssh2_channel_write_ex(ch.channel, 0, (char *)temp, peeked);
-        if (w > 0) {
-          uint8_t dump[SSH_BUFFER_SIZE];
-          ch.localToSshBuffer->read(dump, (size_t)w);
-          ch.queuedBytesToRemote = (ch.queuedBytesToRemote > (size_t)w)
-                                       ? ch.queuedBytesToRemote - (size_t)w
-                                       : 0;
-          ch.lastSuccessfulWrite = millis();
-          ch.consecutiveErrors = 0;
-        } else if (w == LIBSSH2_ERROR_EAGAIN) {
-          // benign, try later
-        } else if (w < 0) {
-          unsigned long nowMs = millis();
-          ch.consecutiveErrors++;
-          ch.lastWriteErrorMs = nowMs;
-          if (w == LIBSSH2_ERROR_SOCKET_RECV) {
-            ch.socketRecvErrors++;
-          } else if (w == LIBSSH2_ERROR_DECRYPT) {
-            ch.fatalCryptoErrors++;
-            ch.gracefulClosing = true; // Force channel to wind down
-          }
-          // Throttled detailed log (every 2000ms if still erroring)
-          if (nowMs - ch.lastErrorDetailLogMs > 2000) {
-            ch.lastErrorDetailLogMs = nowMs;
-            LOGF_W("SSH",
-                   "Channel %d: flushPendingData SSH write err %zd cons=%d "
-                   "sockRecv=%d crypt=%d qRemote=%zu defRem=%zu",
-                   channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors,
-                   ch.fatalCryptoErrors, ch.queuedBytesToRemote,
-                   (size_t)(ch.deferredToRemote ? (ch.deferredToRemoteSize -
-                                                   ch.deferredToRemoteOffset)
-                                                : 0));
-          }
-          if (w == LIBSSH2_ERROR_CHANNEL_CLOSED ||
-              w == LIBSSH2_ERROR_SOCKET_SEND ||
-              w == LIBSSH2_ERROR_SOCKET_RECV) {
-            dropPending = true;
-            dropReason =
-                String("ssh flush failure (code=") + String((int)w) + ")";
+      const uint8_t *chunkPtr = nullptr;
+      size_t chunkSize =
+          ch.localToSshBuffer->acquire(&chunkPtr, SSH_BUFFER_SIZE);
+      if (chunkSize > 0 && chunkPtr) {
+        size_t sentTotal = 0;
+        while (sentTotal < chunkSize) {
+          ssize_t w = libssh2_channel_write_ex(
+              ch.channel, 0, (char *)(chunkPtr + sentTotal),
+              chunkSize - sentTotal);
+          if (w > 0) {
+            sentTotal += (size_t)w;
+            ch.lastSuccessfulWrite = millis();
+            ch.consecutiveErrors = 0;
+          } else if (w == LIBSSH2_ERROR_EAGAIN) {
+            break; // try later
+          } else {
+            unsigned long nowMs = millis();
+            ch.consecutiveErrors++;
+            ch.lastWriteErrorMs = nowMs;
+            if (w == LIBSSH2_ERROR_SOCKET_RECV) {
+              ch.socketRecvErrors++;
+            } else if (w == LIBSSH2_ERROR_DECRYPT) {
+              ch.fatalCryptoErrors++;
+              ch.gracefulClosing = true; // Force channel to wind down
+            }
+            // Throttled detailed log (every 2000ms if still erroring)
+            if (nowMs - ch.lastErrorDetailLogMs > 2000) {
+              ch.lastErrorDetailLogMs = nowMs;
+              LOGF_W("SSH",
+                     "Channel %d: flushPendingData SSH write err %zd cons=%d "
+                     "sockRecv=%d crypt=%d qRemote=%zu defRem=%zu",
+                     channelIndex, w, ch.consecutiveErrors, ch.socketRecvErrors,
+                     ch.fatalCryptoErrors, ch.queuedBytesToRemote,
+                     (size_t)(ch.deferredToRemote ? (ch.deferredToRemoteSize -
+                                                     ch.deferredToRemoteOffset)
+                                                  : 0));
+            }
+            if (w == LIBSSH2_ERROR_CHANNEL_CLOSED ||
+                w == LIBSSH2_ERROR_SOCKET_SEND ||
+                w == LIBSSH2_ERROR_SOCKET_RECV) {
+              dropPending = true;
+              dropReason =
+                  String("ssh flush failure (code=") + String((int)w) + ")";
+            }
+            break;
           }
         }
+
+        size_t remaining = chunkSize - sentTotal;
+        if (remaining > 0 && !dropPending) {
+          uint8_t *newBuf =
+              (uint8_t *)safeMalloc(remaining, "DEFER_REM_FLUSH");
+          if (newBuf) {
+            memcpy(newBuf, chunkPtr + sentTotal, remaining);
+            SAFE_FREE(ch.deferredToRemote);
+            ch.deferredToRemote = newBuf;
+            ch.deferredToRemoteSize = remaining;
+            ch.deferredToRemoteOffset = 0;
+            LOGF_W("SSH",
+                   "Channel %d: Deferred %zu bytes during flush (Local->SSH)",
+                   channelIndex, remaining);
+          } else {
+            dropPending = true;
+            dropReason = "alloc failure while deferring";
+          }
+        }
+
+        ch.localToSshBuffer->release(chunkPtr);
+        // Ring buffer no longer holds this chunk
+        ch.queuedBytesToRemote = (ch.queuedBytesToRemote > chunkSize)
+                                     ? ch.queuedBytesToRemote - chunkSize
+                                     : 0;
       }
+
       if (dropPending) {
         size_t droppedBytesLocal = 0;
         if (ch.localToSshBuffer) {
@@ -4001,7 +4071,7 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
     return false;
   }
 
-  // NEW: Check mutex state
+  //   Check mutex state
   if (ch.readMutex) {
     if (xSemaphoreTake(ch.readMutex, 0) == pdTRUE) {
       xSemaphoreGive(ch.readMutex);
@@ -4054,7 +4124,7 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
 void SSHTunnel::recoverChannel(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
 
-  // OPTIMIZED: Try a graceful recovery first
+  //   Try a graceful recovery first
   if (ch.consecutiveErrors < 5) {
     LOGF_I("SSH", "Channel %d: Attempting graceful recovery (errors: %d)",
            channelIndex, ch.consecutiveErrors);
@@ -4066,7 +4136,7 @@ void SSHTunnel::recoverChannel(int channelIndex) {
   LOGF_W("SSH", "Channel %d: Too many errors (%d), forcing hard recovery",
          channelIndex, ch.consecutiveErrors);
 
-  // NEW: Force release of stuck mutexes
+  //   Force release of stuck mutexes
   if (ch.readMutex) {
     // Check if mutex is stuck by trying to acquire quickly
     if (xSemaphoreTake(ch.readMutex, 0) == pdTRUE) {
@@ -4100,7 +4170,7 @@ void SSHTunnel::recoverChannel(int channelIndex) {
     }
   }
 
-  // OPTIMIZED: Only now flush pending data in a hard recovery scenario
+  //   Only now flush pending data in a hard recovery scenario
   flushPendingData(channelIndex);
 
   // Reset error counters
@@ -4234,7 +4304,7 @@ bool SSHTunnel::isSocketWritable(int sockfd, int timeoutMs) {
   return FD_ISSET(sockfd, &wfds);
 }
 
-// NEW: Method to detect and recover deadlocks
+//   Method to detect and recover deadlocks
 void SSHTunnel::checkAndRecoverDeadlocks() {
   if (!channels)
     return;
@@ -4304,7 +4374,7 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
   }
 }
 
-// NEW: Detailed data transfer diagnostics
+//   Detailed data transfer diagnostics
 void SSHTunnel::printDataTransferStats(int channelIndex) {
   if (!channels || channelIndex < 0 ||
       channelIndex >= config->getConnectionConfig().maxChannels) {
@@ -4533,7 +4603,7 @@ bool SSHTunnel::processQueuedConnection(LIBSSH2_CHANNEL *channel,
 
 // ====== NEW OPTIMIZED METHODS ======
 
-// NEW: Dedicated task for data processing (producer/consumer pattern)
+//   Dedicated task for data processing (producer/consumer pattern)
 void SSHTunnel::dataProcessingTaskWrapper(void *parameter) {
   SSHTunnel *tunnel = static_cast<SSHTunnel *>(parameter);
   tunnel->dataProcessingTaskFunction();
@@ -4692,7 +4762,7 @@ void SSHTunnel::stopDataProcessingTask() {
   LOG_I("SSH", "Data processing task stopped");
 }
 
-// NEW: Graceful recovery without clearing buffers
+//   Graceful recovery without clearing buffers
 void SSHTunnel::gracefulRecoverChannel(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
   if (ch.terminalSocketFailure) {
