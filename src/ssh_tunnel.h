@@ -78,7 +78,7 @@ struct TunnelChannel {
   uint8_t effectivePriority;         // Last computed effective priority
   bool gracefulClosing;  // Closing in progress but with remaining data
   int consecutiveErrors; // Number of consecutive errors
-  int eagainErrors;      // NEW: Separate counter for EAGAIN errors
+  int eagainErrors;      //   Separate counter for EAGAIN errors
 
   // FIXED: New counters for mutex failure diagnostics (non-destructive)
   int readMutexFailures;  // Counter for read mutex timeouts
@@ -89,13 +89,13 @@ struct TunnelChannel {
   size_t queuedBytesToRemote; // Bytes in localToSshBuffer
   bool remoteEof;             // Remote side has sent EOF
 
-  // NEW: Large transfer detection
+  //   Large transfer detection
   bool largeTransferInProgress;    // Large file transfer in progress
   unsigned long transferStartTime; // Start time of current transfer
   size_t transferredBytes;         // Bytes transferred in this transfer
   size_t peakBytesPerSecond;       // Peak throughput for this channel
 
-  // NEW: Health tracking to avoid aggressive recoveries/log spam
+  //   Health tracking to avoid aggressive recoveries/log spam
   int healthUnhealthyCount;         // consecutive unhealthy detections
   unsigned long lastHardRecoveryMs; // last time a hard recovery was performed
   unsigned long lastHealthWarnMs;   // last time we logged a WARN for health
@@ -128,7 +128,7 @@ struct TunnelChannel {
   size_t deferredToRemoteSize;
   size_t deferredToRemoteOffset;
 
-  // NEW: Metrics for dropped bytes (only when we truly drop data)
+  //   Metrics for dropped bytes (only when we truly drop data)
   size_t bytesDropped; // Per-channel dropped bytes counter
   ChannelEndpointInfo endpoint;
 };
@@ -193,19 +193,19 @@ private:
   bool isChannelHealthy(int channelIndex);
   void recoverChannel(int channelIndex);
   void gracefulRecoverChannel(
-      int channelIndex); // NEW: Recovery without clearing buffers
+      int channelIndex); //   Recovery without clearing buffers
   size_t getOptimalBufferSize(int channelIndex);
-  void checkAndRecoverDeadlocks(); // NEW: Deadlock detection and recovery
-  // NEW: Dedicated task for data processing (producer/consumer pattern)
+  void checkAndRecoverDeadlocks(); //   Deadlock detection and recovery
+  //   Dedicated task for data processing (producer/consumer pattern)
   static void dataProcessingTaskWrapper(void *parameter);
   void dataProcessingTaskFunction();
   bool startDataProcessingTask();
   void stopDataProcessingTask();
 
-  // NEW: Data duplication diagnostic
+  //   Data duplication diagnostic
   void printDataTransferStats(int channelIndex);
 
-  // NEW: Large transfer management and pending connections queue
+  //   Large transfer management and pending connections queue
   bool isLargeTransferActive();
   void detectLargeTransfer(int channelIndex);
   bool shouldAcceptNewConnection();
@@ -277,7 +277,7 @@ private:
   // Statistics
   unsigned long bytesReceived;
   unsigned long bytesSent;
-  unsigned long droppedBytes; // NEW: Global dropped bytes (sum of channels)
+  unsigned long droppedBytes; //   Global dropped bytes (sum of channels)
 
   // Buffers (dynamic allocation based on config)
   uint8_t *rxBuffer;
@@ -292,7 +292,7 @@ private:
   SSHConfiguration *config;
   bool libssh2Initialized;
 
-  // NEW: Queue for pending connections during large transfers
+  //   Queue for pending connections during large transfers
   struct PendingConnection {
     LIBSSH2_CHANNEL *channel;
     unsigned long timestamp;
@@ -310,7 +310,7 @@ private:
   static const size_t HIGH_WATER_LOCAL = 28 * 1024; // 28KB (increased)
   static const size_t LOW_WATER_LOCAL = 14 * 1024;  // 14KB (50% of HIGH_WATER)
 
-  // NEW: Dedicated task for data processing
+  //   Dedicated task for data processing
   TaskHandle_t dataProcessingTask;
   SemaphoreHandle_t dataProcessingSemaphore;
   bool dataProcessingTaskRunning;
@@ -342,7 +342,7 @@ private:
   bool lockChannel(int channelIndex);
   void unlockChannel(int channelIndex);
 
-  // NEW: Method to force release of blocked mutexes
+  //   Method to force release of blocked mutexes
   void safeRetryMutexAccess(
       int channelIndex); // FIXED: Safe version instead of forceMutexRelease
   void cleanupPartialInit(int maxChannels);
