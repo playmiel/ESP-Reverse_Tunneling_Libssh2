@@ -127,7 +127,7 @@ private:
 public:
   DataRingBuffer(size_t size, const char *tagName = "DATA_RING_BUFFER")
       : handle(nullptr), capacity(size), tag(tagName) {
-    handle = xRingbufferCreate(capacity, RINGBUF_TYPE_BYTEBUFFER);
+    handle = xRingbufferCreate(capacity, RINGBUF_TYPE_BYTEBUF);
     if (!handle) {
       LOGF_E("RING", "Failed to create %s (capacity=%d bytes)", tag, capacity);
     } else {
