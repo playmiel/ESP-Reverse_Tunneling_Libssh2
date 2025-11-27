@@ -3828,8 +3828,7 @@ void SSHTunnel::flushPendingData(int channelIndex) {
         // If not everything was written, stash remainder into deferred buffer
         size_t remaining = chunkSize - sentTotal;
         if (remaining > 0) {
-          uint8_t *newBuf =
-              (uint8_t *)safeMalloc(remaining, "DEFER_LOC_FLUSH");
+          uint8_t *newBuf = (uint8_t *)safeMalloc(remaining, "DEFER_LOC_FLUSH");
           if (newBuf) {
             memcpy(newBuf, chunkPtr + sentTotal, remaining);
             SAFE_FREE(ch.deferredToLocal);
@@ -3854,8 +3853,9 @@ void SSHTunnel::flushPendingData(int channelIndex) {
         // Release the chunk back to the ringbuffer
         ch.sshToLocalBuffer->release(chunkPtr);
         // Ring buffer no longer holds this chunk
-        ch.queuedBytesToLocal =
-            (ch.queuedBytesToLocal > chunkSize) ? (ch.queuedBytesToLocal - chunkSize) : 0;
+        ch.queuedBytesToLocal = (ch.queuedBytesToLocal > chunkSize)
+                                    ? (ch.queuedBytesToLocal - chunkSize)
+                                    : 0;
       }
       unlockChannelRead(channelIndex);
     }
@@ -3872,9 +3872,9 @@ void SSHTunnel::flushPendingData(int channelIndex) {
       if (chunkSize > 0 && chunkPtr) {
         size_t sentTotal = 0;
         while (sentTotal < chunkSize) {
-          ssize_t w = libssh2_channel_write_ex(
-              ch.channel, 0, (char *)(chunkPtr + sentTotal),
-              chunkSize - sentTotal);
+          ssize_t w = libssh2_channel_write_ex(ch.channel, 0,
+                                               (char *)(chunkPtr + sentTotal),
+                                               chunkSize - sentTotal);
           if (w > 0) {
             sentTotal += (size_t)w;
             ch.lastSuccessfulWrite = millis();
@@ -3916,8 +3916,7 @@ void SSHTunnel::flushPendingData(int channelIndex) {
 
         size_t remaining = chunkSize - sentTotal;
         if (remaining > 0 && !dropPending) {
-          uint8_t *newBuf =
-              (uint8_t *)safeMalloc(remaining, "DEFER_REM_FLUSH");
+          uint8_t *newBuf = (uint8_t *)safeMalloc(remaining, "DEFER_REM_FLUSH");
           if (newBuf) {
             memcpy(newBuf, chunkPtr + sentTotal, remaining);
             SAFE_FREE(ch.deferredToRemote);
