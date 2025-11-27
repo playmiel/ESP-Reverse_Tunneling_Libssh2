@@ -356,10 +356,8 @@ SSHServerConfig() :
 
 ### Step 1: Update code
 ```cpp
-// Old code (no verification)
-globalSSHConfig.setSSHKeyAuthFromMemory(host, port, user, privKey, pubKey, "");
+// Initial configuration without verification
 
-// New code (with discovery)
 globalSSHConfig.setSSHKeyAuthFromMemory(host, port, user, privKey, pubKey, "");
 globalSSHConfig.setHostKeyVerification(false); // Temporary discovery mode
 ```

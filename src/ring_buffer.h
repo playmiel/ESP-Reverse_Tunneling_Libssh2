@@ -3,6 +3,7 @@
 #include "memory_fixes.h"
 #include <cstring>
 #include <freertos/FreeRTOS.h>
+#include <freertos/ringbuf.h>
 #include <freertos/semphr.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -14,7 +15,7 @@ struct PendingData {
   size_t size;
   size_t offset;
   unsigned long timestamp;
-  uint32_t checksum; // NEW: Simple checksum to detect duplication
+  uint32_t checksum; // Simple checksum for data integrity
 };
 
 // Generic thread-safe ring buffer
@@ -116,134 +117,122 @@ public:
   float usage() const { return (float)count / capacity * 100.0f; }
 };
 
-// Specialized ring buffer for raw byte data
+// Specialized ring buffer for raw byte data (wraps FreeRTOS ringbuffer)
 class DataRingBuffer {
 private:
-  uint8_t *buffer;
+  RingbufHandle_t handle;
   size_t capacity;
-  volatile size_t writePos;
-  volatile size_t readPos;
-  volatile size_t count;
-  SemaphoreHandle_t mutex;
   const char *tag;
 
 public:
   DataRingBuffer(size_t size, const char *tagName = "DATA_RING_BUFFER")
-      : capacity(size), writePos(0), readPos(0), count(0), tag(tagName) {
-    buffer = (uint8_t *)safeMalloc(capacity, tag);
-    // Use a real mutex here as well (not a binary semaphore)
-    mutex = xSemaphoreCreateMutex();
-    LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
+      : handle(nullptr), capacity(size), tag(tagName) {
+    handle = xRingbufferCreate(capacity, RINGBUF_TYPE_BYTEBUF);
+    if (!handle) {
+      LOGF_E("RING", "Failed to create %s (capacity=%d bytes)", tag, capacity);
+    } else {
+      LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
+    }
   }
 
   ~DataRingBuffer() {
-    SAFE_FREE(buffer);
-    SAFE_DELETE_SEMAPHORE(mutex);
+    if (handle) {
+      vRingbufferDelete(handle);
+      handle = nullptr;
+    }
     LOGF_D("RING", "Destroyed %s", tag);
   }
 
   size_t write(const uint8_t *data, size_t len) {
-    if (!data || len == 0 || !buffer)
+    if (!handle || !data || len == 0)
       return 0;
 
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-      return 0;
+    size_t written = 0;
+    while (written < len) {
+      size_t freeSpace = xRingbufferGetCurFreeSize(handle);
+      if (freeSpace == 0) {
+        break;
+      }
+      size_t chunk = len - written;
+      if (chunk > freeSpace) {
+        chunk = freeSpace;
+      }
+      if (chunk == 0) {
+        break;
+      }
+      BaseType_t ok =
+          xRingbufferSend(handle, (void *)(data + written), chunk, 0);
+      if (ok != pdTRUE) {
+        break;
+      }
+      written += chunk;
     }
-
-    size_t available = capacity - count;
-    size_t toWrite = (len > available) ? available : len;
-
-    // Optimized write handling wrap-around
-    size_t firstChunk = capacity - writePos;
-    if (toWrite <= firstChunk) {
-      // No wrap-around
-      memcpy(buffer + writePos, data, toWrite);
-    } else {
-      // Wrap-around required
-      memcpy(buffer + writePos, data, firstChunk);
-      memcpy(buffer, data + firstChunk, toWrite - firstChunk);
-    }
-    writePos = (writePos + toWrite) % capacity;
-    count = count + toWrite; // (une seule fois)
-
-    xSemaphoreGive(mutex);
-    return toWrite;
+    return written;
   }
 
   size_t read(uint8_t *data, size_t len) {
-    if (!data || len == 0 || !buffer)
+    if (!handle || !data || len == 0)
       return 0;
 
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+    size_t itemSize = 0;
+    uint8_t *item =
+        (uint8_t *)xRingbufferReceiveUpTo(handle, &itemSize, 0, len);
+    if (!item) {
       return 0;
     }
-
-    size_t toRead = (len > count) ? count : len;
-
-    // Optimized read handling wrap-around
-    size_t firstChunk = capacity - readPos;
-    if (toRead <= firstChunk) {
-      // No wrap-around
-      memcpy(data, buffer + readPos, toRead);
-    } else {
-      // Wrap-around required
-      memcpy(data, buffer + readPos, firstChunk);
-      memcpy(data + firstChunk, buffer, toRead - firstChunk);
-    }
-    readPos = (readPos + toRead) % capacity;
-    count = count - toRead; // (une seule fois)
-
-    xSemaphoreGive(mutex);
-    return toRead;
+    size_t toCopy = itemSize > len ? len : itemSize;
+    memcpy(data, item, toCopy);
+    vRingbufferReturnItem(handle, item);
+    return toCopy;
   }
 
-  size_t peek(uint8_t *data, size_t len) {
-    if (!data || len == 0 || !buffer)
+  // Zero-copy acquire/release for flush paths
+  size_t acquire(const uint8_t **ptr, size_t maxLen) {
+    if (!handle || !ptr || maxLen == 0)
       return 0;
+    size_t itemSize = 0;
+    const uint8_t *item =
+        (const uint8_t *)xRingbufferReceiveUpTo(handle, &itemSize, 0, maxLen);
+    *ptr = item;
+    return itemSize;
+  }
 
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-      return 0;
+  void release(const void *ptr) {
+    if (handle && ptr) {
+      vRingbufferReturnItem(handle, (void *)ptr);
     }
-
-    size_t toRead = (len > count) ? count : len;
-
-    // Read without modifying indices
-    size_t firstChunk = capacity - readPos;
-    if (toRead <= firstChunk) {
-      memcpy(data, buffer + readPos, toRead);
-    } else {
-      memcpy(data, buffer + readPos, firstChunk);
-      memcpy(data + firstChunk, buffer, toRead - firstChunk);
-    }
-
-    xSemaphoreGive(mutex);
-    return toRead;
   }
 
   void clear() {
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
+    if (!handle)
       return;
+    size_t itemSize = 0;
+    void *item = nullptr;
+    while ((item = xRingbufferReceiveUpTo(handle, &itemSize, 0, capacity)) !=
+           nullptr) {
+      vRingbufferReturnItem(handle, item);
     }
-
-    writePos = 0;
-    readPos = 0;
-    count = 0;
-
-    xSemaphoreGive(mutex);
   }
 
-  size_t size() const { return count; }
-  size_t available() const { return capacity - count; }
-  bool empty() const { return count == 0; }
-  bool full() const { return count >= capacity; }
-  float usage() const { return (float)count / capacity * 100.0f; }
+  size_t size() const {
+    if (!handle)
+      return 0;
+    size_t freeSpace = xRingbufferGetCurFreeSize(handle);
+    return (freeSpace > capacity) ? 0 : (capacity - freeSpace);
+  }
+  size_t available() const {
+    if (!handle)
+      return 0;
+    return xRingbufferGetCurFreeSize(handle);
+  }
+  bool empty() const { return size() == 0; }
+  bool full() const { return available() == 0; }
+  float usage() const {
+    if (capacity == 0)
+      return 0.0f;
+    return (float)size() / capacity * 100.0f;
+  }
   size_t capacityBytes() const { return capacity; }
-
-  // Diagnostics
-  void printStats() const {
-    LOGF_I("RING", "%s: %d/%d bytes (%.1f%%), rPos=%d, wPos=%d", tag, count,
-           capacity, usage(), readPos, writePos);
-  }
 };
 
 // Template specialization for PendingData
