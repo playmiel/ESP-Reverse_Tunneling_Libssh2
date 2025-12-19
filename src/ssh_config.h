@@ -47,7 +47,7 @@ struct TunnelConfig {
 
   // Default constructor
   TunnelConfig()
-      : remoteBindHost("0.0.0.0"), remoteBindPort(8080),
+      : remoteBindHost("127.0.0.1"), remoteBindPort(8080),
         localHost("192.168.1.100"), localPort(80) {}
 };
 
