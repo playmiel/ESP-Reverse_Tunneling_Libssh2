@@ -406,7 +406,7 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
     
     // Reverse tunnel configuration
     globalSSHConfig.setTunnelConfig(
-        "127.0.0.1",              // Bind on all server interfaces
+        "127.0.0.1",              // Bind on localhost (server loopback interface)
         8080,                    // Remote port (server)
         "192.168.1.100",        // Local IP (ESP32)
         80                       // Local port (ESP32 web server)
