@@ -56,7 +56,7 @@ globalSSHConfig.setHostKeyVerification(
 
 // Tunnel configuration
 globalSSHConfig.setTunnelConfig(
-    "0.0.0.0", 8080,    // Remote server bind
+    "127.0.0.1", 8080,    // Remote server bind
     "192.168.1.100", 80 // Local target (ESP32)
 );
 ```

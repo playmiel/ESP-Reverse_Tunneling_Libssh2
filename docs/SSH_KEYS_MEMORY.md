@@ -123,7 +123,7 @@ void setup() {
   );
   
   // Tunnel configuration
-  globalSSHConfig.setTunnelConfig("0.0.0.0", 8080, "192.168.1.100", 80);
+  globalSSHConfig.setTunnelConfig("127.0.0.1", 8080, "192.168.1.100", 80);
   
   // Initialize and connect tunnel
   SSHTunnel tunnel;

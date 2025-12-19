@@ -554,7 +554,7 @@ bool SSHTunnel::initializeSSH() {
   sin.sin_family = AF_INET;
   struct hostent *he = gethostbyname(sshConfig.host.c_str());
   if (he == nullptr) {
-    LOGF_E("Invalid remote hostname: %s\n", sshConfig.host.c_str());
+    LOGF_E("SSH", "Invalid remote hostname: %s", sshConfig.host.c_str());
     close(socketfd);
     return false;
   }
@@ -917,10 +917,6 @@ bool SSHTunnel::authenticateSSH() {
                                    ? sshConfig.password.c_str()
                                    : nullptr;
 
-      LOGF_D("SSH", "Public key first 50 chars: %.50s",
-             sshConfig.publicKeyData.c_str());
-      LOGF_D("SSH", "Private key first 50 chars: %.50s",
-             sshConfig.privateKeyData.c_str());
       LOGF_D("SSH", "Using passphrase: %s", passphrase ? "yes" : "no");
 
       int auth_result = 0;

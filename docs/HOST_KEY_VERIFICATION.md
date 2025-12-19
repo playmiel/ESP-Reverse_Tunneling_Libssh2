@@ -86,12 +86,14 @@ globalSSHConfig.setExpectedHostKey(
 #### Method 3: Discovery mode (first connection)
 
 ```cpp
-// Disable verification to discover fingerprint
-globalSSHConfig.setHostKeyVerification(false);
+// Enable verification but leave the expected fingerprint empty (discovery/TOFU)
+// The connection will be accepted once and the server fingerprint will be printed.
+globalSSHConfig.setHostKeyVerification(true);
 
 // Logs will show:
-// [INFO] Store this fingerprint in your configuration: abcd1234...
-// Use this fingerprint to enable verification afterward
+// [INFO] Store this fingerprint (hex): ...
+// [INFO] Store this fingerprint (OpenSSH): SHA256:...
+// Copy that fingerprint into setExpectedHostKey() for subsequent connections.
 ```
 
 ## Configuration API
@@ -404,7 +406,7 @@ MC4CAQAwBQYDK2VwBCIEIBxK5c3j7kJ9QZ8fG3mVlM2fk8WdlMJq5018faI4C4eA
     
     // Reverse tunnel configuration
     globalSSHConfig.setTunnelConfig(
-        "0.0.0.0",              // Bind on all server interfaces
+        "127.0.0.1",              // Bind on all server interfaces
         8080,                    // Remote port (server)
         "192.168.1.100",        // Local IP (ESP32)
         80                       // Local port (ESP32 web server)
