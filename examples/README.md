@@ -45,8 +45,8 @@ several sample mappings:
 globalSSHConfig.clearTunnelMappings();
 globalSSHConfig.setMaxReverseListeners(3);
 
-globalSSHConfig.addTunnelMapping("0.0.0.0", 22080, "192.168.1.100", 80);
-globalSSHConfig.addTunnelMapping("0.0.0.0", 22081, "192.168.1.150", 5020);
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22080, "192.168.1.100", 80);
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22081, "192.168.1.150", 5020);
 globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, "192.168.1.200", 22);
 ```
 

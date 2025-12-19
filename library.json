@@ -1,11 +1,11 @@
 {
   "name": "ESP-Reverse_Tunneling_Libssh2",
-  "version": "1.4.1",
+  "version": "1.4.2",
   "keywords": "esp32, arduino, ssh, tunnel, reverse, libssh2",
   "description": "Library for ESP32 Arduino enabling creation of reverse SSH tunnels using libssh2.",
   "license": "MIT",
   "dependencies": {
-    "libssh2_esp": "https://github.com/playmiel/libssh2_esp.git"
+    "libssh2_esp": "https://github.com/playmiel/libssh2_esp.git#1.0"
   },
   "repository": {
     "type": "git",

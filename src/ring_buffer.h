@@ -31,13 +31,33 @@ private:
 
 public:
   RingBuffer(size_t size, const char *tagName = "RING_BUFFER")
-      : capacity(size), writePos(0), readPos(0), count(0), tag(tagName) {
+      : buffer(nullptr), capacity(size), writePos(0), readPos(0), count(0),
+        mutex(nullptr), tag(tagName) {
+    if (capacity == 0) {
+      LOGF_E("RING", "Failed to create %s (capacity=0)",
+             tag ? tag : "RING_BUFFER");
+      return;
+    }
+
     buffer = (T *)safeMalloc(sizeof(T) * capacity, tag);
     // Use a real mutex to benefit from priority inheritance and avoid
     // FreeRTOS assertion in vTaskPriorityDisinheritAfterTimeout
     mutex = xSemaphoreCreateMutex();
-    LOGF_I("RING", "Created %s: capacity=%d, size=%d bytes", tag, capacity,
-           sizeof(T) * capacity);
+    if (buffer == nullptr || mutex == nullptr) {
+      LOGF_E("RING", "Failed to create %s (capacity=%u, buffer=%p, mutex=%p)",
+             tag ? tag : "RING_BUFFER", (unsigned)capacity, buffer, mutex);
+      SAFE_FREE(buffer);
+      SAFE_DELETE_SEMAPHORE(mutex);
+      capacity = 0;
+      writePos = 0;
+      readPos = 0;
+      count = 0;
+      return;
+    }
+
+    LOGF_I("RING", "Created %s: capacity=%u, size=%u bytes",
+           tag ? tag : "RING_BUFFER", (unsigned)capacity,
+           (unsigned)(sizeof(T) * capacity));
   }
 
   ~RingBuffer() {
@@ -49,6 +69,9 @@ public:
   }
 
   bool push(const T &item) {
+    if (capacity == 0 || buffer == nullptr) {
+      return false;
+    }
     if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
       return false;
     }
@@ -66,6 +89,9 @@ public:
   }
 
   bool pop(T &item) {
+    if (capacity == 0 || buffer == nullptr) {
+      return false;
+    }
     if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
       return false;
     }
@@ -83,6 +109,9 @@ public:
   }
 
   bool peek(T &item) {
+    if (capacity == 0 || buffer == nullptr) {
+      return false;
+    }
     if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
       return false;
     }
