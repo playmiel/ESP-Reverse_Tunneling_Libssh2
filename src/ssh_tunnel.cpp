@@ -1164,22 +1164,24 @@ bool SSHTunnel::channelHasPendingWork(const TunnelChannel &channel) const {
 }
 
 void SSHTunnel::initializeGlobalThrottle() {
-  if (!lockThrottle(pdMS_TO_TICKS(20))) {
-    return;
-  }
+  bool locked = lockThrottle(pdMS_TO_TICKS(20));
   lastGlobalRefillMs = millis();
   lastGlobalThrottleLogMs = 0;
   globalThrottleActive = false;
   if (globalRateLimitBytesPerSec == 0) {
     globalTokens = 0;
-    unlockThrottle();
+    if (locked) {
+      unlockThrottle();
+    }
     return;
   }
   if (globalBurstBytes == 0) {
     globalBurstBytes = globalRateLimitBytesPerSec;
   }
   globalTokens = globalBurstBytes;
-  unlockThrottle();
+  if (locked) {
+    unlockThrottle();
+  }
 }
 
 void SSHTunnel::refillGlobalTokens() {
@@ -1209,8 +1211,11 @@ size_t SSHTunnel::getGlobalAllowance(size_t desired) {
   if (globalRateLimitBytesPerSec == 0 || desired == 0) {
     return desired;
   }
-  if (!lockThrottle(pdMS_TO_TICKS(5))) {
+  if (throttleMutex == NULL) {
     return desired;
+  }
+  if (!lockThrottle(pdMS_TO_TICKS(5))) {
+    return 0;
   }
   refillGlobalTokens();
   size_t available = globalTokens;
@@ -3908,6 +3913,7 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
   if (mutex) {
     TaskHandle_t holder = xSemaphoreGetMutexHolder(mutex);
     if (holder == xTaskGetCurrentTaskHandle()) {
+      // Caller already owns the mutex in this task; reuse that ownership.
       locked = true;
     } else {
       locked = (xSemaphoreTake(mutex, pdMS_TO_TICKS(20)) == pdTRUE);
@@ -3922,6 +3928,7 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
     }
     return 0;
   }
+  // We either acquired the mutex or already own it in this task.
   size_t remaining = size;
   const uint8_t *cursor = data;
   size_t totalQueued = 0;
