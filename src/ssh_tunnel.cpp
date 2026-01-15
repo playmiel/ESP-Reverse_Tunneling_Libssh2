@@ -1477,17 +1477,48 @@ void SSHTunnel::emitErrorEvent(int code, const char *detail) {
   }
 }
 
-void SSHTunnel::emitChannelError(int channelIndex, int code,
-                                 const char *detail) {
+void SSHTunnel::emitChannelError(int channelIndex, TunnelErrorCode code,
+                                 int rawCode, const char *detail) {
   if (!eventHandlers.onError || detail == nullptr) {
     return;
   }
-  char message[160];
+  char message[200];
   if (channelIndex >= 0) {
-    snprintf(message, sizeof(message), "ch=%d: %s", channelIndex, detail);
-    emitErrorEvent(code, message);
+    if (rawCode != 0) {
+      snprintf(message, sizeof(message), "ch=%d code=%d raw=%d: %s",
+               channelIndex, static_cast<int>(code), rawCode, detail);
+    } else {
+      snprintf(message, sizeof(message), "ch=%d code=%d: %s", channelIndex,
+               static_cast<int>(code), detail);
+    }
+    emitErrorEvent(static_cast<int>(code), message);
   } else {
-    emitErrorEvent(code, detail);
+    emitErrorEvent(static_cast<int>(code), detail);
+  }
+}
+
+void SSHTunnel::emitChannelWriteBroken(int channelIndex, TunnelErrorCode code,
+                                       int rawCode, const char *detail) {
+  if (eventHandlers.onChannelWriteBroken) {
+    eventHandlers.onChannelWriteBroken(channelIndex, code, rawCode, detail);
+  }
+}
+
+static TunnelErrorCode mapSshErrorToCode(int rc, bool isWrite) {
+  switch (rc) {
+  case LIBSSH2_ERROR_EAGAIN:
+    return TunnelErrorCode::SshEagain;
+  case LIBSSH2_ERROR_SOCKET_RECV:
+    return TunnelErrorCode::SshSocketRecv;
+  case LIBSSH2_ERROR_SOCKET_SEND:
+    return TunnelErrorCode::SshSocketSend;
+  case LIBSSH2_ERROR_CHANNEL_CLOSED:
+    return TunnelErrorCode::SshChannelClosed;
+  case LIBSSH2_ERROR_DECRYPT:
+    return TunnelErrorCode::SshDecrypt;
+  default:
+    return isWrite ? TunnelErrorCode::SshWriteFailure
+                   : TunnelErrorCode::SshReadFailure;
   }
 }
 
@@ -2826,7 +2857,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
               snprintf(dropMsg, sizeof(dropMsg),
                        "alloc failed deferring %zu bytes (ssh->local)",
                        leftover);
-              emitChannelError(channelIndex, ENOMEM, dropMsg);
+              emitChannelError(channelIndex, TunnelErrorCode::DropSshToLocal,
+                               ENOMEM, dropMsg);
               ch.lostWriteChunks++; // comptage diagnostique
               ch.bytesDropped += leftover;
               if (lockStats()) {
@@ -2864,7 +2896,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
               snprintf(dropMsg, sizeof(dropMsg),
                        "alloc failed deferring %zu bytes (local->ssh)",
                        leftover);
-              emitChannelError(channelIndex, ENOMEM, dropMsg);
+              emitChannelError(channelIndex, TunnelErrorCode::DropSshToLocal,
+                               ENOMEM, dropMsg);
               ch.lostWriteChunks++;
               ch.bytesDropped += leftover;
               if (lockStats()) {
@@ -2890,7 +2923,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
           char errMsg[128];
           snprintf(errMsg, sizeof(errMsg), "local write err=%d %s", errno,
                    strerror(errno));
-          emitChannelError(channelIndex, errno, errMsg);
+          emitChannelError(channelIndex, TunnelErrorCode::LocalSocketError,
+                           errno, errMsg);
         }
       }
     } else if (bytesRead == 0) {
@@ -2931,7 +2965,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
                  channelIndex, ch.socketRecvBurstCount,
                  (nowErr - ch.firstSocketRecvErrorMs), ch.queuedBytesToLocal,
                  ch.queuedBytesToRemote);
-          emitChannelError(channelIndex, (int)bytesRead,
+          emitChannelError(channelIndex, TunnelErrorCode::SshSocketRecv,
+                           (int)bytesRead,
                            "terminal -43 recv burst (read)");
           recordTerminalSocketFailure(nowErr);
         } else if (!ch.terminalSocketFailure) {
@@ -2944,8 +2979,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
                    "Channel %d: -43 recv (read) burst=%d queuedR=%zu detail=%s",
                    channelIndex, ch.socketRecvBurstCount,
                    ch.queuedBytesToRemote, detail);
-            emitChannelError(channelIndex, (int)bytesRead,
-                             "ssh read recv error (-43)");
+            emitChannelError(channelIndex, TunnelErrorCode::SshSocketRecv,
+                             (int)bytesRead, "ssh read recv error (-43)");
           }
         }
       } else if (bytesRead == LIBSSH2_ERROR_DECRYPT) {
@@ -2954,8 +2989,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         unsigned long nowErr = millis();
         if (nowErr - ch.lastErrorDetailLogMs > 2000) {
           ch.lastErrorDetailLogMs = nowErr;
-          emitChannelError(channelIndex, (int)bytesRead,
-                           "ssh decrypt error (read)");
+          emitChannelError(channelIndex, TunnelErrorCode::SshDecrypt,
+                           (int)bytesRead, "ssh decrypt error (read)");
         }
       } else {
         const char *detail =
@@ -2963,7 +2998,8 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
         LOGF_W("SSH", "Channel %d: SSH read error: %d detail=%s", channelIndex,
                (int)bytesRead, detail);
         ch.consecutiveErrors++;
-        emitChannelError(channelIndex, (int)bytesRead, "ssh read error");
+        emitChannelError(channelIndex, mapSshErrorToCode((int)bytesRead, false),
+                         (int)bytesRead, "ssh read error");
       }
     }
   }
@@ -3022,6 +3058,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   bool dropPending = false;
   String dropReason = "";
   int dropCode = 0;
+  bool writeBroken = false;
   bool throttledByGlobalLimit = false;
   static std::vector<unsigned long> lastThrottleLog;
   int throttleLogSize = config->getConnectionConfig().maxChannels;
@@ -3116,8 +3153,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                      "window=%lums qRemote=%zu",
                      channelIndex, ch.socketRecvBurstCount,
                      (now - ch.firstSocketRecvErrorMs), ch.queuedBytesToRemote);
-              emitChannelError(channelIndex, (int)w,
-                               "terminal -43 recv burst (drain)");
+              emitChannelError(channelIndex, TunnelErrorCode::SshSocketRecv,
+                               (int)w, "terminal -43 recv burst (drain)");
+              emitChannelWriteBroken(channelIndex,
+                                     TunnelErrorCode::SshSocketRecv, (int)w,
+                                     "terminal -43 recv burst (drain)");
               recordTerminalSocketFailure(now);
             } else if (!ch.terminalSocketFailure) {
               if ((now - ch.lastErrorDetailLogMs) > 2000) {
@@ -3126,8 +3166,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                        "Channel %d: -43 recv (drain) burst=%d qRemote=%zu",
                        channelIndex, ch.socketRecvBurstCount,
                        ch.queuedBytesToRemote);
-                emitChannelError(channelIndex, (int)w,
-                                 "ssh drain recv error (-43)");
+                emitChannelError(channelIndex, TunnelErrorCode::SshSocketRecv,
+                                 (int)w, "ssh drain recv error (-43)");
               }
             }
           } else if (w == LIBSSH2_ERROR_DECRYPT) {
@@ -3153,7 +3193,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             char errMsg[128];
             snprintf(errMsg, sizeof(errMsg),
                      "ssh drain write err=%zd detail=%s", w, detail);
-            emitChannelError(channelIndex, (int)w, errMsg);
+            emitChannelError(channelIndex, mapSshErrorToCode((int)w, true),
+                             (int)w, errMsg);
           }
           ch.localToSshBuffer->write(temp, chunk);
           if (w == LIBSSH2_ERROR_CHANNEL_CLOSED ||
@@ -3163,6 +3204,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             dropReason =
                 String("ssh drain failure (code=") + String((int)w) + ")";
             dropCode = (int)w;
+            writeBroken = true;
             ch.gracefulClosing = true;
             ch.remoteEof = true;
           }
@@ -3313,8 +3355,13 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                          channelIndex, ch.socketRecvBurstCount,
                          (now - ch.firstSocketRecvErrorMs),
                          ch.queuedBytesToRemote);
-                  emitChannelError(channelIndex, (int)w,
+                  emitChannelError(channelIndex,
+                                   TunnelErrorCode::SshSocketRecv, (int)w,
                                    "terminal -43 recv burst (direct)");
+                  emitChannelWriteBroken(channelIndex,
+                                         TunnelErrorCode::SshSocketRecv,
+                                         (int)w,
+                                         "terminal -43 recv burst (direct)");
                   recordTerminalSocketFailure(now);
                 } else if (!ch.terminalSocketFailure) {
                   if ((now - ch.lastErrorDetailLogMs) > 2000) {
@@ -3323,7 +3370,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                            "Channel %d: -43 recv (direct) burst=%d qRemote=%zu",
                            channelIndex, ch.socketRecvBurstCount,
                            ch.queuedBytesToRemote);
-                    emitChannelError(channelIndex, (int)w,
+                    emitChannelError(channelIndex,
+                                     TunnelErrorCode::SshSocketRecv, (int)w,
                                      "ssh direct recv error (-43)");
                   }
                 }
@@ -3351,7 +3399,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                 char errMsg[128];
                 snprintf(errMsg, sizeof(errMsg),
                          "ssh direct write err=%zd detail=%s", w, detail);
-                emitChannelError(channelIndex, (int)w, errMsg);
+                emitChannelError(channelIndex, mapSshErrorToCode((int)w, true),
+                                 (int)w, errMsg);
               }
               if (w == LIBSSH2_ERROR_CHANNEL_CLOSED ||
                   w == LIBSSH2_ERROR_SOCKET_SEND ||
@@ -3360,6 +3409,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                 dropReason = String("ssh direct write failure (code=") +
                              String((int)w) + ")";
                 dropCode = (int)w;
+                writeBroken = true;
                 ch.gracefulClosing = true;
                 ch.remoteEof = true;
               }
@@ -3406,7 +3456,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
               char dropMsg[128];
               snprintf(dropMsg, sizeof(dropMsg),
                        "alloc failed deferring %zu bytes (ssh->local)", leftover);
-              emitChannelError(channelIndex, ENOMEM, dropMsg);
+              emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh,
+                               ENOMEM, dropMsg);
               ch.lostWriteChunks++;
               ch.bytesDropped += leftover;
               if (lockStats()) {
@@ -3478,20 +3529,34 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       ch.deferredToRemoteSize = 0;
       ch.deferredToRemoteOffset = 0;
     }
+    const char *reason =
+        dropReason.length() ? dropReason.c_str() : "ssh write failure";
     if (droppedBytesLocal > 0) {
       ch.bytesDropped += droppedBytesLocal;
       if (lockStats()) {
         droppedBytes += droppedBytesLocal;
         unlockStats();
       }
-      const char *reason =
-          dropReason.length() ? dropReason.c_str() : "ssh write failure";
       LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)",
              channelIndex, droppedBytesLocal, reason);
       char dropMsg[160];
       snprintf(dropMsg, sizeof(dropMsg), "dropped %zu bytes to remote (%s)",
                droppedBytesLocal, reason);
-      emitChannelError(channelIndex, dropCode ? dropCode : -1, dropMsg);
+      emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh, dropCode,
+                       dropMsg);
+      if (writeBroken) {
+        TunnelErrorCode brokenCode =
+            dropCode ? mapSshErrorToCode(dropCode, true)
+                     : TunnelErrorCode::SshWriteFailure;
+        emitChannelWriteBroken(channelIndex, brokenCode, dropCode, dropMsg);
+      }
+    } else if (writeBroken) {
+      TunnelErrorCode brokenCode =
+          dropCode ? mapSshErrorToCode(dropCode, true)
+                   : TunnelErrorCode::SshWriteFailure;
+      char brokenMsg[160];
+      snprintf(brokenMsg, sizeof(brokenMsg), "write broken (%s)", reason);
+      emitChannelWriteBroken(channelIndex, brokenCode, dropCode, brokenMsg);
     }
     if (ch.localSocket >= 0) {
       shutdown(ch.localSocket, SHUT_RDWR);
@@ -3582,7 +3647,8 @@ void SSHTunnel::processPendingData(int channelIndex) {
             snprintf(errMsg, sizeof(errMsg),
                      "local send err=%d %s (ssh->local buffer)", errno,
                      strerror(errno));
-            emitChannelError(channelIndex, errno, errMsg);
+            emitChannelError(channelIndex, TunnelErrorCode::LocalSocketError,
+                             errno, errMsg);
             ch.lastActivity = millis();
           }
         } else {
@@ -3615,6 +3681,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
     bool dropPending = false;
     String dropReason = "";
     int dropCode = 0;
+    bool writeBroken = false;
     if (ch.localToSshBuffer && !ch.localToSshBuffer->empty() && ch.channel) {
       const int maxWritesThisPass =
           6; // Conservative per-loop drain cap (overrides global macro 8)
@@ -3684,6 +3751,8 @@ void SSHTunnel::processPendingData(int channelIndex) {
                      "passes=%d total=%zu)",
                      channelIndex, ch.eagainErrors, passes,
                      totalWrittenThisPass);
+              emitChannelError(channelIndex, TunnelErrorCode::SshEagain,
+                               (int)written, "ssh channel busy mid-drain");
             }
             ch.lastActivity = millis();
             break; // SSH window full
@@ -3710,7 +3779,8 @@ void SSHTunnel::processPendingData(int channelIndex) {
             char errMsg[128];
             snprintf(errMsg, sizeof(errMsg), "ssh write err=%zd detail=%s",
                      written, detail);
-            emitChannelError(channelIndex, (int)written, errMsg);
+            emitChannelError(channelIndex, mapSshErrorToCode((int)written, true),
+                             (int)written, errMsg);
             if (written == LIBSSH2_ERROR_CHANNEL_CLOSED ||
                 written == LIBSSH2_ERROR_SOCKET_SEND ||
                 written == LIBSSH2_ERROR_SOCKET_RECV) {
@@ -3718,6 +3788,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
               dropReason = String("ssh drain failure (code=") +
                            String((int)written) + ")";
               dropCode = (int)written;
+              writeBroken = true;
             }
             break;
           }
@@ -3750,20 +3821,34 @@ void SSHTunnel::processPendingData(int channelIndex) {
         ch.deferredToRemoteSize = 0;
         ch.deferredToRemoteOffset = 0;
       }
+      const char *reason =
+          dropReason.length() ? dropReason.c_str() : "ssh write failure";
       if (droppedBytesLocal > 0) {
         ch.bytesDropped += droppedBytesLocal;
         if (lockStats()) {
           droppedBytes += droppedBytesLocal;
           unlockStats();
         }
-        const char *reason =
-            dropReason.length() ? dropReason.c_str() : "ssh write failure";
         LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)",
                channelIndex, droppedBytesLocal, reason);
         char dropMsg[160];
         snprintf(dropMsg, sizeof(dropMsg), "dropped %zu bytes to remote (%s)",
                  droppedBytesLocal, reason);
-        emitChannelError(channelIndex, dropCode ? dropCode : -1, dropMsg);
+        emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh, dropCode,
+                         dropMsg);
+        if (writeBroken) {
+          TunnelErrorCode brokenCode =
+              dropCode ? mapSshErrorToCode(dropCode, true)
+                       : TunnelErrorCode::SshWriteFailure;
+          emitChannelWriteBroken(channelIndex, brokenCode, dropCode, dropMsg);
+        }
+      } else if (writeBroken) {
+        TunnelErrorCode brokenCode =
+            dropCode ? mapSshErrorToCode(dropCode, true)
+                     : TunnelErrorCode::SshWriteFailure;
+        char brokenMsg[160];
+        snprintf(brokenMsg, sizeof(brokenMsg), "write broken (%s)", reason);
+        emitChannelWriteBroken(channelIndex, brokenCode, dropCode, brokenMsg);
       }
       ch.gracefulClosing = true;
       ch.remoteEof = true;
@@ -3944,7 +4029,8 @@ void SSHTunnel::flushPendingData(int channelIndex) {
             char errMsg[128];
             snprintf(errMsg, sizeof(errMsg),
                      "flush local send err=%d %s", errno, strerror(errno));
-            emitChannelError(channelIndex, errno, errMsg);
+            emitChannelError(channelIndex, TunnelErrorCode::LocalSocketError,
+                             errno, errMsg);
             break;
           }
         }
@@ -3979,7 +4065,8 @@ void SSHTunnel::flushPendingData(int channelIndex) {
             snprintf(dropMsg, sizeof(dropMsg),
                      "alloc failed deferring %zu bytes (ssh->local flush)",
                      remaining);
-            emitChannelError(channelIndex, ENOMEM, dropMsg);
+            emitChannelError(channelIndex, TunnelErrorCode::DropSshToLocal,
+                             ENOMEM, dropMsg);
             ch.bytesDropped += remaining;
             if (lockStats()) {
               droppedBytes += remaining;
@@ -4005,6 +4092,7 @@ void SSHTunnel::flushPendingData(int channelIndex) {
       bool dropPending = false;
       String dropReason = "";
       int dropCode = 0;
+      bool writeBroken = false;
       const uint8_t *chunkPtr = nullptr;
       size_t chunkSize =
           ch.localToSshBuffer->acquire(&chunkPtr, SSH_BUFFER_SIZE);
@@ -4045,7 +4133,8 @@ void SSHTunnel::flushPendingData(int channelIndex) {
               snprintf(errMsg, sizeof(errMsg),
                        "ssh flush write err=%zd qRemote=%zu", w,
                        ch.queuedBytesToRemote);
-              emitChannelError(channelIndex, (int)w, errMsg);
+              emitChannelError(channelIndex, mapSshErrorToCode((int)w, true),
+                               (int)w, errMsg);
             }
             if (w == LIBSSH2_ERROR_CHANNEL_CLOSED ||
                 w == LIBSSH2_ERROR_SOCKET_SEND ||
@@ -4054,6 +4143,7 @@ void SSHTunnel::flushPendingData(int channelIndex) {
               dropReason =
                   String("ssh flush failure (code=") + String((int)w) + ")";
               dropCode = (int)w;
+              writeBroken = true;
             }
             break;
           }
@@ -4103,21 +4193,35 @@ void SSHTunnel::flushPendingData(int channelIndex) {
           ch.deferredToRemoteSize = 0;
           ch.deferredToRemoteOffset = 0;
         }
+        const char *reason =
+            dropReason.length() ? dropReason.c_str() : "ssh write failure";
         if (droppedBytesLocal > 0) {
           ch.bytesDropped += droppedBytesLocal;
           if (lockStats()) {
             droppedBytes += droppedBytesLocal;
             unlockStats();
           }
-          const char *reason =
-              dropReason.length() ? dropReason.c_str() : "ssh write failure";
           LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)",
                  channelIndex, droppedBytesLocal, reason);
           char dropMsg[160];
           snprintf(dropMsg, sizeof(dropMsg),
                    "dropped %zu bytes to remote (%s)", droppedBytesLocal,
                    reason);
-          emitChannelError(channelIndex, dropCode ? dropCode : -1, dropMsg);
+          emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh,
+                           dropCode, dropMsg);
+          if (writeBroken) {
+            TunnelErrorCode brokenCode =
+                dropCode ? mapSshErrorToCode(dropCode, true)
+                         : TunnelErrorCode::SshWriteFailure;
+            emitChannelWriteBroken(channelIndex, brokenCode, dropCode, dropMsg);
+          }
+        } else if (writeBroken) {
+          TunnelErrorCode brokenCode =
+              dropCode ? mapSshErrorToCode(dropCode, true)
+                       : TunnelErrorCode::SshWriteFailure;
+          char brokenMsg[160];
+          snprintf(brokenMsg, sizeof(brokenMsg), "write broken (%s)", reason);
+          emitChannelWriteBroken(channelIndex, brokenCode, dropCode, brokenMsg);
         }
         ch.gracefulClosing = true;
         ch.remoteEof = true;

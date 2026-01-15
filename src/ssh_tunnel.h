@@ -33,12 +33,29 @@ enum class ChannelCloseReason {
   Manual
 };
 
+enum class TunnelErrorCode : int {
+  Unknown = 0,
+  SshEagain = 1,
+  SshSocketRecv = 2,  // LIBSSH2_ERROR_SOCKET_RECV (-43)
+  SshSocketSend = 3,  // LIBSSH2_ERROR_SOCKET_SEND
+  SshChannelClosed = 4,
+  SshDecrypt = 5,
+  SshReadFailure = 6,
+  SshWriteFailure = 7,
+  LocalSocketError = 8,
+  DropLocalToSsh = 9,
+  DropSshToLocal = 10,
+  AllocFailure = 11
+};
+
 struct SSHTunnelEvents {
   void (*onSessionConnected)() = nullptr;
   void (*onSessionDisconnected)() = nullptr;
   void (*onChannelOpened)(int) = nullptr;
   void (*onChannelClosed)(int, ChannelCloseReason) = nullptr;
   void (*onError)(int, const char *) = nullptr;
+  void (*onChannelWriteBroken)(int, TunnelErrorCode, int, const char *) =
+      nullptr;
   void (*onLargeTransferStart)(int) = nullptr;
   void (*onLargeTransferEnd)(int) = nullptr;
 };
@@ -260,7 +277,10 @@ private:
   void emitChannelOpened(int channelIndex);
   void emitChannelClosed(int channelIndex, ChannelCloseReason reason);
   void emitErrorEvent(int code, const char *detail);
-  void emitChannelError(int channelIndex, int code, const char *detail);
+  void emitChannelError(int channelIndex, TunnelErrorCode code, int rawCode,
+                        const char *detail);
+  void emitChannelWriteBroken(int channelIndex, TunnelErrorCode code,
+                              int rawCode, const char *detail);
   void emitLargeTransferEvent(int channelIndex, bool started);
   void recordTerminalSocketFailure(unsigned long now);
 
