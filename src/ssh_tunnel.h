@@ -260,7 +260,9 @@ private:
   void emitChannelOpened(int channelIndex);
   void emitChannelClosed(int channelIndex, ChannelCloseReason reason);
   void emitErrorEvent(int code, const char *detail);
+  void emitChannelError(int channelIndex, int code, const char *detail);
   void emitLargeTransferEvent(int channelIndex, bool started);
+  void recordTerminalSocketFailure(unsigned long now);
 
   // Member variables
   LIBSSH2_SESSION *session;
@@ -287,6 +289,7 @@ private:
   SemaphoreHandle_t tunnelMutex;
   SemaphoreHandle_t statsMutex;
   SemaphoreHandle_t sessionMutex;
+  SemaphoreHandle_t throttleMutex;
 
   // Configuration reference
   SSHConfiguration *config;
@@ -320,6 +323,9 @@ private:
   unsigned long lastGlobalRefillMs;
   bool globalThrottleActive;
   unsigned long lastGlobalThrottleLogMs;
+  int terminalSocketFailuresRecent;
+  unsigned long firstTerminalFailureMs;
+  bool sessionResetTriggered;
   int boundPort;
   size_t ringBufferCapacity;
   SSHTunnelEvents eventHandlers;
@@ -331,6 +337,8 @@ private:
   void unlockStats();
   bool lockSession(TickType_t ticks = portMAX_DELAY);
   void unlockSession();
+  bool lockThrottle(TickType_t ticks = portMAX_DELAY);
+  void unlockThrottle();
 
   // Per-channel protection methods with separate mutexes
   bool lockChannelRead(int channelIndex);
