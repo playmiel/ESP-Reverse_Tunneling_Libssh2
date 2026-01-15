@@ -2971,8 +2971,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
                  (nowErr - ch.firstSocketRecvErrorMs), ch.queuedBytesToLocal,
                  ch.queuedBytesToRemote);
           emitChannelError(channelIndex, TunnelErrorCode::SshSocketRecv,
-                           (int)bytesRead,
-                           "terminal -43 recv burst (read)");
+                           (int)bytesRead, "terminal -43 recv burst (read)");
           recordTerminalSocketFailure(nowErr);
         } else if (!ch.terminalSocketFailure) {
           if ((nowErr - ch.lastErrorDetailLogMs) > 2000) {
@@ -3360,12 +3359,10 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                          channelIndex, ch.socketRecvBurstCount,
                          (now - ch.firstSocketRecvErrorMs),
                          ch.queuedBytesToRemote);
-                  emitChannelError(channelIndex,
-                                   TunnelErrorCode::SshSocketRecv, (int)w,
-                                   "terminal -43 recv burst (direct)");
+                  emitChannelError(channelIndex, TunnelErrorCode::SshSocketRecv,
+                                   (int)w, "terminal -43 recv burst (direct)");
                   emitChannelWriteBroken(channelIndex,
-                                         TunnelErrorCode::SshSocketRecv,
-                                         (int)w,
+                                         TunnelErrorCode::SshSocketRecv, (int)w,
                                          "terminal -43 recv burst (direct)");
                   recordTerminalSocketFailure(now);
                 } else if (!ch.terminalSocketFailure) {
@@ -3460,7 +3457,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                      channelIndex, leftover);
               char dropMsg[128];
               snprintf(dropMsg, sizeof(dropMsg),
-                       "alloc failed deferring %zu bytes (ssh->local)", leftover);
+                       "alloc failed deferring %zu bytes (ssh->local)",
+                       leftover);
               emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh,
                                ENOMEM, dropMsg);
               ch.lostWriteChunks++;
@@ -3550,15 +3548,14 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh, dropCode,
                        dropMsg);
       if (writeBroken) {
-        TunnelErrorCode brokenCode =
-            dropCode ? mapSshErrorToCode(dropCode, true)
-                     : TunnelErrorCode::SshWriteFailure;
+        TunnelErrorCode brokenCode = dropCode
+                                         ? mapSshErrorToCode(dropCode, true)
+                                         : TunnelErrorCode::SshWriteFailure;
         emitChannelWriteBroken(channelIndex, brokenCode, dropCode, dropMsg);
       }
     } else if (writeBroken) {
-      TunnelErrorCode brokenCode =
-          dropCode ? mapSshErrorToCode(dropCode, true)
-                   : TunnelErrorCode::SshWriteFailure;
+      TunnelErrorCode brokenCode = dropCode ? mapSshErrorToCode(dropCode, true)
+                                            : TunnelErrorCode::SshWriteFailure;
       char brokenMsg[160];
       snprintf(brokenMsg, sizeof(brokenMsg), "write broken (%s)", reason);
       emitChannelWriteBroken(channelIndex, brokenCode, dropCode, brokenMsg);
@@ -3784,7 +3781,8 @@ void SSHTunnel::processPendingData(int channelIndex) {
             char errMsg[128];
             snprintf(errMsg, sizeof(errMsg), "ssh write err=%zd detail=%s",
                      written, detail);
-            emitChannelError(channelIndex, mapSshErrorToCode((int)written, true),
+            emitChannelError(channelIndex,
+                             mapSshErrorToCode((int)written, true),
                              (int)written, errMsg);
             if (written == LIBSSH2_ERROR_CHANNEL_CLOSED ||
                 written == LIBSSH2_ERROR_SOCKET_SEND ||
@@ -3839,18 +3837,18 @@ void SSHTunnel::processPendingData(int channelIndex) {
         char dropMsg[160];
         snprintf(dropMsg, sizeof(dropMsg), "dropped %zu bytes to remote (%s)",
                  droppedBytesLocal, reason);
-        emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh, dropCode,
-                         dropMsg);
+        emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh,
+                         dropCode, dropMsg);
         if (writeBroken) {
-          TunnelErrorCode brokenCode =
-              dropCode ? mapSshErrorToCode(dropCode, true)
-                       : TunnelErrorCode::SshWriteFailure;
+          TunnelErrorCode brokenCode = dropCode
+                                           ? mapSshErrorToCode(dropCode, true)
+                                           : TunnelErrorCode::SshWriteFailure;
           emitChannelWriteBroken(channelIndex, brokenCode, dropCode, dropMsg);
         }
       } else if (writeBroken) {
-        TunnelErrorCode brokenCode =
-            dropCode ? mapSshErrorToCode(dropCode, true)
-                     : TunnelErrorCode::SshWriteFailure;
+        TunnelErrorCode brokenCode = dropCode
+                                         ? mapSshErrorToCode(dropCode, true)
+                                         : TunnelErrorCode::SshWriteFailure;
         char brokenMsg[160];
         snprintf(brokenMsg, sizeof(brokenMsg), "write broken (%s)", reason);
         emitChannelWriteBroken(channelIndex, brokenCode, dropCode, brokenMsg);
@@ -4034,8 +4032,8 @@ void SSHTunnel::flushPendingData(int channelIndex) {
             LOGF_W("SSH", "Channel %d: flushPendingData local send err %s",
                    channelIndex, strerror(errno));
             char errMsg[128];
-            snprintf(errMsg, sizeof(errMsg),
-                     "flush local send err=%d %s", errno, strerror(errno));
+            snprintf(errMsg, sizeof(errMsg), "flush local send err=%d %s",
+                     errno, strerror(errno));
             emitChannelError(channelIndex, TunnelErrorCode::LocalSocketError,
                              errno, errMsg);
             break;
@@ -4211,21 +4209,20 @@ void SSHTunnel::flushPendingData(int channelIndex) {
           LOGF_W("SSH", "Channel %d: Dropped %zu bytes pending to remote (%s)",
                  channelIndex, droppedBytesLocal, reason);
           char dropMsg[160];
-          snprintf(dropMsg, sizeof(dropMsg),
-                   "dropped %zu bytes to remote (%s)", droppedBytesLocal,
-                   reason);
+          snprintf(dropMsg, sizeof(dropMsg), "dropped %zu bytes to remote (%s)",
+                   droppedBytesLocal, reason);
           emitChannelError(channelIndex, TunnelErrorCode::DropLocalToSsh,
                            dropCode, dropMsg);
           if (writeBroken) {
-            TunnelErrorCode brokenCode =
-                dropCode ? mapSshErrorToCode(dropCode, true)
-                         : TunnelErrorCode::SshWriteFailure;
+            TunnelErrorCode brokenCode = dropCode
+                                             ? mapSshErrorToCode(dropCode, true)
+                                             : TunnelErrorCode::SshWriteFailure;
             emitChannelWriteBroken(channelIndex, brokenCode, dropCode, dropMsg);
           }
         } else if (writeBroken) {
-          TunnelErrorCode brokenCode =
-              dropCode ? mapSshErrorToCode(dropCode, true)
-                       : TunnelErrorCode::SshWriteFailure;
+          TunnelErrorCode brokenCode = dropCode
+                                           ? mapSshErrorToCode(dropCode, true)
+                                           : TunnelErrorCode::SshWriteFailure;
           char brokenMsg[160];
           snprintf(brokenMsg, sizeof(brokenMsg), "write broken (%s)", reason);
           emitChannelWriteBroken(channelIndex, brokenCode, dropCode, brokenMsg);
