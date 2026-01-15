@@ -36,8 +36,8 @@ enum class ChannelCloseReason {
 enum class TunnelErrorCode : int {
   Unknown = 0,
   SshEagain = 1,
-  SshSocketRecv = 2,  // LIBSSH2_ERROR_SOCKET_RECV (-43)
-  SshSocketSend = 3,  // LIBSSH2_ERROR_SOCKET_SEND
+  SshSocketRecv = 2, // LIBSSH2_ERROR_SOCKET_RECV (-43)
+  SshSocketSend = 3, // LIBSSH2_ERROR_SOCKET_SEND
   SshChannelClosed = 4,
   SshDecrypt = 5,
   SshReadFailure = 6,
@@ -54,8 +54,8 @@ struct SSHTunnelEvents {
   void (*onChannelOpened)(int) = nullptr;
   void (*onChannelClosed)(int, ChannelCloseReason) = nullptr;
   void (*onError)(int, const char *) = nullptr;
-  void (*onChannelWriteBroken)(int, TunnelErrorCode, int, const char *) =
-      nullptr;
+  void (*onChannelWriteBroken)(int, TunnelErrorCode, int,
+                               const char *) = nullptr;
   void (*onLargeTransferStart)(int) = nullptr;
   void (*onLargeTransferEnd)(int) = nullptr;
 };
