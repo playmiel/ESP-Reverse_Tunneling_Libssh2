@@ -330,8 +330,8 @@ private:
   static const unsigned long LARGE_TRANSFER_TIME_THRESHOLD = 3000; // 3 seconds
 
   // OPTIMIZED: Higher flow control thresholds
-  static const size_t HIGH_WATER_LOCAL = 28 * 1024; // 28KB (increased)
-  static const size_t LOW_WATER_LOCAL = 14 * 1024;  // 14KB (50% of HIGH_WATER)
+  static const size_t HIGH_WATER_LOCAL = 48 * 1024; // 48KB (tuned)
+  static const size_t LOW_WATER_LOCAL = 24 * 1024;  // 24KB (50% of HIGH_WATER)
 
   //   Dedicated task for data processing
   TaskHandle_t dataProcessingTask;
