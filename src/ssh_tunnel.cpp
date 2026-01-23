@@ -11,7 +11,7 @@
 // Define buffer size for data chunks
 #define SSH_BUFFER_SIZE 1024
 
-// Flow-control thresholds: use class-level constants from SSHTunnel (28KB/14KB)
+// Flow-control thresholds: use class-level constants from SSHTunnel (48KB/24KB)
 // Note: remove local macro overrides to avoid divergence from header values.
 
 #ifndef STUCK_PROBE_THRESHOLD
@@ -40,7 +40,10 @@
 // Session-level tracking for socket recv terminal failures is per instance.
 
 // Channel integrity threshold (total queued cap across both directions)
-#define MAX_QUEUED_BYTES (64 * 1024)
+#define MAX_QUEUED_BYTES (128 * 1024)
+
+static const unsigned long kGlobalStallResetMs = 15000;
+static const unsigned long kGlobalStallResetCooldownMs = 30000;
 
 static const size_t kInteractiveQueueThreshold = 4 * 1024;
 static const unsigned long kInteractiveActivityWindowMs = 800;
@@ -4570,6 +4573,10 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
   unsigned long now = millis();
   int maxChannels = config->getConnectionConfig().maxChannels;
   static std::vector<unsigned long> lastChannelActivity;
+  static unsigned long allStuckSinceMs = 0;
+  static unsigned long lastGlobalResetMs = 0;
+  int activeCount = 0;
+  int stuckPendingCount = 0;
   if ((int)lastChannelActivity.size() < maxChannels) {
     lastChannelActivity.assign(maxChannels, 0);
   }
@@ -4579,8 +4586,30 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
     if (!ch.active)
       continue;
 
+    activeCount++;
+
+    size_t pendingBytes = ch.queuedBytesToLocal + ch.queuedBytesToRemote;
+    if (ch.sshToLocalBuffer) {
+      pendingBytes += ch.sshToLocalBuffer->size();
+    }
+    if (ch.localToSshBuffer) {
+      pendingBytes += ch.localToSshBuffer->size();
+    }
+    if (ch.deferredToLocal &&
+        ch.deferredToLocalOffset < ch.deferredToLocalSize) {
+      pendingBytes += ch.deferredToLocalSize - ch.deferredToLocalOffset;
+    }
+    if (ch.deferredToRemote &&
+        ch.deferredToRemoteOffset < ch.deferredToRemoteSize) {
+      pendingBytes += ch.deferredToRemoteSize - ch.deferredToRemoteOffset;
+    }
+
     // Check if the channel is "stuck" (no activity for 30 seconds)
     bool channelStuck = (now - ch.lastActivity) > 30000;
+    bool stuckWithPending = channelStuck && pendingBytes > 0;
+    if (stuckWithPending) {
+      stuckPendingCount++;
+    }
 
     // Check stuck mutexes using a quick non-blocking acquisition
     bool readMutexStuck = false, writeMutexStuck = false;
@@ -4606,10 +4635,20 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
 
     // Check if unified buffers are abnormally full
     bool buffersOverloaded = false;
-    if (ch.sshToLocalBuffer && ch.sshToLocalBuffer->size() > 45 * 1024)
-      buffersOverloaded = true; // More than 45KB pending
-    if (ch.localToSshBuffer && ch.localToSshBuffer->size() > 45 * 1024)
-      buffersOverloaded = true;
+    if (ch.sshToLocalBuffer) {
+      size_t cap = ch.sshToLocalBuffer->capacityBytes();
+      size_t limit = cap ? (cap * 4) / 5 : (size_t)(60 * 1024);
+      if (ch.sshToLocalBuffer->size() > limit) {
+        buffersOverloaded = true;
+      }
+    }
+    if (ch.localToSshBuffer) {
+      size_t cap = ch.localToSshBuffer->capacityBytes();
+      size_t limit = cap ? (cap * 4) / 5 : (size_t)(60 * 1024);
+      if (ch.localToSshBuffer->size() > limit) {
+        buffersOverloaded = true;
+      }
+    }
 
     if (deadlockDetected || buffersOverloaded) {
       LOGF_W("SSH",
@@ -4630,8 +4669,26 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
       }
     }
   }
-}
 
+  if (activeCount > 0 && stuckPendingCount == activeCount) {
+    if (allStuckSinceMs == 0) {
+      allStuckSinceMs = now;
+    }
+    if (!sessionResetTriggered &&
+        (now - allStuckSinceMs) > kGlobalStallResetMs &&
+        (now - lastGlobalResetMs) > kGlobalStallResetCooldownMs) {
+      lastGlobalResetMs = now;
+      allStuckSinceMs = now;
+      sessionResetTriggered = true;
+      LOG_W("SSH",
+            "Global stall detected (active=%d pendingStuck=%d) -> "
+            "scheduling session reset",
+            activeCount, stuckPendingCount);
+    }
+  } else {
+    allStuckSinceMs = 0;
+  }
+}
 //   Detailed data transfer diagnostics
 void SSHTunnel::printDataTransferStats(int channelIndex) {
   if (!channels || channelIndex < 0 ||
@@ -4681,6 +4738,7 @@ bool SSHTunnel::isLargeTransferActive() {
       return true;
     }
   }
+
   return false;
 }
 
@@ -4756,6 +4814,7 @@ bool SSHTunnel::shouldAcceptNewConnection() {
       }
     }
   }
+
 
   // Proactively start rejecting around 70% utilization
   if (activeChannels >= (int)(0.7f * maxChannels)) {
