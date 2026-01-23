@@ -4680,10 +4680,10 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
       lastGlobalResetMs = now;
       allStuckSinceMs = now;
       sessionResetTriggered = true;
-      LOG_W("SSH",
-            "Global stall detected (active=%d pendingStuck=%d) -> "
-            "scheduling session reset",
-            activeCount, stuckPendingCount);
+      LOGF_W("SSH",
+             "Global stall detected (active=%d pendingStuck=%d) -> "
+             "scheduling session reset",
+             activeCount, stuckPendingCount);
     }
   } else {
     allStuckSinceMs = 0;
