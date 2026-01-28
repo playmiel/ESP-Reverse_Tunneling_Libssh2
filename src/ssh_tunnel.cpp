@@ -44,6 +44,7 @@
 
 static const unsigned long kGlobalStallResetMs = 15000;
 static const unsigned long kGlobalStallResetCooldownMs = 30000;
+static const unsigned long kBufferOverloadStallMs = 15000;
 
 static const size_t kInteractiveQueueThreshold = 4 * 1024;
 static const unsigned long kInteractiveActivityWindowMs = 800;
@@ -302,6 +303,16 @@ bool SSHTunnel::connectSSH() {
   }
 
   unsigned long now = millis();
+  unsigned long lastProgress = ch.lastSuccessfulWrite;
+  if (ch.lastSuccessfulRead > lastProgress) {
+    lastProgress = ch.lastSuccessfulRead;
+  }
+  bool progressStalled = false;
+  if (lastProgress != 0 && now >= lastProgress) {
+    progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
+  } else {
+    progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
+  }
   int reconnectDelay = config->getConnectionConfig().reconnectDelayMs;
   if (now - lastConnectionAttempt < reconnectDelay) {
     return false; // Too soon since last attempt
@@ -2764,6 +2775,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
     }
 
     if (bytesRead > 0) {
+      ch.lastSuccessfulRead = now;
       // Reset burst counters on successful read
       if (ch.socketRecvBurstCount) {
         ch.socketRecvBurstCount = 0;
@@ -3290,6 +3302,21 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         }
         if (ch.localSocket >= 0) {
           shutdown(ch.localSocket, SHUT_RD);
+        }
+        suppressLocalRead = true;
+      }
+    }
+    if (!suppressLocalRead && globalRateLimitBytesPerSec != 0) {
+      size_t allowance = getGlobalAllowance(MIN_WRITE_SIZE);
+      if (allowance == 0) {
+        throttledByGlobalLimit = true;
+        ch.lastActivity = millis();
+        if (channelIndex < (int)lastThrottleLog.size() &&
+            (now - lastThrottleLog[channelIndex] > 1000)) {
+          lastThrottleLog[channelIndex] = now;
+          LOGF_D("SSH",
+                 "Channel %d: Global limiter delaying local read (queued=%zu)",
+                 channelIndex, ch.queuedBytesToRemote);
         }
         suppressLocalRead = true;
       }
@@ -4299,13 +4326,13 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
     return false;
   }
 
-  // Check unified buffers are not too full (dynamic threshold 75% of capacity)
+  // Check unified buffers are not too full (dynamic threshold 95% of capacity)
   if (ch.sshToLocalBuffer) {
     size_t cap = ch.sshToLocalBuffer->capacityBytes();
-    size_t limit = cap ? (cap * 3) / 4 : (size_t)(20 * 1024);
+    size_t limit = cap ? (cap * 95) / 100 : (size_t)(60 * 1024);
     if (limit == 0)
       limit = 1; // safety guard
-    if (ch.sshToLocalBuffer->size() > limit) {
+    if (ch.sshToLocalBuffer->size() > limit && progressStalled) {
       LOGF_D("SSH",
              "Channel %d: Unhealthy due to SSH->Local buffer size (%zu/%zu)",
              channelIndex, ch.sshToLocalBuffer->size(), cap);
@@ -4314,10 +4341,10 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   }
   if (ch.localToSshBuffer) {
     size_t cap = ch.localToSshBuffer->capacityBytes();
-    size_t limit = cap ? (cap * 3) / 4 : (size_t)(20 * 1024);
+    size_t limit = cap ? (cap * 95) / 100 : (size_t)(60 * 1024);
     if (limit == 0)
       limit = 1; // safety guard
-    if (ch.localToSshBuffer->size() > limit) {
+    if (ch.localToSshBuffer->size() > limit && progressStalled) {
       LOGF_D("SSH",
              "Channel %d: Unhealthy due to Local->SSH buffer size (%zu/%zu)",
              channelIndex, ch.localToSshBuffer->size(), cap);
@@ -4610,6 +4637,16 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
     if (stuckWithPending) {
       stuckPendingCount++;
     }
+    unsigned long lastProgress = ch.lastSuccessfulWrite;
+    if (ch.lastSuccessfulRead > lastProgress) {
+      lastProgress = ch.lastSuccessfulRead;
+    }
+    bool progressStalled = false;
+    if (lastProgress != 0 && now >= lastProgress) {
+      progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
+    } else {
+      progressStalled = channelStuck;
+    }
 
     // Check stuck mutexes using a quick non-blocking acquisition
     bool readMutexStuck = false, writeMutexStuck = false;
@@ -4637,15 +4674,15 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
     bool buffersOverloaded = false;
     if (ch.sshToLocalBuffer) {
       size_t cap = ch.sshToLocalBuffer->capacityBytes();
-      size_t limit = cap ? (cap * 4) / 5 : (size_t)(60 * 1024);
-      if (ch.sshToLocalBuffer->size() > limit) {
+      size_t limit = cap ? (cap * 95) / 100 : (size_t)(60 * 1024);
+      if (ch.sshToLocalBuffer->size() > limit && progressStalled) {
         buffersOverloaded = true;
       }
     }
     if (ch.localToSshBuffer) {
       size_t cap = ch.localToSshBuffer->capacityBytes();
-      size_t limit = cap ? (cap * 4) / 5 : (size_t)(60 * 1024);
-      if (ch.localToSshBuffer->size() > limit) {
+      size_t limit = cap ? (cap * 95) / 100 : (size_t)(60 * 1024);
+      if (ch.localToSshBuffer->size() > limit && progressStalled) {
         buffersOverloaded = true;
       }
     }
