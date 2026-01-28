@@ -182,6 +182,7 @@ bool SSHTunnel::init() {
     channels[i].lastActivity = 0;
     channels[i].pendingBytes = 0;
     channels[i].flowControlPaused = false;
+    channels[i].localReadPaused = false;
 
     // Initialize new reliability-related fields
     channels[i].totalBytesReceived = 0;
@@ -1366,7 +1367,14 @@ int SSHTunnel::connectToLocalEndpoint(const TunnelConfig &mapping) {
     return -1;
   }
 
-  if (!NetworkOptimizer::optimizeSocket(localSocket)) {
+  size_t localRcvBuf = getLowWaterLocal();
+  if (localRcvBuf > 16 * 1024) {
+    localRcvBuf = 16 * 1024;
+  } else if (localRcvBuf < 4 * 1024) {
+    localRcvBuf = 4 * 1024;
+  }
+  if (!NetworkOptimizer::optimizeSocket(localSocket,
+                                        static_cast<int>(localRcvBuf))) {
     LOG_W("SSH", "Failed to optimize local socket");
   }
 
@@ -1408,6 +1416,7 @@ bool SSHTunnel::bindChannelToMapping(LIBSSH2_CHANNEL *channel,
   slot.lastActivity = millis();
   slot.pendingBytes = 0;
   slot.flowControlPaused = false;
+  slot.localReadPaused = false;
   slot.priority = config->getConnectionConfig().defaultChannelPriority;
   slot.effectivePriority = slot.priority;
   slot.largeTransferInProgress = false;
@@ -1905,6 +1914,7 @@ void SSHTunnel::closeChannel(int channelIndex, ChannelCloseReason reason) {
   ch.lastActivity = 0;
   ch.pendingBytes = 0;
   ch.flowControlPaused = false;
+  ch.localReadPaused = false;
   ch.totalBytesReceived = 0;
   ch.totalBytesSent = 0;
   ch.lastSuccessfulWrite = 0;
@@ -2659,6 +2669,21 @@ size_t SSHTunnel::getConfiguredRingBufferSize() const {
   return configured;
 }
 
+size_t SSHTunnel::getHighWaterLocal() const {
+  if (ringBufferCapacity > 0) {
+    return (ringBufferCapacity * 3) / 4;
+  }
+  return DEFAULT_HIGH_WATER_LOCAL;
+}
+
+size_t SSHTunnel::getLowWaterLocal() const {
+  size_t high = getHighWaterLocal();
+  if (high == 0) {
+    return DEFAULT_LOW_WATER_LOCAL;
+  }
+  return high / 2;
+}
+
 uint16_t SSHTunnel::getDataTaskStackSize() const {
   uint16_t configured = config->getConnectionConfig().dataTaskStackSize;
   if (configured == 0) {
@@ -2699,11 +2724,13 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
   size_t bufferSize = getConfiguredRingBufferSize();
   unsigned long now = millis();
   bool remoteEofDetected = false;
+  const size_t highWaterLocal = getHighWaterLocal();
+  const size_t lowWaterLocal = getLowWaterLocal();
 
   //   Flow control with optimized high/low watermarks for ESP32
   if (ch.flowControlPaused) {
     // Check whether we can resume
-    if (ch.queuedBytesToLocal < LOW_WATER_LOCAL) {
+    if (ch.queuedBytesToLocal < lowWaterLocal) {
       ch.flowControlPaused = false;
       // Only log in DEBUG mode to avoid spam
 #ifdef DEBUG_FLOW_CONTROL
@@ -2716,7 +2743,7 @@ bool SSHTunnel::processChannelRead(int channelIndex) {
     }
   }
 
-  if (ch.queuedBytesToLocal > HIGH_WATER_LOCAL) {
+  if (ch.queuedBytesToLocal > highWaterLocal) {
     ch.flowControlPaused = true;
     LOGF_W("SSH", "Channel %d: Flow control PAUSE (queuedToLocal=%zu)",
            channelIndex, ch.queuedBytesToLocal);
@@ -3030,6 +3057,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   if (ch.consecutiveErrors > 0 && (nowPre - ch.lastWriteErrorMs) < 40) {
     return false;
   }
+  const size_t highWaterLocal = getHighWaterLocal();
+  const size_t lowWaterLocal = getLowWaterLocal();
 
   // Before reading local socket, try to re-enqueue Local->SSH deferred
   // residuals first
@@ -3047,14 +3076,20 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
     }
   }
 
-  // Backpressure: don't read more if the backlog on Local->SSH is above HIGH
-  // watermark
-  if (ch.queuedBytesToRemote > HIGH_WATER_LOCAL) {
-    LOGF_W(
-        "SSH",
-        "Channel %d: Critical backpressure (%zu bytes) - skipping local read",
-        channelIndex, ch.queuedBytesToRemote);
-    return false;
+  // Backpressure: pause local reads until backlog drains below LOW watermark
+  if (ch.localReadPaused) {
+    if (ch.queuedBytesToRemote < lowWaterLocal) {
+      ch.localReadPaused = false;
+      LOGF_D("SSH",
+             "Channel %d: Local read resumed (qRemote=%zu < %zu)",
+             channelIndex, ch.queuedBytesToRemote, lowWaterLocal);
+    }
+  } else if (ch.queuedBytesToRemote > highWaterLocal) {
+    ch.localReadPaused = true;
+    LOGF_W("SSH",
+           "Channel %d: Critical backpressure (%zu bytes) - pausing local "
+           "read (resume < %zu)",
+           channelIndex, ch.queuedBytesToRemote, lowWaterLocal);
   }
 
   if (!lockChannelWrite(channelIndex)) {
@@ -3259,6 +3294,9 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
                channelIndex, ch.socketRecvBurstCount);
       }
     }
+    if (!suppressLocalRead && ch.localReadPaused) {
+      suppressLocalRead = true;
+    }
     if (!suppressLocalRead && ch.localSocket >= 0) {
       int sockError = 0;
       socklen_t errLen = sizeof(sockError);
@@ -3311,7 +3349,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         suppressLocalRead = true;
       }
     }
-    if (!suppressLocalRead && ch.queuedBytesToRemote < HIGH_WATER_LOCAL &&
+    if (!suppressLocalRead && ch.queuedBytesToRemote < highWaterLocal &&
         isSocketReadable(ch.localSocket, 5)) {
       ssize_t localRead =
           recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
@@ -3889,10 +3927,11 @@ void SSHTunnel::processPendingData(int channelIndex) {
   }
 
   // 3) Resume flow control if we've dropped below the LOW watermark
-  if (ch.flowControlPaused && ch.queuedBytesToLocal < LOW_WATER_LOCAL) {
+  const size_t lowWaterLocal = getLowWaterLocal();
+  if (ch.flowControlPaused && ch.queuedBytesToLocal < lowWaterLocal) {
     ch.flowControlPaused = false;
-    LOGF_D("SSH", "Channel %d: Flow control resumed (below %d bytes)",
-           channelIndex, LOW_WATER_LOCAL);
+    LOGF_D("SSH", "Channel %d: Flow control resumed (below %zu bytes)",
+           channelIndex, lowWaterLocal);
   }
 }
 
@@ -3964,10 +4003,11 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
       ch.queuedBytesToRemote += w;
   }
   ch.lastActivity = millis();
+  const size_t highWaterLocal = getHighWaterLocal();
   if (channelIndex < (int)lastQueueHighLogToLocal.size() && totalQueued > 0) {
     unsigned long nowDiag = millis();
     if (isRead) {
-      if (ch.queuedBytesToLocal > HIGH_WATER_LOCAL &&
+      if (ch.queuedBytesToLocal > highWaterLocal &&
           (nowDiag - lastQueueHighLogToLocal[channelIndex] > 2000)) {
         lastQueueHighLogToLocal[channelIndex] = nowDiag;
         LOGF_D("SSH",
@@ -3975,7 +4015,7 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
                channelIndex, ch.queuedBytesToLocal, ch.queuedBytesToRemote);
       }
     } else {
-      if (ch.queuedBytesToRemote > HIGH_WATER_LOCAL &&
+      if (ch.queuedBytesToRemote > highWaterLocal &&
           (nowDiag - lastQueueHighLogToRemote[channelIndex] > 2000)) {
         lastQueueHighLogToRemote[channelIndex] = nowDiag;
         LOGF_D("SSH",
@@ -4266,6 +4306,16 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
     // Switch to DEBUG to avoid repeated WARN spam
     static std::vector<unsigned long> lastTermLog;
     unsigned long now = millis();
+     unsigned long lastProgress = ch.lastSuccessfulWrite;
+  if (ch.lastSuccessfulRead > lastProgress) {
+    lastProgress = ch.lastSuccessfulRead;
+  }
+  bool progressStalled = false;
+  if (lastProgress != 0 && now >= lastProgress) {
+    progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
+  } else {
+    progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
+  }
     int needed =
         std::max(config->getConnectionConfig().maxChannels, channelIndex + 1);
     if ((int)lastTermLog.size() < needed) {
@@ -4465,6 +4515,7 @@ void SSHTunnel::recoverChannel(int channelIndex) {
   ch.consecutiveErrors = 0;
   ch.eagainErrors = 0;
   ch.flowControlPaused = false;
+  ch.localReadPaused = false;
   ch.pendingBytes = 0;
 
   // Check state of sockets/channels
@@ -4839,7 +4890,7 @@ bool SSHTunnel::shouldAcceptNewConnection() {
   // Reject if an existing channel is overloaded or unstable
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
-      if (channels[i].queuedBytesToRemote > (HIGH_WATER_LOCAL + 512)) {
+      if (channels[i].queuedBytesToRemote > (getHighWaterLocal() + 512)) {
         LOGF_D("SSH", "Reject new conn: channel %d backlog %zu", i,
                channels[i].queuedBytesToRemote);
         return false;
@@ -5177,6 +5228,7 @@ void SSHTunnel::gracefulRecoverChannel(int channelIndex) {
 
   ch.eagainErrors = 0; // Reset EAGAIN errors
   ch.flowControlPaused = false;
+  ch.localReadPaused = false;
 
   // 4. Update activity timestamp
   ch.lastActivity = millis();

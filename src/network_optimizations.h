@@ -10,7 +10,7 @@
 // Network optimizations to improve tunnel performance
 class NetworkOptimizer {
 public:
-  static bool optimizeSocket(int socket_fd) {
+  static bool optimizeSocket(int socket_fd, int rcvbuf_override = 0) {
     // On ESP32/lwIP, not all setsockopt options are supported.
     // Consider the operation 'successful' if at least one optimization is
     // applied to avoid log spam when some options are unavailable.
@@ -28,7 +28,7 @@ public:
     }
 
     // Increase receive and send buffer sizes
-    int rcvbuf = 65536; // 64KB
+    int rcvbuf = (rcvbuf_override > 0) ? rcvbuf_override : 65536; // 64KB default
     int sndbuf = 65536; // 64KB
 
 #ifdef SO_RCVBUF
