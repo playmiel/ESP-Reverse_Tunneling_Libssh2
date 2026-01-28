@@ -78,6 +78,7 @@ struct TunnelChannel {
   unsigned long lastActivity;
   size_t pendingBytes;          // Pending bytes waiting to be written
   bool flowControlPaused;       // Temporary pause to avoid congestion
+  bool localReadPaused;         // Pause Local->SSH reads under backpressure
   SemaphoreHandle_t readMutex;  // Thread-safe protection for read (mutex)
   SemaphoreHandle_t writeMutex; // Thread-safe protection for write (mutex)
 
@@ -212,6 +213,8 @@ private:
   void gracefulRecoverChannel(
       int channelIndex); //   Recovery without clearing buffers
   size_t getOptimalBufferSize(int channelIndex);
+  size_t getHighWaterLocal() const;
+  size_t getLowWaterLocal() const;
   void checkAndRecoverDeadlocks(); //   Deadlock detection and recovery
   //   Dedicated task for data processing (producer/consumer pattern)
   static void dataProcessingTaskWrapper(void *parameter);
@@ -330,8 +333,8 @@ private:
   static const unsigned long LARGE_TRANSFER_TIME_THRESHOLD = 3000; // 3 seconds
 
   // OPTIMIZED: Higher flow control thresholds
-  static const size_t HIGH_WATER_LOCAL = 48 * 1024; // 48KB (tuned)
-  static const size_t LOW_WATER_LOCAL = 24 * 1024;  // 24KB (50% of HIGH_WATER)
+  static const size_t DEFAULT_HIGH_WATER_LOCAL = 48 * 1024; // 48KB (tuned)
+  static const size_t DEFAULT_LOW_WATER_LOCAL = 24 * 1024;  // 24KB (50%)
 
   //   Dedicated task for data processing
   TaskHandle_t dataProcessingTask;
