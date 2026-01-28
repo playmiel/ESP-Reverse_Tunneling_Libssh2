@@ -303,16 +303,6 @@ bool SSHTunnel::connectSSH() {
   }
 
   unsigned long now = millis();
-  unsigned long lastProgress = ch.lastSuccessfulWrite;
-  if (ch.lastSuccessfulRead > lastProgress) {
-    lastProgress = ch.lastSuccessfulRead;
-  }
-  bool progressStalled = false;
-  if (lastProgress != 0 && now >= lastProgress) {
-    progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
-  } else {
-    progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
-  }
   int reconnectDelay = config->getConnectionConfig().reconnectDelayMs;
   if (now - lastConnectionAttempt < reconnectDelay) {
     return false; // Too soon since last attempt
@@ -4299,6 +4289,16 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   }
 
   unsigned long now = millis();
+  unsigned long lastProgress = ch.lastSuccessfulWrite;
+  if (ch.lastSuccessfulRead > lastProgress) {
+    lastProgress = ch.lastSuccessfulRead;
+  }
+  bool progressStalled = false;
+  if (lastProgress != 0 && now >= lastProgress) {
+    progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
+  } else {
+    progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
+  }
 
   // Fatal crypto error -> immediately unhealthy
   if (ch.fatalCryptoErrors > 0) {
