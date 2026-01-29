@@ -4305,16 +4305,6 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
     // Switch to DEBUG to avoid repeated WARN spam
     static std::vector<unsigned long> lastTermLog;
     unsigned long now = millis();
-    unsigned long lastProgress = ch.lastSuccessfulWrite;
-    if (ch.lastSuccessfulRead > lastProgress) {
-      lastProgress = ch.lastSuccessfulRead;
-    }
-    bool progressStalled = false;
-    if (lastProgress != 0 && now >= lastProgress) {
-      progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
-    } else {
-      progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
-    }
     int needed =
         std::max(config->getConnectionConfig().maxChannels, channelIndex + 1);
     if ((int)lastTermLog.size() < needed) {
@@ -4342,12 +4332,9 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
   if (ch.lastSuccessfulRead > lastProgress) {
     lastProgress = ch.lastSuccessfulRead;
   }
-  bool progressStalled = false;
-  if (lastProgress != 0 && now >= lastProgress) {
-    progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
-  } else {
-    progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
-  }
+  unsigned long elapsedSinceProgress =
+      (lastProgress != 0) ? (now - lastProgress) : (now - ch.lastActivity);
+  bool progressStalled = elapsedSinceProgress > kBufferOverloadStallMs;
 
   // Fatal crypto error -> immediately unhealthy
   if (ch.fatalCryptoErrors > 0) {
