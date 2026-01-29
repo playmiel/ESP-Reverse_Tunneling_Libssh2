@@ -28,8 +28,9 @@ public:
     }
 
     // Increase receive and send buffer sizes
-    int rcvbuf = (rcvbuf_override > 0) ? rcvbuf_override : 65536; // 64KB default
-    int sndbuf = 65536; // 64KB
+    int rcvbuf =
+        (rcvbuf_override > 0) ? rcvbuf_override : 65536; // 64KB default
+    int sndbuf = 65536;                                  // 64KB
 
 #ifdef SO_RCVBUF
     attempted++;

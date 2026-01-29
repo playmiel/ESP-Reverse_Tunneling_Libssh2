@@ -3080,8 +3080,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   if (ch.localReadPaused) {
     if (ch.queuedBytesToRemote < lowWaterLocal) {
       ch.localReadPaused = false;
-      LOGF_D("SSH",
-             "Channel %d: Local read resumed (qRemote=%zu < %zu)",
+      LOGF_D("SSH", "Channel %d: Local read resumed (qRemote=%zu < %zu)",
              channelIndex, ch.queuedBytesToRemote, lowWaterLocal);
     }
   } else if (ch.queuedBytesToRemote > highWaterLocal) {
@@ -4306,16 +4305,16 @@ bool SSHTunnel::isChannelHealthy(int channelIndex) {
     // Switch to DEBUG to avoid repeated WARN spam
     static std::vector<unsigned long> lastTermLog;
     unsigned long now = millis();
-     unsigned long lastProgress = ch.lastSuccessfulWrite;
-  if (ch.lastSuccessfulRead > lastProgress) {
-    lastProgress = ch.lastSuccessfulRead;
-  }
-  bool progressStalled = false;
-  if (lastProgress != 0 && now >= lastProgress) {
-    progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
-  } else {
-    progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
-  }
+    unsigned long lastProgress = ch.lastSuccessfulWrite;
+    if (ch.lastSuccessfulRead > lastProgress) {
+      lastProgress = ch.lastSuccessfulRead;
+    }
+    bool progressStalled = false;
+    if (lastProgress != 0 && now >= lastProgress) {
+      progressStalled = (now - lastProgress) > kBufferOverloadStallMs;
+    } else {
+      progressStalled = (now - ch.lastActivity) > kBufferOverloadStallMs;
+    }
     int needed =
         std::max(config->getConnectionConfig().maxChannels, channelIndex + 1);
     if ((int)lastTermLog.size() < needed) {
@@ -4902,7 +4901,6 @@ bool SSHTunnel::shouldAcceptNewConnection() {
       }
     }
   }
-
 
   // Proactively start rejecting around 70% utilization
   if (activeChannels >= (int)(0.7f * maxChannels)) {
