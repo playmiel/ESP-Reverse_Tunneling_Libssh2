@@ -81,7 +81,7 @@ struct ConnectionConfig {
         channelTimeoutMs(1800000), defaultChannelPriority(1),
         priorityWeightLow(1), priorityWeightNormal(2), priorityWeightHigh(4),
         libssh2KeepAliveEnabled(true), libssh2KeepAliveIntervalSec(30),
-        tunnelRingBufferSize(32 * 1024), dataTaskStackSize(4096),
+        tunnelRingBufferSize(64 * 1024), dataTaskStackSize(4096),
         dataTaskCoreAffinity(-1), globalRateLimitBytesPerSec(0),
         globalBurstBytes(0), maxReverseListeners(1) {}
 };
@@ -145,7 +145,7 @@ public:
   void setConnectionConfig(int keepAliveInterval, int reconnectDelay,
                            int maxReconnectAttempts, int connectionTimeout);
   void setBufferConfig(int bufferSize, int maxChannels, int channelTimeout,
-                       size_t tunnelRingBufferSize = 32 * 1024);
+                       size_t tunnelRingBufferSize = 64 * 1024);
   void setMaxReverseListeners(int maxListeners);
   void setKeepAliveOptions(bool enableLibssh2, int intervalSeconds);
   void setDataTaskConfig(uint16_t stackSize, int8_t coreAffinity = -1);
