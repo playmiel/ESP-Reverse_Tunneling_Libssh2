@@ -2702,6 +2702,15 @@ size_t SSHTunnel::getLowWaterLocal() const {
   return high / 2;
 }
 
+size_t SSHTunnel::getPendingToRemoteBytes(const TunnelChannel &ch) const {
+  size_t deferred = 0;
+  if (ch.deferredToRemote &&
+      ch.deferredToRemoteOffset < ch.deferredToRemoteSize) {
+    deferred = ch.deferredToRemoteSize - ch.deferredToRemoteOffset;
+  }
+  return ch.queuedBytesToRemote + deferred;
+}
+
 uint16_t SSHTunnel::getDataTaskStackSize() const {
   uint16_t configured = config->getConnectionConfig().dataTaskStackSize;
   if (configured == 0) {
@@ -3095,18 +3104,26 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
   }
 
   // Backpressure: pause local reads until backlog drains below LOW watermark
+  size_t pendingToRemote = getPendingToRemoteBytes(ch);
   if (ch.localReadPaused) {
-    if (ch.queuedBytesToRemote < lowWaterLocal) {
+    if (pendingToRemote < lowWaterLocal) {
       ch.localReadPaused = false;
-      LOGF_D("SSH", "Channel %d: Local read resumed (qRemote=%zu < %zu)",
-             channelIndex, ch.queuedBytesToRemote, lowWaterLocal);
+      LOGF_D("SSH",
+             "Channel %d: Local read resumed (pending=%zu < %zu, qRemote=%zu)",
+             channelIndex, pendingToRemote, lowWaterLocal,
+             ch.queuedBytesToRemote);
     }
-  } else if (ch.queuedBytesToRemote > highWaterLocal) {
+  } else if (pendingToRemote > highWaterLocal) {
+    size_t deferred =
+        pendingToRemote > ch.queuedBytesToRemote
+            ? (pendingToRemote - ch.queuedBytesToRemote)
+            : 0;
     ch.localReadPaused = true;
     LOGF_W("SSH",
-           "Channel %d: Critical backpressure (%zu bytes) - pausing local "
-           "read (resume < %zu)",
-           channelIndex, ch.queuedBytesToRemote, lowWaterLocal);
+           "Channel %d: Critical backpressure (pending=%zu, qRemote=%zu, "
+           "deferred=%zu) - pausing local read (resume < %zu)",
+           channelIndex, pendingToRemote, ch.queuedBytesToRemote, deferred,
+           lowWaterLocal);
   }
 
   if (!lockChannelWrite(channelIndex)) {
@@ -3366,7 +3383,8 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         suppressLocalRead = true;
       }
     }
-    if (!suppressLocalRead && ch.queuedBytesToRemote < highWaterLocal &&
+    pendingToRemote = getPendingToRemoteBytes(ch);
+    if (!suppressLocalRead && pendingToRemote < highWaterLocal &&
         isSocketReadable(ch.localSocket, 5)) {
       ssize_t localRead =
           recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
@@ -3997,8 +4015,18 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
   if (mutex && !locked) {
     if (isRead) {
       ch.readMutexFailures++;
+      if ((ch.readMutexFailures % 64) == 1) {
+        LOGF_D("SSH",
+               "Channel %d: queueData read mutex busy (failures=%d)",
+               channelIndex, ch.readMutexFailures);
+      }
     } else {
       ch.writeMutexFailures++;
+      if ((ch.writeMutexFailures % 64) == 1) {
+        LOGF_D("SSH",
+               "Channel %d: queueData write mutex busy (failures=%d)",
+               channelIndex, ch.writeMutexFailures);
+      }
     }
     return 0;
   }

@@ -215,6 +215,7 @@ private:
   size_t getOptimalBufferSize(int channelIndex);
   size_t getHighWaterLocal() const;
   size_t getLowWaterLocal() const;
+  size_t getPendingToRemoteBytes(const TunnelChannel &ch) const;
   void checkAndRecoverDeadlocks(); //   Deadlock detection and recovery
   //   Dedicated task for data processing (producer/consumer pattern)
   static void dataProcessingTaskWrapper(void *parameter);
