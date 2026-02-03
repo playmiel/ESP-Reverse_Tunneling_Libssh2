@@ -298,6 +298,7 @@ private:
   unsigned long lastKeepAlive;
   unsigned long lastConnectionAttempt;
   int reconnectAttempts;
+  int keepAliveSocketSendFailures;
 
   // Statistics
   unsigned long bytesReceived;

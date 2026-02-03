@@ -65,17 +65,18 @@ static const unsigned long kInteractiveActivityWindowMs = 800;
 SSHTunnel::SSHTunnel()
     : session(nullptr), socketfd(-1), state(TUNNEL_DISCONNECTED),
       lastKeepAlive(0), lastConnectionAttempt(0), reconnectAttempts(0),
-      bytesReceived(0), bytesSent(0), droppedBytes(0), channels(nullptr),
-      rxBuffer(nullptr), txBuffer(nullptr), tunnelMutex(nullptr),
-      statsMutex(nullptr), sessionMutex(nullptr), throttleMutex(nullptr),
-      pendingConnectionsMutex(nullptr), config(&globalSSHConfig),
-      libssh2Initialized(false), dataProcessingTask(nullptr),
-      dataProcessingSemaphore(nullptr), dataProcessingTaskRunning(false),
-      globalRateLimitBytesPerSec(0), globalBurstBytes(0), globalTokens(0),
-      lastGlobalRefillMs(0), globalThrottleActive(false),
-      lastGlobalThrottleLogMs(0), terminalSocketFailuresRecent(0),
-      firstTerminalFailureMs(0), sessionResetTriggered(false), boundPort(-1),
-      ringBufferCapacity(0), eventHandlers() {
+      keepAliveSocketSendFailures(0), bytesReceived(0), bytesSent(0),
+      droppedBytes(0), channels(nullptr), rxBuffer(nullptr), txBuffer(nullptr),
+      tunnelMutex(nullptr), statsMutex(nullptr), sessionMutex(nullptr),
+      throttleMutex(nullptr), pendingConnectionsMutex(nullptr),
+      config(&globalSSHConfig), libssh2Initialized(false),
+      dataProcessingTask(nullptr), dataProcessingSemaphore(nullptr),
+      dataProcessingTaskRunning(false), globalRateLimitBytesPerSec(0),
+      globalBurstBytes(0), globalTokens(0), lastGlobalRefillMs(0),
+      globalThrottleActive(false), lastGlobalThrottleLogMs(0),
+      terminalSocketFailuresRecent(0), firstTerminalFailureMs(0),
+      sessionResetTriggered(false), boundPort(-1), ringBufferCapacity(0),
+      eventHandlers() {
 
   //   Use mutexes instead of binary semaphores for better performance
   tunnelMutex = xSemaphoreCreateMutex();
@@ -347,6 +348,7 @@ bool SSHTunnel::connectSSH() {
 
   reconnectAttempts = 0;
   lastKeepAlive = millis();
+  keepAliveSocketSendFailures = 0;
 
   if (listeners.empty()) {
     LOG_W("SSH", "Reverse tunnel established without active listeners");
@@ -385,6 +387,7 @@ void SSHTunnel::disconnect() {
     socketfd = -1;
   }
   state = TUNNEL_DISCONNECTED;
+  keepAliveSocketSendFailures = 0;
   if (wasConnected) {
     emitSessionDisconnected();
   }
@@ -438,6 +441,9 @@ void SSHTunnel::loop() {
   if (now - lastKeepAlive > keepAliveInterval * 1000) {
     sendKeepAlive();
     lastKeepAlive = now;
+    if (state != TUNNEL_CONNECTED) {
+      return;
+    }
   }
 
   //   Reduce log frequency in the hot loop
@@ -2228,8 +2234,20 @@ void SSHTunnel::sendKeepAlive() {
     return;
   }
   if (rc == 0) {
+    keepAliveSocketSendFailures = 0;
     LOGF_D("SSH", "Keep-alive sent, next in %d seconds", seconds);
+  } else if (rc == LIBSSH2_ERROR_SOCKET_SEND) {
+    keepAliveSocketSendFailures++;
+    LOGF_W("SSH", "Keep-alive failed: %d (%d/3)", rc,
+           keepAliveSocketSendFailures);
+    if (keepAliveSocketSendFailures >= 3) {
+      LOG_W("SSH",
+            "Keep-alive socket send failed 3 times, scheduling reconnection");
+      keepAliveSocketSendFailures = 0;
+      state = TUNNEL_ERROR;
+    }
   } else if (rc != LIBSSH2_ERROR_EAGAIN) {
+    keepAliveSocketSendFailures = 0;
     LOGF_W("SSH", "Keep-alive failed: %d", rc);
   }
 }
