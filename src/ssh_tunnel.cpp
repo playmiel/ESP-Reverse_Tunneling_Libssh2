@@ -4698,6 +4698,7 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
 
     activeCount++;
 
+    size_t pendingToRemote = getPendingToRemoteBytes(ch);
     size_t pendingBytes = ch.queuedBytesToLocal + ch.queuedBytesToRemote;
     if (ch.sshToLocalBuffer) {
       pendingBytes += ch.sshToLocalBuffer->size();
@@ -4765,7 +4766,9 @@ void SSHTunnel::checkAndRecoverDeadlocks() {
     if (ch.localToSshBuffer) {
       size_t cap = ch.localToSshBuffer->capacityBytes();
       size_t limit = cap ? (cap * 95) / 100 : (size_t)(60 * 1024);
-      if (ch.localToSshBuffer->size() > limit && progressStalled) {
+      size_t pendingLocalToRemote =
+          std::max(ch.localToSshBuffer->size(), pendingToRemote);
+      if (pendingLocalToRemote > limit && progressStalled) {
         buffersOverloaded = true;
       }
     }
