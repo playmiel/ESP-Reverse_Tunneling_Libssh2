@@ -8,8 +8,9 @@
 #include <ctype.h>
 #include <errno.h>
 
-// Define buffer size for data chunks
-#define SSH_BUFFER_SIZE 1024
+// Define buffer size for data chunks (moderate optimization)
+// Stack usage: ~2KB per temp buffer - balanced for ESP32
+#define SSH_BUFFER_SIZE 2048
 
 // Flow-control thresholds: use class-level constants from SSHTunnel (48KB/24KB)
 // Note: remove local macro overrides to avoid divergence from header values.
@@ -528,8 +529,8 @@ void SSHTunnel::loop() {
   // Cleanup inactive channels
   cleanupInactiveChannels();
 
-  //   Slightly increase delay to reduce CPU contention
-  vTaskDelay(pdMS_TO_TICKS(10)); // 10ms instead of 5ms
+  // Moderate delay - balanced throughput and CPU usage
+  vTaskDelay(pdMS_TO_TICKS(5)); // 5ms - moderate optimization
 }
 
 bool SSHTunnel::initializeSSH() {
@@ -4578,7 +4579,7 @@ void SSHTunnel::recoverChannel(int channelIndex) {
 size_t SSHTunnel::getOptimalBufferSize(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
   const size_t MIN_BUFFER_SIZE = 1024; // Never below this
-  const size_t MAX_BUFFER_SIZE = 1460; // Typical Ethernet MTU
+  const size_t MAX_BUFFER_SIZE = 8192; // Increased for better throughput
   size_t baseSize = config->getConnectionConfig().bufferSize;
   if (baseSize < MIN_BUFFER_SIZE)
     baseSize = MIN_BUFFER_SIZE;
@@ -4590,12 +4591,9 @@ size_t SSHTunnel::getOptimalBufferSize(int channelIndex) {
     return MIN_BUFFER_SIZE;
   }
 
-  // For a stable large transfer we can slightly increase (up to MTU)
+  // For a stable large transfer, boost to maximum buffer size
   if (ch.largeTransferInProgress && ch.consecutiveErrors == 0) {
-    size_t boosted = (size_t)(baseSize * 1.2f);
-    if (boosted > MAX_BUFFER_SIZE)
-      boosted = MAX_BUFFER_SIZE;
-    return boosted;
+    return MAX_BUFFER_SIZE;
   }
   return baseSize;
 }
@@ -5134,8 +5132,8 @@ void SSHTunnel::dataProcessingTaskFunction() {
       }
     }
 
-    // Longer pause to reduce CPU usage
-    vTaskDelay(pdMS_TO_TICKS(10)); // 10ms instead of 5ms
+    // Moderate delay - balanced throughput and CPU usage
+    vTaskDelay(pdMS_TO_TICKS(5)); // 5ms - moderate optimization
   }
 
   // Nettoyer avant de terminer
