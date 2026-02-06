@@ -385,11 +385,11 @@ private:
 
   // SSH write/drain tuning parameters
   static constexpr int SSH_MAX_WRITES_PER_PASS =
-      8; // Max drain iterations per loop
+      16; // Max drain iterations per loop (moderate optimization)
   static constexpr int MIN_SSH_WINDOW_SIZE =
       512; // Minimum assumed remote window (advisory)
   static constexpr int MIN_WRITE_SIZE =
-      256; // Aggregate small chunks to at least this size
+      384; // Aggregate small chunks to at least this size (moderate)
 };
 
 #endif
