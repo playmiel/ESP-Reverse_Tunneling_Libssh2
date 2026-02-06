@@ -1227,7 +1227,10 @@ size_t SSHTunnel::getGlobalAllowance(size_t desired) {
     return desired;
   }
   if (!lockThrottle(pdMS_TO_TICKS(5))) {
-    return 0;
+    // If we can't acquire the lock, allow the operation anyway to avoid
+    // blocking data flow. The rate limiting might be slightly less accurate
+    // but this prevents backpressure buildup.
+    return desired;
   }
   refillGlobalTokens();
   size_t available = globalTokens;
