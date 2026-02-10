@@ -285,13 +285,8 @@ bool SSHTunnel::init() {
   }
   libssh2Initialized = true;
 
-  //   Start dedicated data processing task
-  if (!startDataProcessingTask()) {
-    LOG_E("SSH", "Failed to start data processing task");
-    cleanupPartialInit(maxChannels);
-    unlockTunnel();
-    return false;
-  }
+  // Dedicated data processing task disabled to keep a single I/O owner.
+  // Main loop handles all channel processing to avoid contention.
 
   LOG_I("SSH",
         "SSH tunnel initialized with optimized buffers and dedicated task");
@@ -484,9 +479,7 @@ void SSHTunnel::loop() {
   prepareChannelSchedule(lowBucket, normalBucket, highBucket, false,
                          hasWorkSignal);
 
-  if (hasWorkSignal && dataProcessingSemaphore) {
-    xSemaphoreGive(dataProcessingSemaphore);
-  }
+  (void)hasWorkSignal;
 
   auto processBucket = [&](const std::vector<ChannelScheduleEntry> &bucket) {
     if (bucket.empty()) {
@@ -1820,9 +1813,10 @@ void SSHTunnel::handleChannelData(int channelIndex) {
   if ((int)lastProcessTime.size() < neededSize) {
     lastProcessTime.assign(neededSize, 0);
   }
+  bool hasPendingWork = channelHasPendingWork(ch);
   if (channelIndex < (int)lastProcessTime.size() &&
-      (now - lastProcessTime[channelIndex]) < 5) {
-    return; // Skip if processed too recently
+      (now - lastProcessTime[channelIndex]) < 5 && !hasPendingWork) {
+    return; // Skip if processed too recently and no pending work
   }
   if (channelIndex < (int)lastProcessTime.size()) {
     lastProcessTime[channelIndex] = now;
@@ -3224,18 +3218,18 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
         (void)winSize;
         (void)winUsed;
 
-        uint8_t temp[SSH_BUFFER_SIZE];
-        size_t chunk = ch.localToSshBuffer->read(temp, sizeof(temp));
+        size_t chunk = ch.localToSshBuffer->read(txBuffer, bufferSize);
         if (chunk == 0)
           break;
         if (chunk < MIN_WRITE_SIZE && !ch.localToSshBuffer->empty()) {
           size_t extra =
-              ch.localToSshBuffer->read(temp + chunk, MIN_WRITE_SIZE - chunk);
+              ch.localToSshBuffer->read(txBuffer + chunk,
+                                        MIN_WRITE_SIZE - chunk);
           chunk += extra;
         }
         size_t allowanceDrain = getGlobalAllowance(chunk);
         if (allowanceDrain == 0 && globalRateLimitBytesPerSec != 0) {
-          ch.localToSshBuffer->write(temp, chunk);
+          ch.localToSshBuffer->write(txBuffer, chunk);
           throttledByGlobalLimit = true;
           ch.lastActivity = millis();
           if (channelIndex < (int)lastThrottleLog.size() &&
@@ -3248,15 +3242,15 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           break;
         }
         if (allowanceDrain < chunk) {
-          ch.localToSshBuffer->write(temp + allowanceDrain,
+          ch.localToSshBuffer->write(txBuffer + allowanceDrain,
                                      chunk - allowanceDrain);
           chunk = allowanceDrain;
           ch.lastActivity = millis();
         }
 
         String drainErrorDetail = "";
-        ssize_t w =
-            libssh2_channel_write_ex(ch.channel, 0, (char *)temp, chunk);
+        ssize_t w = libssh2_channel_write_ex(ch.channel, 0,
+                                             (char *)txBuffer, chunk);
         if (w > 0) {
           passes++;
           totalWritten += w;
@@ -3273,11 +3267,11 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
           ch.lastActivity = millis();
           commitGlobalTokens((size_t)w);
           if ((size_t)w < chunk) {
-            ch.localToSshBuffer->write(temp + w, chunk - w);
+            ch.localToSshBuffer->write(txBuffer + w, chunk - w);
             ch.lastActivity = millis();
           }
         } else if (w == LIBSSH2_ERROR_EAGAIN) {
-          ch.localToSshBuffer->write(temp, chunk);
+          ch.localToSshBuffer->write(txBuffer, chunk);
           ch.lastActivity = millis();
           break;
         } else {
@@ -3342,7 +3336,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
             emitChannelError(channelIndex, mapSshErrorToCode((int)w, true),
                              (int)w, errMsg);
           }
-          ch.localToSshBuffer->write(temp, chunk);
+          ch.localToSshBuffer->write(txBuffer, chunk);
           if (w == LIBSSH2_ERROR_CHANNEL_CLOSED ||
               w == LIBSSH2_ERROR_SOCKET_SEND ||
               w == LIBSSH2_ERROR_SOCKET_RECV) {
@@ -3452,8 +3446,7 @@ bool SSHTunnel::processChannelWrite(int channelIndex) {
       }
     }
     pendingToRemote = getPendingToRemoteBytes(ch);
-    if (!suppressLocalRead && pendingToRemote < highWaterLocal &&
-        isSocketReadable(ch.localSocket, 5)) {
+    if (!suppressLocalRead && pendingToRemote < highWaterLocal) {
       ssize_t localRead =
           recv(ch.localSocket, txBuffer, bufferSize, MSG_DONTWAIT);
       if (localRead > 0) {
@@ -3757,7 +3750,7 @@ void SSHTunnel::processPendingData(int channelIndex) {
   if (xSemaphoreTake(ch.readMutex, pdMS_TO_TICKS(100)) ==
       pdTRUE) { // 100ms instead of 20ms
     if (ch.sshToLocalBuffer && !ch.sshToLocalBuffer->empty() &&
-        ch.localSocket >= 0 && isSocketWritable(ch.localSocket, 5)) {
+        ch.localSocket >= 0) {
 
       uint8_t tempBuffer[SSH_BUFFER_SIZE];
       size_t bytesRead =
