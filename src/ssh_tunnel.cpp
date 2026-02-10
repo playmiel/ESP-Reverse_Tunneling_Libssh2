@@ -46,6 +46,7 @@
 static const unsigned long kGlobalStallResetMs = 15000;
 static const unsigned long kGlobalStallResetCooldownMs = 30000;
 static const unsigned long kBufferOverloadStallMs = 15000;
+static const unsigned long kBackpressureStallMs = 10000;
 
 static const size_t kInteractiveQueueThreshold = 4 * 1024;
 static const unsigned long kInteractiveActivityWindowMs = 800;
@@ -1983,6 +1984,11 @@ void SSHTunnel::cleanupInactiveChannels() {
   int activeBefore = getActiveChannels();
   static std::vector<unsigned long> lastGracefulLog;
   static std::vector<unsigned long> lastThrottleSkipLog;
+  static std::vector<unsigned long> backpressureSince;
+  static std::vector<unsigned long> lastBackpressureLog;
+  static unsigned long multiBackpressureSinceMs = 0;
+  static unsigned long lastBackpressureResetMs = 0;
+  int backpressureBlockedCount = 0;
   int neededSize = maxChannels;
   if ((int)lastGracefulLog.size() < neededSize) {
     lastGracefulLog.assign(neededSize, 0);
@@ -1990,11 +1996,51 @@ void SSHTunnel::cleanupInactiveChannels() {
   if ((int)lastThrottleSkipLog.size() < neededSize) {
     lastThrottleSkipLog.assign(neededSize, 0);
   }
+  if ((int)backpressureSince.size() < neededSize) {
+    backpressureSince.assign(neededSize, 0);
+  }
+  if ((int)lastBackpressureLog.size() < neededSize) {
+    lastBackpressureLog.assign(neededSize, 0);
+  }
 
   for (int i = 0; i < maxChannels; i++) {
     if (channels[i].active) {
       unsigned long timeSinceActivity = now - channels[i].lastActivity;
       bool pendingWork = channelHasPendingWork(channels[i]);
+      TunnelChannel &ch = channels[i];
+      size_t pendingToRemote = getPendingToRemoteBytes(ch);
+      unsigned long lastProgress = ch.lastSuccessfulWrite;
+      if (ch.lastSuccessfulRead > lastProgress) {
+        lastProgress = ch.lastSuccessfulRead;
+      }
+      if (lastProgress == 0) {
+        lastProgress = ch.lastActivity;
+      }
+      bool progressStalled = (now - lastProgress) > kBackpressureStallMs;
+      bool backpressureStalled =
+          (pendingToRemote > getHighWaterLocal()) && progressStalled;
+      if (backpressureStalled) {
+        backpressureBlockedCount++;
+        if (i < (int)backpressureSince.size()) {
+          if (backpressureSince[i] == 0) {
+            backpressureSince[i] = now;
+          } else if ((now - backpressureSince[i]) > kBackpressureStallMs) {
+            if (i < (int)lastBackpressureLog.size() &&
+                (now - lastBackpressureLog[i]) > 2000) {
+              lastBackpressureLog[i] = now;
+              LOGF_W("SSH",
+                     "Channel %d: Backpressure stall >%lums (qRemote=%zu) -> "
+                     "closing channel",
+                     i, (unsigned long)kBackpressureStallMs, pendingToRemote);
+            }
+            closeChannel(i, ChannelCloseReason::Error);
+            backpressureSince[i] = 0;
+            continue;
+          }
+        }
+      } else if (i < (int)backpressureSince.size()) {
+        backpressureSince[i] = 0;
+      }
 
       //   Detect & repair with hysteresis/cooldown to avoid noisy recoveries
       if (!isChannelHealthy(i)) {
@@ -2126,6 +2172,24 @@ void SSHTunnel::cleanupInactiveChannels() {
         closeChannel(i);
       }
     }
+  }
+
+  if (backpressureBlockedCount >= 2) {
+    if (multiBackpressureSinceMs == 0) {
+      multiBackpressureSinceMs = now;
+    }
+    if (!sessionResetTriggered &&
+        (now - multiBackpressureSinceMs) > kBackpressureStallMs &&
+        (now - lastBackpressureResetMs) > kGlobalStallResetCooldownMs) {
+      lastBackpressureResetMs = now;
+      multiBackpressureSinceMs = now;
+      sessionResetTriggered = true;
+      LOGF_W("SSH",
+             "Backpressure stall on %d channels -> scheduling session reset",
+             backpressureBlockedCount);
+    }
+  } else {
+    multiBackpressureSinceMs = 0;
   }
 
   // Periodic channel state log (every 60 seconds)
