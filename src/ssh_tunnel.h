@@ -215,7 +215,15 @@ private:
   size_t getOptimalBufferSize(int channelIndex);
   size_t getHighWaterLocal() const;
   size_t getLowWaterLocal() const;
+  size_t getPendingToLocalBytes(const TunnelChannel &ch) const;
   size_t getPendingToRemoteBytes(const TunnelChannel &ch) const;
+  size_t getMaxDeferredBytes() const;
+  void recordDroppedBytes(int channelIndex, size_t bytes, TunnelErrorCode code,
+                          int rawCode, const char *detail);
+  size_t appendDeferred(int channelIndex, const uint8_t *data, size_t size,
+                        bool toLocal, const char *allocTag,
+                        TunnelErrorCode dropCode, const char *dropContext,
+                        int *outErrno = nullptr);
   void checkAndRecoverDeadlocks(); //   Deadlock detection and recovery
   //   Dedicated task for data processing (producer/consumer pattern)
   static void dataProcessingTaskWrapper(void *parameter);
@@ -362,6 +370,7 @@ private:
   void unlockStats();
   bool lockSession(TickType_t ticks = portMAX_DELAY);
   void unlockSession();
+  bool lockSessionForCleanup(TickType_t ticks, int retries, bool &tookLock);
   bool lockThrottle(TickType_t ticks = portMAX_DELAY);
   void unlockThrottle();
 
