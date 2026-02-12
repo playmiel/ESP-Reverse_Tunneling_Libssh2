@@ -1182,8 +1182,8 @@ bool SSHTunnel::deferLibssh2ChannelCleanup(LIBSSH2_CHANNEL *channel,
   bool tookLock = false;
   TaskHandle_t holder = xSemaphoreGetMutexHolder(cleanupMutex);
   if (holder != xTaskGetCurrentTaskHandle()) {
-    if (xSemaphoreTake(cleanupMutex, portMAX_DELAY) != pdTRUE) {
-      LOGF_W("SSH", "%s: cleanup mutex timeout, deferring without lock",
+    if (xSemaphoreTake(cleanupMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+      LOGF_W("SSH", "%s: cleanup mutex busy, deferring without lock",
              context ? context : "deferLibssh2ChannelCleanup");
       // Best effort: defer without mutex to avoid leak if we somehow failed.
       pendingChannelCleanup.push_back(channel);
@@ -1220,8 +1220,8 @@ bool SSHTunnel::deferSessionCleanup(const char *context) {
   bool tookLock = false;
   TaskHandle_t holder = xSemaphoreGetMutexHolder(cleanupMutex);
   if (holder != xTaskGetCurrentTaskHandle()) {
-    if (xSemaphoreTake(cleanupMutex, portMAX_DELAY) != pdTRUE) {
-      LOGF_W("SSH", "%s: cleanup mutex timeout, deferring without lock",
+    if (xSemaphoreTake(cleanupMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
+      LOGF_W("SSH", "%s: cleanup mutex busy, deferring without lock",
              context ? context : "deferSessionCleanup");
       // Best effort: defer without mutex to avoid leak if we somehow failed.
       pendingSessionCleanup.push_back({session, false});
@@ -4924,20 +4924,43 @@ size_t SSHTunnel::getOptimalBufferSize(int channelIndex) {
   TunnelChannel &ch = channels[channelIndex];
   const size_t MIN_BUFFER_SIZE = 1024; // Never below this
   const size_t MAX_BUFFER_SIZE = 8192; // Increased for better throughput
+  size_t hardCap = getConfiguredRingBufferSize();
+  if (hardCap == 0) {
+    hardCap = MAX_BUFFER_SIZE;
+  }
+  size_t minSize = (hardCap < MIN_BUFFER_SIZE) ? hardCap : MIN_BUFFER_SIZE;
+  size_t maxSize = (hardCap < MAX_BUFFER_SIZE) ? hardCap : MAX_BUFFER_SIZE;
   size_t baseSize = config->getConnectionConfig().bufferSize;
-  if (baseSize < MIN_BUFFER_SIZE)
-    baseSize = MIN_BUFFER_SIZE;
-  if (baseSize > MAX_BUFFER_SIZE)
-    baseSize = MAX_BUFFER_SIZE;
+  static std::vector<unsigned long> lastCapLog;
+  int maxChannels = config->getConnectionConfig().maxChannels;
+  if ((int)lastCapLog.size() < maxChannels) {
+    lastCapLog.resize(maxChannels, 0);
+  }
+  if (baseSize > maxSize) {
+    unsigned long now = millis();
+    if (channelIndex >= 0 && channelIndex < (int)lastCapLog.size()) {
+      if (now - lastCapLog[channelIndex] > 5000) {
+        lastCapLog[channelIndex] = now;
+        LOGF_W("SSH", "Channel %d: bufferSize %zu capped to %zu (ring cap=%zu)",
+               channelIndex, baseSize, maxSize, hardCap);
+      }
+    }
+  }
+  if (baseSize < minSize) {
+    baseSize = minSize;
+  }
+  if (baseSize > maxSize) {
+    baseSize = maxSize;
+  }
 
   // If persistent errors, remain at the safe minimum size
   if (ch.consecutiveErrors > 5) {
-    return MIN_BUFFER_SIZE;
+    return minSize;
   }
 
   // For a stable large transfer, boost to maximum buffer size
   if (ch.largeTransferInProgress && ch.consecutiveErrors == 0) {
-    return MAX_BUFFER_SIZE;
+    return maxSize;
   }
   return baseSize;
 }
