@@ -245,6 +245,10 @@ private:
                                const TunnelConfig &mapping);
   void closeLibssh2Channel(LIBSSH2_CHANNEL *channel);
   bool channelEofLocked(LIBSSH2_CHANNEL *channel);
+  bool deferLibssh2ChannelCleanup(LIBSSH2_CHANNEL *channel,
+                                  const char *context);
+  bool deferSessionCleanup(const char *context);
+  void processPendingLibssh2Cleanup(bool force = false);
 
   // Poll helpers
   bool isSocketWritable(int sockfd, int timeoutMs = 0);
@@ -336,6 +340,9 @@ private:
   };
   std::vector<PendingConnection> pendingConnections;
   SemaphoreHandle_t pendingConnectionsMutex;
+  SemaphoreHandle_t cleanupMutex;
+  std::vector<LIBSSH2_CHANNEL *> pendingChannelCleanup;
+  std::vector<LIBSSH2_SESSION *> pendingSessionCleanup;
 
   // OPTIMIZED: Thresholds for large transfer detection and flow control
   static const size_t LARGE_TRANSFER_THRESHOLD = 100 * 1024;       // 100KB
