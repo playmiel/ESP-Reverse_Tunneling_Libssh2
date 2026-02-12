@@ -215,6 +215,15 @@ private:
   size_t getOptimalBufferSize(int channelIndex);
   size_t getHighWaterLocal() const;
   size_t getLowWaterLocal() const;
+  size_t getPendingToLocalBytes(const TunnelChannel &ch) const;
+  size_t getPendingToRemoteBytes(const TunnelChannel &ch) const;
+  size_t getMaxDeferredBytes() const;
+  void recordDroppedBytes(int channelIndex, size_t bytes, TunnelErrorCode code,
+                          int rawCode, const char *detail);
+  size_t appendDeferred(int channelIndex, const uint8_t *data, size_t size,
+                        bool toLocal, const char *allocTag,
+                        TunnelErrorCode dropCode, const char *dropContext,
+                        int *outErrno = nullptr);
   void checkAndRecoverDeadlocks(); //   Deadlock detection and recovery
   //   Dedicated task for data processing (producer/consumer pattern)
   static void dataProcessingTaskWrapper(void *parameter);
@@ -236,6 +245,10 @@ private:
                                const TunnelConfig &mapping);
   void closeLibssh2Channel(LIBSSH2_CHANNEL *channel);
   bool channelEofLocked(LIBSSH2_CHANNEL *channel);
+  bool deferLibssh2ChannelCleanup(LIBSSH2_CHANNEL *channel,
+                                  const char *context);
+  bool deferSessionCleanup(const char *context);
+  void processPendingLibssh2Cleanup(bool force = false);
 
   // Poll helpers
   bool isSocketWritable(int sockfd, int timeoutMs = 0);
@@ -298,6 +311,7 @@ private:
   unsigned long lastKeepAlive;
   unsigned long lastConnectionAttempt;
   int reconnectAttempts;
+  int keepAliveSocketSendFailures;
 
   // Statistics
   unsigned long bytesReceived;
@@ -324,8 +338,15 @@ private:
     unsigned long timestamp;
     TunnelConfig mapping;
   };
+  struct DeferredSessionCleanup {
+    LIBSSH2_SESSION *session;
+    bool sendDisconnect;
+  };
   std::vector<PendingConnection> pendingConnections;
   SemaphoreHandle_t pendingConnectionsMutex;
+  SemaphoreHandle_t cleanupMutex;
+  std::vector<LIBSSH2_CHANNEL *> pendingChannelCleanup;
+  std::vector<DeferredSessionCleanup> pendingSessionCleanup;
 
   // OPTIMIZED: Thresholds for large transfer detection and flow control
   static const size_t LARGE_TRANSFER_THRESHOLD = 100 * 1024;       // 100KB
@@ -360,6 +381,7 @@ private:
   void unlockStats();
   bool lockSession(TickType_t ticks = portMAX_DELAY);
   void unlockSession();
+  bool lockSessionForCleanup(TickType_t ticks, int retries, bool &tookLock);
   bool lockThrottle(TickType_t ticks = portMAX_DELAY);
   void unlockThrottle();
 
@@ -383,11 +405,11 @@ private:
 
   // SSH write/drain tuning parameters
   static constexpr int SSH_MAX_WRITES_PER_PASS =
-      8; // Max drain iterations per loop
+      16; // Max drain iterations per loop (moderate optimization)
   static constexpr int MIN_SSH_WINDOW_SIZE =
       512; // Minimum assumed remote window (advisory)
   static constexpr int MIN_WRITE_SIZE =
-      256; // Aggregate small chunks to at least this size
+      384; // Aggregate small chunks to at least this size (moderate)
 };
 
 #endif
