@@ -338,11 +338,15 @@ private:
     unsigned long timestamp;
     TunnelConfig mapping;
   };
+  struct DeferredSessionCleanup {
+    LIBSSH2_SESSION *session;
+    bool sendDisconnect;
+  };
   std::vector<PendingConnection> pendingConnections;
   SemaphoreHandle_t pendingConnectionsMutex;
   SemaphoreHandle_t cleanupMutex;
   std::vector<LIBSSH2_CHANNEL *> pendingChannelCleanup;
-  std::vector<LIBSSH2_SESSION *> pendingSessionCleanup;
+  std::vector<DeferredSessionCleanup> pendingSessionCleanup;
 
   // OPTIMIZED: Thresholds for large transfer detection and flow control
   static const size_t LARGE_TRANSFER_THRESHOLD = 100 * 1024;       // 100KB

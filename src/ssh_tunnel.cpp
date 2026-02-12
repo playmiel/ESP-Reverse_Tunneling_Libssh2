@@ -1178,10 +1178,17 @@ bool SSHTunnel::deferLibssh2ChannelCleanup(LIBSSH2_CHANNEL *channel,
            context ? context : "deferLibssh2ChannelCleanup");
     return true;
   }
-  if (xSemaphoreTake(cleanupMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-    LOGF_W("SSH", "%s: cleanup mutex timeout, channel not deferred",
-           context ? context : "deferLibssh2ChannelCleanup");
-    return false;
+  bool tookLock = false;
+  TaskHandle_t holder = xSemaphoreGetMutexHolder(cleanupMutex);
+  if (holder != xTaskGetCurrentTaskHandle()) {
+    if (xSemaphoreTake(cleanupMutex, portMAX_DELAY) != pdTRUE) {
+      LOGF_W("SSH", "%s: cleanup mutex timeout, deferring without lock",
+             context ? context : "deferLibssh2ChannelCleanup");
+      // Best effort: defer without mutex to avoid leak if we somehow failed.
+      pendingChannelCleanup.push_back(channel);
+      return true;
+    }
+    tookLock = true;
   }
 
   if (std::find(pendingChannelCleanup.begin(), pendingChannelCleanup.end(),
@@ -1192,7 +1199,9 @@ bool SSHTunnel::deferLibssh2ChannelCleanup(LIBSSH2_CHANNEL *channel,
          context ? context : "deferLibssh2ChannelCleanup",
          pendingChannelCleanup.size());
 
-  xSemaphoreGive(cleanupMutex);
+  if (tookLock) {
+    xSemaphoreGive(cleanupMutex);
+  }
   return true;
 }
 
@@ -1201,27 +1210,43 @@ bool SSHTunnel::deferSessionCleanup(const char *context) {
     return false;
   }
   if (cleanupMutex == NULL) {
-    pendingSessionCleanup.push_back(session);
+    pendingSessionCleanup.push_back({session, false});
     session = nullptr;
     LOGF_W("SSH", "%s: cleanup mutex unavailable, session deferred",
            context ? context : "deferSessionCleanup");
     return true;
   }
-  if (xSemaphoreTake(cleanupMutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-    LOGF_W("SSH", "%s: cleanup mutex timeout, session not deferred",
-           context ? context : "deferSessionCleanup");
-    return false;
+  bool tookLock = false;
+  TaskHandle_t holder = xSemaphoreGetMutexHolder(cleanupMutex);
+  if (holder != xTaskGetCurrentTaskHandle()) {
+    if (xSemaphoreTake(cleanupMutex, portMAX_DELAY) != pdTRUE) {
+      LOGF_W("SSH", "%s: cleanup mutex timeout, deferring without lock",
+             context ? context : "deferSessionCleanup");
+      // Best effort: defer without mutex to avoid leak if we somehow failed.
+      pendingSessionCleanup.push_back({session, false});
+      session = nullptr;
+      return true;
+    }
+    tookLock = true;
   }
 
-  if (std::find(pendingSessionCleanup.begin(), pendingSessionCleanup.end(),
-                session) == pendingSessionCleanup.end()) {
-    pendingSessionCleanup.push_back(session);
+  bool alreadyQueued = false;
+  for (const auto &entry : pendingSessionCleanup) {
+    if (entry.session == session) {
+      alreadyQueued = true;
+      break;
+    }
+  }
+  if (!alreadyQueued) {
+    pendingSessionCleanup.push_back({session, false});
   }
   session = nullptr;
   LOGF_W("SSH", "%s: deferred session cleanup",
          context ? context : "deferSessionCleanup");
 
-  xSemaphoreGive(cleanupMutex);
+  if (tookLock) {
+    xSemaphoreGive(cleanupMutex);
+  }
   return true;
 }
 
@@ -1230,14 +1255,15 @@ void SSHTunnel::processPendingLibssh2Cleanup(bool force) {
     return;
   }
   bool tookLock = false;
-  TickType_t waitTicks = force ? pdMS_TO_TICKS(200) : 0;
-  int retries = force ? 5 : 1;
+  TickType_t waitTicks =
+      force ? pdMS_TO_TICKS(200) : pdMS_TO_TICKS(5);
+  int retries = force ? 5 : 2;
   if (!lockSessionForCleanup(waitTicks, retries, tookLock)) {
     return;
   }
 
   std::vector<LIBSSH2_CHANNEL *> channelsToFree;
-  std::vector<LIBSSH2_SESSION *> sessionsToFree;
+  std::vector<DeferredSessionCleanup> sessionsToFree;
   if (cleanupMutex == NULL) {
     channelsToFree.swap(pendingChannelCleanup);
     sessionsToFree.swap(pendingSessionCleanup);
@@ -1260,11 +1286,14 @@ void SSHTunnel::processPendingLibssh2Cleanup(bool force) {
     libssh2_channel_free(ch);
   }
 
-  for (auto *sess : sessionsToFree) {
+  for (const auto &entry : sessionsToFree) {
+    LIBSSH2_SESSION *sess = entry.session;
     if (!sess) {
       continue;
     }
-    libssh2_session_disconnect(sess, "Shutdown");
+    if (entry.sendDisconnect) {
+      libssh2_session_disconnect(sess, "Shutdown");
+    }
     libssh2_session_free(sess);
   }
 
@@ -2086,12 +2115,11 @@ void SSHTunnel::closeChannel(int channelIndex, ChannelCloseReason reason) {
     } else {
       cleaned = deferLibssh2ChannelCleanup(ch.channel, "closeChannel");
     }
-    if (cleaned) {
-      ch.channel = nullptr;
-    } else {
+    if (!cleaned) {
       LOG_W("SSH",
             "closeChannel: unable to free or defer channel cleanup safely");
     }
+    ch.channel = nullptr;
   }
 
   if (ch.localSocket >= 0) {
