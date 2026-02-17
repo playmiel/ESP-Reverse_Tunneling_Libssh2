@@ -4418,11 +4418,19 @@ size_t SSHTunnel::queueData(int channelIndex, const uint8_t *data, size_t size,
   if (tookLock)
     xSemaphoreGive(mutex);
   if (totalQueued == 0) {
-    ch.lostWriteChunks++;
-    if (ch.lostWriteChunks % 10 == 1) {
-      LOGF_W("SSH",
-             "Channel %d: Buffer full - 0 bytes enqueued (lostChunks=%d)",
-             channelIndex, ch.lostWriteChunks);
+    static std::vector<unsigned long> lastEnqueueStallLog;
+    int maxChannels = config->getConnectionConfig().maxChannels;
+    if ((int)lastEnqueueStallLog.size() < maxChannels) {
+      lastEnqueueStallLog.resize(maxChannels, 0);
+    }
+    unsigned long now = millis();
+    if (channelIndex >= 0 && channelIndex < (int)lastEnqueueStallLog.size()) {
+      if (now - lastEnqueueStallLog[channelIndex] > 2000) {
+        lastEnqueueStallLog[channelIndex] = now;
+        const char *dir = isRead ? "ssh->local" : "local->ssh";
+        LOGF_W("SSH", "Channel %d: Buffer full - enqueue stalled (%s)",
+               channelIndex, dir);
+      }
     }
   }
   return totalQueued;
