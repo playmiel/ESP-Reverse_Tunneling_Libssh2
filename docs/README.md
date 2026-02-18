@@ -201,8 +201,8 @@ globalSSHConfig.setConnectionConfig(
 globalSSHConfig.setBufferConfig(
     8192,       // Buffer size: 8KB
     5,          // Max channels: 5
-    0,          // (unused, kept for compatibility)
-    64 * 1024   // Ring buffer size per direction per channel (default 64KB)
+    300000,     // (unused in v2, must be >0)
+    64 * 1024   // Ring buffer size per channel (per direction, default 64KB total)
 );
 ```
 

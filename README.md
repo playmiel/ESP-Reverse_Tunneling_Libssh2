@@ -138,8 +138,8 @@ globalSSHConfig.setKeepAliveOptions(true, 30); // want-reply=1, 30s
 globalSSHConfig.setLogLevel(LOG_INFO);
 
 // Advanced data-path tuning
-// 4th argument = ring buffer size per direction per channel (default 64KB)
-globalSSHConfig.setBufferConfig(8192, 10, 0, 64 * 1024);
+// 4th argument = ring buffer size per channel ( per direction, default 64KB total)
+globalSSHConfig.setBufferConfig(8192, 10, 300000, 64 * 1024);
 ```
 
 Retrieve the effective reverse tunnel port when you bind to `remoteBindPort = 0`:

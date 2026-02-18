@@ -526,8 +526,8 @@ void TransportPump::checkCloses() {
     for (int c = 0; c < closeCount; ++c) {
       if (pendingCloseCount_ < MAX_CLOSE_EVENTS) {
         const ChannelSlot &ch = channels_->getSlot(toClose[c]);
-        pendingCloseEvents_[pendingCloseCount_++] = {
-            toClose[c], ch.closeReason};
+        pendingCloseEvents_[pendingCloseCount_++] = {toClose[c],
+                                                     ch.closeReason};
       }
     }
     if (session_->lock(pdMS_TO_TICKS(200))) {
