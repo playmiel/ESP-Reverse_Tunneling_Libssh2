@@ -182,8 +182,8 @@ void TransportPump::pumpSshTransport() {
 
 // ---------------------------------------------------------------------------
 // Phase 2: Drain toLocal rings -> local sockets (round-robin)
-// Uses per-channel staging buffer to prevent data reordering.
-// Data goes: ring -> pendingLocal -> socket. Never back to ring.
+// Uses DataRingBuffer::writeToFront() to preserve FIFO order on partial sends.
+// Data goes: ring.read() -> send(). Unsent remainder -> ring.writeToFront().
 // ---------------------------------------------------------------------------
 void TransportPump::drainSshToLocal() {
   int maxSlots = channels_->getMaxSlots();
@@ -194,66 +194,38 @@ void TransportPump::drainSshToLocal() {
   for (int n = 0; n < maxSlots; ++n) {
     int i = (n + roundRobinOffset_) % maxSlots;
     ChannelSlot &ch = channels_->getSlot(i);
-    if (!ch.active || ch.localSocket < 0 || !ch.pendingLocal) {
+    if (!ch.active || ch.localSocket < 0 || !ch.toLocal) {
       continue;
     }
 
-    // Step 1: Drain pending buffer (leftover from previous partial send)
-    if (ch.hasPendingLocal()) {
-      ssize_t sent = send(ch.localSocket,
-                          ch.pendingLocal + ch.pendingLocalOff,
-                          ch.pendingLocalLen - ch.pendingLocalOff,
-                          MSG_DONTWAIT);
-      if (sent > 0) {
-        ch.pendingLocalOff += sent;
-        lastBytesMoved_ += sent;
-        ch.lastActivity = millis();
-        if (!ch.hasPendingLocal()) {
-          ch.clearPendingLocal();
-        }
-      } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-        ch.localEof = true;
-        LOGF_W("SSH", "Channel %d: local send error %d (%s)", i, errno,
-               strerror(errno));
-        ch.clearPendingLocal();
-      }
-      // If still has pending data, skip ring read this cycle
-      if (ch.hasPendingLocal()) {
-        continue;
-      }
-    }
-
-    // Step 2: Read from toLocal ring into staging buffer, then send
-    if (!ch.toLocal || ch.toLocal->empty()) {
+    if (ch.toLocal->empty()) {
       continue;
     }
+
     size_t available = ch.toLocal->size();
-    size_t toDrain = available < ChannelSlot::PENDING_BUF_SIZE
-                         ? available
-                         : ChannelSlot::PENDING_BUF_SIZE;
+    size_t toDrain = available < bufSize_ ? available : bufSize_;
 
-    size_t got = ch.toLocal->read(ch.pendingLocal, toDrain);
+    size_t got = ch.toLocal->read(txBuf_, toDrain);
     if (got == 0) {
       continue;
     }
-    ch.pendingLocalLen = got;
-    ch.pendingLocalOff = 0;
 
-    ssize_t sent = send(ch.localSocket, ch.pendingLocal, got, MSG_DONTWAIT);
+    ssize_t sent = send(ch.localSocket, txBuf_, got, MSG_DONTWAIT);
     if (sent > 0) {
-      ch.pendingLocalOff = sent;
       lastBytesMoved_ += sent;
       ch.lastActivity = millis();
-      if (static_cast<size_t>(sent) >= got) {
-        ch.clearPendingLocal();
+      if (static_cast<size_t>(sent) < got) {
+        // Partial send: put unsent data back at the front of the ring
+        ch.toLocal->writeToFront(txBuf_ + sent, got - sent);
       }
     } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
       ch.localEof = true;
       LOGF_W("SSH", "Channel %d: local send error %d (%s)", i, errno,
              strerror(errno));
-      ch.clearPendingLocal();
+    } else {
+      // EAGAIN/EWOULDBLOCK: put ALL data back at the front
+      ch.toLocal->writeToFront(txBuf_, got);
     }
-    // EAGAIN/partial: data stays in staging buffer, drained next cycle
   }
 }
 
@@ -282,56 +254,20 @@ void TransportPump::drainLocalToSsh() {
       continue;
     }
 
-    // --- Step A: Drain toRemote -> SSH via per-channel staging buffer ---
-    // Data goes: ring -> pendingSsh -> SSH. Never back to ring.
-    if (ch.pendingSsh) {
+    // --- Step A: Drain toRemote -> SSH using writeToFront() for partial writes ---
+    // Data goes: ring.read() -> SSH write. Unsent remainder -> ring.writeToFront().
+    if (ch.toRemote) {
       size_t budget = MAX_WRITE_PER_CHANNEL;
+      bool hitEagain = false;
 
-      // First: drain pending staging buffer (leftover from previous cycle)
-      while (budget > 0 && ch.hasPendingSsh()) {
-        ssize_t written = libssh2_channel_write(
-            ch.sshChannel, (char *)(ch.pendingSsh + ch.pendingSshOff),
-            ch.pendingSshLen - ch.pendingSshOff);
-        if (written > 0) {
-          ch.pendingSshOff += written;
-          ch.totalBytesSent += written;
-          lastBytesMoved_ += written;
-          budget -= written;
-          ch.lastSuccessfulWrite = millis();
-          ch.lastActivity = ch.lastSuccessfulWrite;
-          ch.eagainCount = 0;
-          ch.firstEagainMs = 0;
-          ch.consecutiveErrors = 0;
-          if (!ch.hasPendingSsh()) {
-            ch.clearPendingSsh();
-          }
-        } else if (written == LIBSSH2_ERROR_EAGAIN) {
-          ch.eagainCount++;
-          if (ch.firstEagainMs == 0) ch.firstEagainMs = millis();
-          break;
-        } else {
-          ch.consecutiveErrors++;
-          LOGF_W("SSH", "Channel %d: SSH write error %ld (errors=%d)", i,
-                 (long)written, ch.consecutiveErrors);
-          break;
-        }
-      }
-
-      // Then: read from ring into staging buffer and write to SSH
-      while (budget > 0 && !ch.hasPendingSsh() && ch.toRemote &&
-             !ch.toRemote->empty()) {
-        size_t chunkSize = budget < ChannelSlot::PENDING_BUF_SIZE
-                               ? budget
-                               : ChannelSlot::PENDING_BUF_SIZE;
-        size_t got = ch.toRemote->read(ch.pendingSsh, chunkSize);
+      while (budget > 0 && !ch.toRemote->empty() && !hitEagain) {
+        size_t chunkSize = budget < bufSize_ ? budget : bufSize_;
+        size_t got = ch.toRemote->read(txBuf_, chunkSize);
         if (got == 0) break;
-        ch.pendingSshLen = got;
-        ch.pendingSshOff = 0;
 
         ssize_t written = libssh2_channel_write(ch.sshChannel,
-                                                 (char *)ch.pendingSsh, got);
+                                                 (char *)txBuf_, got);
         if (written > 0) {
-          ch.pendingSshOff = written;
           ch.totalBytesSent += written;
           lastBytesMoved_ += written;
           budget -= written;
@@ -340,16 +276,17 @@ void TransportPump::drainLocalToSsh() {
           ch.eagainCount = 0;
           ch.firstEagainMs = 0;
           ch.consecutiveErrors = 0;
-          if (static_cast<size_t>(written) >= got) {
-            ch.clearPendingSsh();
-          } else {
-            break; // Partial write, remainder stays in staging buffer
+          if (static_cast<size_t>(written) < got) {
+            // Partial write: put unsent data back at the front
+            ch.toRemote->writeToFront(txBuf_ + written, got - written);
+            break;
           }
         } else if (written == LIBSSH2_ERROR_EAGAIN) {
-          // Data stays in staging buffer (NOT written back to ring)
+          // Put ALL data back at the front of the ring
+          ch.toRemote->writeToFront(txBuf_, got);
           ch.eagainCount++;
           if (ch.firstEagainMs == 0) ch.firstEagainMs = millis();
-          break;
+          hitEagain = true;
         } else {
           ch.consecutiveErrors++;
           LOGF_W("SSH", "Channel %d: SSH write error %ld (errors=%d)", i,
@@ -363,8 +300,7 @@ void TransportPump::drainLocalToSsh() {
           (millis() - ch.firstEagainMs) >
               static_cast<unsigned long>(EAGAIN_STALL_TIMEOUT_MS)) {
         LOGF_W("SSH", "Channel %d: EAGAIN stall timeout (%dms, toRemote=%zu)",
-               i, EAGAIN_STALL_TIMEOUT_MS,
-               ch.toRemote ? ch.toRemote->size() : 0);
+               i, EAGAIN_STALL_TIMEOUT_MS, ch.toRemote->size());
         if (ch.state == ChannelSlot::State::Open) {
           channels_->beginClose(i, ChannelCloseReason::Error);
         }
@@ -501,8 +437,7 @@ void TransportPump::checkCloses() {
     }
 
     bool ringsEmpty = (!ch.toLocal || ch.toLocal->empty()) &&
-                      (!ch.toRemote || ch.toRemote->empty()) &&
-                      !ch.hasPendingSsh() && !ch.hasPendingLocal();
+                      (!ch.toRemote || ch.toRemote->empty());
     bool timedOut = (now - ch.closeStartMs) > DRAIN_TIMEOUT_MS;
     bool tooManyErrors = ch.consecutiveErrors > 3;
 

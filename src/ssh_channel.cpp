@@ -53,9 +53,6 @@ void ChannelManager::destroy() {
         close(slots_[i].localSocket);
         slots_[i].localSocket = -1;
       }
-      // Free staging buffers
-      SAFE_FREE(slots_[i].pendingSsh);
-      SAFE_FREE(slots_[i].pendingLocal);
       // Free ring buffers
       delete slots_[i].toLocal;
       slots_[i].toLocal = nullptr;
@@ -139,21 +136,6 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
     return false;
   }
 
-  // Allocate staging buffers (prevent data reordering on partial writes)
-  uint8_t *pendingSsh = static_cast<uint8_t *>(
-      safeMalloc(ChannelSlot::PENDING_BUF_SIZE, "pendSsh"));
-  uint8_t *pendingLocal = static_cast<uint8_t *>(
-      safeMalloc(ChannelSlot::PENDING_BUF_SIZE, "pendLocal"));
-  if (!pendingSsh || !pendingLocal) {
-    LOG_E("SSH", "Failed to allocate staging buffers");
-    delete toLocal;
-    delete toRemote;
-    SAFE_FREE(pendingSsh);
-    SAFE_FREE(pendingLocal);
-    close(localSocket);
-    return false;
-  }
-
   // Initialize slot
   resetSlot(slotIndex);
   slot.sshChannel = sshChannel;
@@ -162,8 +144,6 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
   slot.state = ChannelSlot::State::Open;
   slot.toLocal = toLocal;
   slot.toRemote = toRemote;
-  slot.pendingSsh = pendingSsh;
-  slot.pendingLocal = pendingLocal;
   slot.lastActivity = millis();
   slot.lastSuccessfulWrite = slot.lastActivity;
   slot.lastSuccessfulRead = slot.lastActivity;
@@ -225,10 +205,6 @@ void ChannelManager::finalizeClose(int slotIndex) {
     close(slot.localSocket);
     slot.localSocket = -1;
   }
-
-  // Free staging buffers
-  SAFE_FREE(slot.pendingSsh);
-  SAFE_FREE(slot.pendingLocal);
 
   // Free ring buffers
   delete slot.toLocal;
@@ -352,11 +328,5 @@ void ChannelManager::resetSlot(int index) {
   slot.firstEagainMs = 0;
   slot.toLocal = nullptr;
   slot.toRemote = nullptr;
-  slot.pendingSsh = nullptr;
-  slot.pendingLocal = nullptr;
-  slot.pendingSshLen = 0;
-  slot.pendingSshOff = 0;
-  slot.pendingLocalLen = 0;
-  slot.pendingLocalOff = 0;
   memset(&slot.endpoint, 0, sizeof(slot.endpoint));
 }
