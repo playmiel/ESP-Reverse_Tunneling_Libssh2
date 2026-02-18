@@ -56,11 +56,11 @@ If you prefer the original single-listener behaviour, set
 
 ### Callback helpers
 
-To illustrate the new `SSHTunnelEvents` interface, the example registers a
+To illustrate the `SSHTunnelEvents` interface, the example registers a
 handful of lightweight callbacks (`registerTunnelCallbacks()`), printing when
 the SSH session connects/disconnects, when channels open/close (with reasons),
-and when large transfers start or end. Replace the logging lambdas with your
-own application logic if you need deeper integration.
+and on errors. Replace the logging lambdas with your own application logic
+if you need deeper integration.
 
 ## Troubleshooting
 

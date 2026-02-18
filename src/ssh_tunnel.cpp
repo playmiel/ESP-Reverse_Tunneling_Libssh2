@@ -34,10 +34,7 @@ bool SSHTunnel::init() {
 
   // Initialize channel manager
   const ConnectionConfig &connConfig = config_->getConnectionConfig();
-  size_t ringBufSize = connConfig.tunnelRingBufferSize;
-  // Use half the configured size per direction (was full size per direction in v1)
-  // This halves memory usage while maintaining throughput thanks to backpressure
-  size_t perDirectionSize = ringBufSize / 2;
+  size_t perDirectionSize = connConfig.tunnelRingBufferSize;
   if (perDirectionSize < 8192) {
     perDirectionSize = 8192; // Minimum 8KB per direction
   }
@@ -110,7 +107,11 @@ bool SSHTunnel::isConnected() {
 }
 
 void SSHTunnel::loop() {
-  if (state_ == TUNNEL_ERROR || state_ == TUNNEL_DISCONNECTED) {
+  if (state_ == TUNNEL_ERROR) {
+    handleReconnection();
+    return;
+  }
+  if (state_ == TUNNEL_DISCONNECTED) {
     return;
   }
 

@@ -8,16 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Structure for pending data (compatible with existing logic)
-struct PendingData {
-  uint8_t data[1024]; // Static buffer instead of pointer to avoid dynamic
-                      // allocations
-  size_t size;
-  size_t offset;
-  unsigned long timestamp;
-  uint32_t checksum; // Simple checksum for data integrity
-};
-
 // Generic thread-safe ring buffer
 template <typename T> class RingBuffer {
 private:
@@ -267,24 +257,6 @@ public:
     return total;
   }
 
-  // Zero-copy acquire/release for flush paths
-  // NOTE: bypasses prepend buffer — only use when prepend is known empty.
-  size_t acquire(const uint8_t **ptr, size_t maxLen) {
-    if (!handle || !ptr || maxLen == 0)
-      return 0;
-    size_t itemSize = 0;
-    const uint8_t *item =
-        (const uint8_t *)xRingbufferReceiveUpTo(handle, &itemSize, 0, maxLen);
-    *ptr = item;
-    return itemSize;
-  }
-
-  void release(const void *ptr) {
-    if (handle && ptr) {
-      vRingbufferReturnItem(handle, (void *)ptr);
-    }
-  }
-
   void clear() {
     prependLen_ = 0;
     prependOff_ = 0;
@@ -322,6 +294,3 @@ public:
   }
   size_t capacityBytes() const { return capacity; }
 };
-
-// Template specialization for PendingData
-typedef RingBuffer<PendingData> PendingDataRing;
