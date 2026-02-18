@@ -425,9 +425,10 @@ void TransportPump::checkCloses() {
   // closeStartMs = millis(). Using the old `now` would cause unsigned
   // underflow (now - closeStartMs wraps to UINT_MAX → instant timeout).
   now = millis();
-  int toSendEof[16];
+  const int arrSize = maxSlots < 32 ? maxSlots : 32;
+  int toSendEof[arrSize];
   int eofCount = 0;
-  int toClose[16];
+  int toClose[arrSize];
   int closeCount = 0;
 
   for (int i = 0; i < maxSlots; ++i) {
@@ -446,20 +447,20 @@ void TransportPump::checkCloses() {
              "Channel %d: drain timeout (%lums, toLocal=%zu, toRemote=%zu)", i,
              now - ch.closeStartMs, ch.toLocal ? ch.toLocal->size() : 0,
              ch.toRemote ? ch.toRemote->size() : 0);
-      if (closeCount < 16) toClose[closeCount++] = i;
+      if (closeCount < arrSize) toClose[closeCount++] = i;
     } else if (tooManyErrors) {
       LOGF_W("SSH", "Channel %d: closing due to errors (%d)", i,
              ch.consecutiveErrors);
-      if (closeCount < 16) toClose[closeCount++] = i;
+      if (closeCount < arrSize) toClose[closeCount++] = i;
     } else if (ringsEmpty) {
       if (ch.eofSentMs == 0) {
         // Rings drained — send SSH EOF first (next sub-step)
-        if (eofCount < 16) toSendEof[eofCount++] = i;
+        if (eofCount < arrSize) toSendEof[eofCount++] = i;
       } else if ((now - ch.eofSentMs) >= EOF_GRACE_MS) {
         // Grace period elapsed — safe to finalize
         LOGF_I("SSH", "Channel %d: drain complete (sent=%zu, recv=%zu)", i,
                ch.totalBytesSent, ch.totalBytesReceived);
-        if (closeCount < 16) toClose[closeCount++] = i;
+        if (closeCount < arrSize) toClose[closeCount++] = i;
       }
       // else: grace period still running, wait
     }

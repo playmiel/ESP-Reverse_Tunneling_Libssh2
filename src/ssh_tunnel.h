@@ -15,7 +15,7 @@ enum TunnelState {
   TUNNEL_ERROR = 3
 };
 
-// ChannelCloseReason and TunnelErrorCode are defined in ssh_channel.h
+// ChannelCloseReason is defined in ssh_channel.h
 
 struct SSHTunnelEvents {
   void (*onSessionConnected)() = nullptr;
@@ -23,10 +23,6 @@ struct SSHTunnelEvents {
   void (*onChannelOpened)(int) = nullptr;
   void (*onChannelClosed)(int, ChannelCloseReason) = nullptr;
   void (*onError)(int, const char *) = nullptr;
-  void (*onChannelWriteBroken)(int, TunnelErrorCode, int,
-                               const char *) = nullptr;
-  void (*onLargeTransferStart)(int) = nullptr;
-  void (*onLargeTransferEnd)(int) = nullptr;
 };
 
 // SSHTunnel: public facade with the same API as before.

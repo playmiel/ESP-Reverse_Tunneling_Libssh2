@@ -53,9 +53,9 @@ private:
   static constexpr int BACKPRESSURE_HIGH_PCT = 75; // Pause reads above 75%
   static constexpr int BACKPRESSURE_LOW_PCT = 25;  // Resume reads below 25%
   static constexpr size_t MAX_WRITE_PER_CHANNEL = 4096; // Max SSH write per channel per round
-  static constexpr unsigned long DRAIN_TIMEOUT_MS = 5000; // Max time in Draining state
-  static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS = 3000; // Close after remote EOF + 3s idle
-  static constexpr int EAGAIN_STALL_TIMEOUT_MS = 10000;  // Max EAGAIN duration before close
+  static constexpr unsigned long DRAIN_TIMEOUT_MS = 15000; // Max time in Draining state
+  static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS = 10000; // Close after remote EOF + 10s idle
+  static constexpr int EAGAIN_STALL_TIMEOUT_MS = 30000;  // Max EAGAIN duration before close
   static constexpr unsigned long EOF_GRACE_MS = 200;     // Wait after SSH EOF sent before closing
 
   SSHSession *session_ = nullptr;
@@ -65,7 +65,7 @@ private:
   uint8_t *txBuf_ = nullptr; // Shared write buffer
   size_t bufSize_ = 0;
 
-  int roundRobinOffset_ = 0;
+  unsigned int roundRobinOffset_ = 0;
   size_t lastBytesMoved_ = 0;
 };
 

@@ -59,31 +59,18 @@ struct ConnectionConfig {
   int connectionTimeoutSec;
   int bufferSize;
   int maxChannels;
-  int channelTimeoutMs;
-  uint8_t defaultChannelPriority;
-  uint8_t priorityWeightLow;
-  uint8_t priorityWeightNormal;
-  uint8_t priorityWeightHigh;
   bool libssh2KeepAliveEnabled;
   int libssh2KeepAliveIntervalSec;
   size_t tunnelRingBufferSize;
-  uint16_t dataTaskStackSize;
-  int8_t dataTaskCoreAffinity; // -1 = no pinning
-  size_t globalRateLimitBytesPerSec;
-  size_t globalBurstBytes;
   int maxReverseListeners;
 
   // Default constructor
   ConnectionConfig()
       : keepAliveIntervalSec(30), reconnectDelayMs(5000),
         maxReconnectAttempts(5), connectionTimeoutSec(30), bufferSize(8192),
-        maxChannels(10), // Increased from 5 to 10 for large transfers
-        channelTimeoutMs(1800000), defaultChannelPriority(1),
-        priorityWeightLow(1), priorityWeightNormal(2), priorityWeightHigh(4),
+        maxChannels(10),
         libssh2KeepAliveEnabled(true), libssh2KeepAliveIntervalSec(30),
-        tunnelRingBufferSize(64 * 1024), dataTaskStackSize(4096),
-        dataTaskCoreAffinity(-1), globalRateLimitBytesPerSec(0),
-        globalBurstBytes(0), maxReverseListeners(1) {}
+        tunnelRingBufferSize(64 * 1024), maxReverseListeners(1) {}
 };
 
 // Structure for debug configuration
@@ -148,11 +135,6 @@ public:
                        size_t tunnelRingBufferSize = 64 * 1024);
   void setMaxReverseListeners(int maxListeners);
   void setKeepAliveOptions(bool enableLibssh2, int intervalSeconds);
-  void setDataTaskConfig(uint16_t stackSize, int8_t coreAffinity = -1);
-  void setChannelPriorityProfile(uint8_t defaultPriority, uint8_t lowWeight = 1,
-                                 uint8_t normalWeight = 2,
-                                 uint8_t highWeight = 4);
-  void setGlobalRateLimit(size_t bytesPerSecond, size_t burstBytes = 0);
 
   // Debug configuration methods
   void setDebugConfig(bool enabled, int baudRate);
@@ -227,8 +209,6 @@ extern SSHConfiguration globalSSHConfig;
   globalSSHConfig.getConnectionConfig().connectionTimeoutSec
 #define BUFFER_SIZE globalSSHConfig.getConnectionConfig().bufferSize
 #define MAX_CHANNELS globalSSHConfig.getConnectionConfig().maxChannels
-#define CHANNEL_TIMEOUT_MS                                                     \
-  globalSSHConfig.getConnectionConfig().channelTimeoutMs
 
 #define DEBUG_ENABLED globalSSHConfig.getDebugConfig().debugEnabled
 #define SERIAL_BAUD_RATE globalSSHConfig.getDebugConfig().serialBaudRate

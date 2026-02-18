@@ -415,15 +415,12 @@ void SSHConfiguration::setBufferConfig(int bufferSize, int maxChannels,
   if (lockConfig()) {
     connectionConfig.bufferSize = bufferSize;
     connectionConfig.maxChannels = maxChannels;
-    connectionConfig.channelTimeoutMs = channelTimeout;
     connectionConfig.tunnelRingBufferSize = tunnelRingBufferSize;
     unlockConfig();
 
     LOGF_I("CONFIG",
-           "Buffer config: size=%d, max_channels=%d, channel_timeout=%dms, "
-           "ring_buffer=%u bytes",
-           bufferSize, maxChannels, channelTimeout,
-           (unsigned)tunnelRingBufferSize);
+           "Buffer config: size=%d, max_channels=%d, ring_buffer=%u bytes",
+           bufferSize, maxChannels, (unsigned)tunnelRingBufferSize);
   }
 }
 
@@ -451,68 +448,6 @@ void SSHConfiguration::setKeepAliveOptions(bool enableLibssh2,
 
     LOGF_I("CONFIG", "libssh2 keepalive: %s (interval=%ds)",
            enableLibssh2 ? "enabled" : "disabled", intervalSeconds);
-  }
-}
-
-void SSHConfiguration::setDataTaskConfig(uint16_t stackSize,
-                                         int8_t coreAffinity) {
-  if (stackSize == 0) {
-    stackSize = connectionConfig.dataTaskStackSize;
-  }
-  if (lockConfig()) {
-    connectionConfig.dataTaskStackSize = stackSize;
-    connectionConfig.dataTaskCoreAffinity = coreAffinity;
-    unlockConfig();
-
-    LOGF_I("CONFIG", "Data task config: stack=%u bytes, core=%d", stackSize,
-           coreAffinity);
-  }
-}
-
-void SSHConfiguration::setChannelPriorityProfile(uint8_t defaultPriority,
-                                                 uint8_t lowWeight,
-                                                 uint8_t normalWeight,
-                                                 uint8_t highWeight) {
-  if (lockConfig()) {
-    if (lowWeight == 0) {
-      lowWeight = 1;
-    }
-    if (normalWeight == 0) {
-      normalWeight = 1;
-    }
-    if (highWeight == 0) {
-      highWeight = 1;
-    }
-
-    connectionConfig.defaultChannelPriority =
-        (defaultPriority > 2) ? 2 : defaultPriority;
-    connectionConfig.priorityWeightLow = lowWeight;
-    connectionConfig.priorityWeightNormal = normalWeight;
-    connectionConfig.priorityWeightHigh = highWeight;
-    unlockConfig();
-
-    LOGF_I("CONFIG",
-           "Channel priority profile: default=%u, weights(L/M/H)=%u/%u/%u",
-           connectionConfig.defaultChannelPriority,
-           connectionConfig.priorityWeightLow,
-           connectionConfig.priorityWeightNormal,
-           connectionConfig.priorityWeightHigh);
-  }
-}
-
-void SSHConfiguration::setGlobalRateLimit(size_t bytesPerSecond,
-                                          size_t burstBytes) {
-  if (lockConfig()) {
-    connectionConfig.globalRateLimitBytesPerSec = bytesPerSecond;
-    connectionConfig.globalBurstBytes = burstBytes;
-    unlockConfig();
-
-    if (bytesPerSecond == 0) {
-      LOG_I("CONFIG", "Global rate limit disabled");
-    } else {
-      LOGF_I("CONFIG", "Global rate limit: %zu B/s (burst=%zu)", bytesPerSecond,
-             burstBytes ? burstBytes : bytesPerSecond);
-    }
   }
 }
 
@@ -587,30 +522,10 @@ void SSHConfiguration::printConfiguration() const {
            connectionConfig.connectionTimeoutSec);
     LOGF_I("CONFIG", "Buffer size: %d bytes", connectionConfig.bufferSize);
     LOGF_I("CONFIG", "Max channels: %d", connectionConfig.maxChannels);
-    LOGF_I("CONFIG", "Channel timeout: %dms",
-           connectionConfig.channelTimeoutMs);
     LOGF_I("CONFIG", "Tunnel ring buffer: %u bytes",
            (unsigned)connectionConfig.tunnelRingBufferSize);
-    LOGF_I("CONFIG", "Channel priority default: %u",
-           connectionConfig.defaultChannelPriority);
-    LOGF_I("CONFIG", "Channel priority weights (L/M/H): %u/%u/%u",
-           connectionConfig.priorityWeightLow,
-           connectionConfig.priorityWeightNormal,
-           connectionConfig.priorityWeightHigh);
-    LOGF_I("CONFIG", "Data task stack/core: %u / %d",
-           connectionConfig.dataTaskStackSize,
-           connectionConfig.dataTaskCoreAffinity);
     LOGF_I("CONFIG", "Max reverse listeners: %d",
            connectionConfig.maxReverseListeners);
-    if (connectionConfig.globalRateLimitBytesPerSec > 0) {
-      LOGF_I("CONFIG", "Global rate limit: %zu B/s (burst=%zu)",
-             connectionConfig.globalRateLimitBytesPerSec,
-             connectionConfig.globalBurstBytes
-                 ? connectionConfig.globalBurstBytes
-                 : connectionConfig.globalRateLimitBytesPerSec);
-    } else {
-      LOG_I("CONFIG", "Global rate limit: disabled");
-    }
 
     LOG_I("CONFIG", "=== Debug Configuration ===");
     LOGF_I("CONFIG", "Debug enabled: %s",
@@ -740,28 +655,6 @@ bool SSHConfiguration::validateConnectionConfig() const {
     return false;
   }
 
-  if (connectionConfig.channelTimeoutMs <= 0) {
-    LOG_E("CONFIG", "Channel timeout must be positive");
-    return false;
-  }
-
-  if (connectionConfig.defaultChannelPriority > 2) {
-    LOG_E("CONFIG", "Default channel priority must be between 0 and 2");
-    return false;
-  }
-
-  if (connectionConfig.priorityWeightLow == 0 ||
-      connectionConfig.priorityWeightNormal == 0 ||
-      connectionConfig.priorityWeightHigh == 0) {
-    LOG_E("CONFIG", "Channel priority weights must be greater than zero");
-    return false;
-  }
-
-  if (connectionConfig.globalRateLimitBytesPerSec == 0 &&
-      connectionConfig.globalBurstBytes > 0) {
-    LOG_W("CONFIG", "Global burst is ignored when rate limit is disabled");
-  }
-
   if (connectionConfig.libssh2KeepAliveEnabled &&
       connectionConfig.libssh2KeepAliveIntervalSec <= 0) {
     LOG_E("CONFIG",
@@ -771,17 +664,6 @@ bool SSHConfiguration::validateConnectionConfig() const {
 
   if (connectionConfig.tunnelRingBufferSize == 0) {
     LOG_E("CONFIG", "Tunnel ring buffer size must be positive");
-    return false;
-  }
-
-  if (connectionConfig.dataTaskStackSize == 0) {
-    LOG_E("CONFIG", "Data task stack size must be positive");
-    return false;
-  }
-
-  if (connectionConfig.dataTaskCoreAffinity < -1) {
-    LOG_E("CONFIG",
-          "Data task core affinity must be -1 (no pin) or a valid core index");
     return false;
   }
 

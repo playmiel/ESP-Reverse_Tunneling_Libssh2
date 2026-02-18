@@ -15,21 +15,6 @@ enum class ChannelCloseReason {
   Manual
 };
 
-enum class TunnelErrorCode : int {
-  Unknown = 0,
-  SshEagain = 1,
-  SshSocketRecv = 2,
-  SshSocketSend = 3,
-  SshChannelClosed = 4,
-  SshDecrypt = 5,
-  SshReadFailure = 6,
-  SshWriteFailure = 7,
-  LocalSocketError = 8,
-  DropLocalToSsh = 9,
-  DropSshToLocal = 10,
-  AllocFailure = 11
-};
-
 static constexpr size_t SSH_TUNNEL_ENDPOINT_HOST_MAX = 64;
 
 struct ChannelEndpointInfo {
