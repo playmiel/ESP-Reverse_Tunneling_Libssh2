@@ -8,16 +8,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-// Structure for pending data (compatible with existing logic)
-struct PendingData {
-  uint8_t data[1024]; // Static buffer instead of pointer to avoid dynamic
-                      // allocations
-  size_t size;
-  size_t offset;
-  unsigned long timestamp;
-  uint32_t checksum; // Simple checksum for data integrity
-};
-
 // Generic thread-safe ring buffer
 template <typename T> class RingBuffer {
 private:
@@ -146,19 +136,36 @@ public:
   float usage() const { return (float)count / capacity * 100.0f; }
 };
 
-// Specialized ring buffer for raw byte data (wraps FreeRTOS ringbuffer)
+// Specialized ring buffer for raw byte data (wraps FreeRTOS ringbuffer).
+// Supports writeToFront() to put data back at the HEAD of the buffer,
+// preserving FIFO order when a write/send is partial or returns EAGAIN.
 class DataRingBuffer {
 private:
   RingbufHandle_t handle;
   size_t capacity;
   const char *tag;
 
+  // Prepend buffer: holds data that must be read BEFORE the main ring.
+  // Used by writeToFront() when a partial write needs to put data back
+  // at the front instead of the end (which would break FIFO ordering).
+  // Must be >= TransportPump::bufSize_ (default 8192 from ConnectionConfig).
+  static constexpr size_t PREPEND_CAP = 8192;
+  uint8_t *prepend_ = nullptr;
+  size_t prependLen_ = 0;
+  size_t prependOff_ = 0;
+
 public:
   DataRingBuffer(size_t size, const char *tagName = "DATA_RING_BUFFER")
       : handle(nullptr), capacity(size), tag(tagName) {
     handle = xRingbufferCreate(capacity, RINGBUF_TYPE_BYTEBUF);
-    if (!handle) {
+    prepend_ = static_cast<uint8_t *>(safeMalloc(PREPEND_CAP, "prepend"));
+    if (!handle || !prepend_) {
       LOGF_E("RING", "Failed to create %s (capacity=%d bytes)", tag, capacity);
+      if (handle) {
+        vRingbufferDelete(handle);
+        handle = nullptr;
+      }
+      SAFE_FREE(prepend_);
     } else {
       LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
     }
@@ -169,9 +176,11 @@ public:
       vRingbufferDelete(handle);
       handle = nullptr;
     }
+    SAFE_FREE(prepend_);
     LOGF_D("RING", "Destroyed %s", tag);
   }
 
+  // Write data to the END of the buffer (normal append).
   size_t write(const uint8_t *data, size_t len) {
     if (!handle || !data || len == 0)
       return 0;
@@ -199,40 +208,64 @@ public:
     return written;
   }
 
+  // Write data to the FRONT of the buffer (prepend).
+  // Used to put back unsent data so it's read first next time.
+  // Returns number of bytes stored (0 if prepend buffer is occupied or too
+  // large).
+  size_t writeToFront(const uint8_t *data, size_t len) {
+    if (!prepend_ || !data || len == 0 || len > PREPEND_CAP)
+      return 0;
+    // Must not have existing prepend data (caller drains before next
+    // writeToFront)
+    if (prependLen_ > prependOff_)
+      return 0;
+    memcpy(prepend_, data, len);
+    prependLen_ = len;
+    prependOff_ = 0;
+    return len;
+  }
+
+  // Read data: first drains prepend buffer, then the FreeRTOS ring.
   size_t read(uint8_t *data, size_t len) {
-    if (!handle || !data || len == 0)
+    if (!data || len == 0)
       return 0;
 
+    size_t total = 0;
+
+    // First: drain prepend buffer (data that was put back via writeToFront)
+    if (prependLen_ > prependOff_) {
+      size_t avail = prependLen_ - prependOff_;
+      size_t copy = avail < len ? avail : len;
+      memcpy(data, prepend_ + prependOff_, copy);
+      prependOff_ += copy;
+      total += copy;
+      if (prependOff_ >= prependLen_) {
+        prependLen_ = 0;
+        prependOff_ = 0;
+      }
+      if (total >= len)
+        return total;
+    }
+
+    // Then: read from FreeRTOS ring
+    if (!handle)
+      return total;
+    size_t remaining = len - total;
     size_t itemSize = 0;
     uint8_t *item =
-        (uint8_t *)xRingbufferReceiveUpTo(handle, &itemSize, 0, len);
-    if (!item) {
-      return 0;
+        (uint8_t *)xRingbufferReceiveUpTo(handle, &itemSize, 0, remaining);
+    if (item) {
+      size_t toCopy = itemSize > remaining ? remaining : itemSize;
+      memcpy(data + total, item, toCopy);
+      vRingbufferReturnItem(handle, item);
+      total += toCopy;
     }
-    size_t toCopy = itemSize > len ? len : itemSize;
-    memcpy(data, item, toCopy);
-    vRingbufferReturnItem(handle, item);
-    return toCopy;
-  }
-
-  // Zero-copy acquire/release for flush paths
-  size_t acquire(const uint8_t **ptr, size_t maxLen) {
-    if (!handle || !ptr || maxLen == 0)
-      return 0;
-    size_t itemSize = 0;
-    const uint8_t *item =
-        (const uint8_t *)xRingbufferReceiveUpTo(handle, &itemSize, 0, maxLen);
-    *ptr = item;
-    return itemSize;
-  }
-
-  void release(const void *ptr) {
-    if (handle && ptr) {
-      vRingbufferReturnItem(handle, (void *)ptr);
-    }
+    return total;
   }
 
   void clear() {
+    prependLen_ = 0;
+    prependOff_ = 0;
     if (!handle)
       return;
     size_t itemSize = 0;
@@ -244,11 +277,15 @@ public:
   }
 
   size_t size() const {
+    size_t prependRemain =
+        (prependLen_ > prependOff_) ? (prependLen_ - prependOff_) : 0;
     if (!handle)
-      return 0;
+      return prependRemain;
     size_t freeSpace = xRingbufferGetCurFreeSize(handle);
-    return (freeSpace > capacity) ? 0 : (capacity - freeSpace);
+    size_t ringUsed = (freeSpace > capacity) ? 0 : (capacity - freeSpace);
+    return prependRemain + ringUsed;
   }
+  // Available free space for write() (prepend doesn't affect this)
   size_t available() const {
     if (!handle)
       return 0;
@@ -263,6 +300,3 @@ public:
   }
   size_t capacityBytes() const { return capacity; }
 };
-
-// Template specialization for PendingData
-typedef RingBuffer<PendingData> PendingDataRing;

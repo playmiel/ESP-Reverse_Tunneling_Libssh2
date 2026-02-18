@@ -33,8 +33,6 @@ void onSessionDisconnected();
 void onChannelOpened(int channel);
 void onChannelClosed(int channel, ChannelCloseReason reason);
 void onTunnelError(int code, const char *detail);
-void onLargeTransferStart(int channel);
-void onLargeTransferEnd(int channel);
 
 void setup() {
   Serial.begin(115200);
@@ -177,20 +175,6 @@ void configureSSHTunnel() {
                                   1800000 // Channel timeout (ms) - 30 minutes
   );
 
-  // Channel priority profile (optional tuning)
-  globalSSHConfig.setChannelPriorityProfile(
-      1, // Default priority for new channels (0=low, 1=normal, 2=high)
-      1, // Weight applied to low priority channels
-      2, // Weight applied to normal priority channels
-      4  // Weight applied to high priority channels
-  );
-
-  // Global rate limit (optional, disabled when bytesPerSecond = 0)
-  globalSSHConfig.setGlobalRateLimit(
-      64 * 1024, // Bytes per second across all channels
-      96 * 1024  // Burst budget (optional); defaults to rate if zero
-  );
-
   // Debug configuration
   globalSSHConfig.setDebugConfig(true,  // Debug enabled
                                  115200 // Serial baud rate
@@ -223,8 +207,6 @@ void registerTunnelCallbacks() {
   events.onChannelOpened = onChannelOpened;
   events.onChannelClosed = onChannelClosed;
   events.onError = onTunnelError;
-  events.onLargeTransferStart = onLargeTransferStart;
-  events.onLargeTransferEnd = onLargeTransferEnd;
   tunnel.setEventHandlers(events);
 }
 
@@ -320,12 +302,4 @@ void onChannelClosed(int channel, ChannelCloseReason reason) {
 
 void onTunnelError(int code, const char *detail) {
   LOGF_W("CALLBACK", "Tunnel error %d: %s", code, detail ? detail : "(none)");
-}
-
-void onLargeTransferStart(int channel) {
-  LOGF_I("CALLBACK", "Channel %d started a large transfer", channel);
-}
-
-void onLargeTransferEnd(int channel) {
-  LOGF_I("CALLBACK", "Channel %d finished the large transfer", channel);
 }

@@ -187,53 +187,41 @@ globalSSHConfig.diagnoseSSHKeys();
 
 ### Network
 - Tune `keepAliveIntervalSec`
-- Optimize `channelTimeoutMs`
-- Use built-in network optimizations
-
-### Channel priorities
-- `setChannelPriorityProfile()` lets you favor interactive streams over bulk transfers
-- The scheduler auto-bumps channels that stay active with small queues
-- Large transfers and paused channels are de-prioritized to protect latency
-
-```cpp
-// Default priority = normal (1), with heavier weights for high priority channels
-globalSSHConfig.setChannelPriorityProfile(
-    1,  // Base priority for new channels (0=low, 1=normal, 2=high)
-    1,  // Weight applied to low priority channels
-    2,  // Weight for normal priority channels
-    4   // Weight for high priority channels
-);
-```
-
-### Global throughput
-- `setGlobalRateLimit()` caps the aggregate Local→SSH throughput (0 disables the shaper)
-- A token bucket smooths bursts; `burstBytes` configures the initial bucket size
-- When saturation occurs you’ll see `Global throttle active` in the serial log
-
-```cpp
-// Cap Local->SSH traffic to ~64 KB/s with a short 96 KB burst
-globalSSHConfig.setGlobalRateLimit(
-    64 * 1024,  // bytes per second
-    96 * 1024   // optional burst budget; defaults to rate if zero
-);
-```
+- Use built-in network optimizations and backpressure
 
 ### Recommended configuration
 ```cpp
 globalSSHConfig.setConnectionConfig(
     30,    // Keep-alive: 30s
-    5000,  // Reconnect delay: 5s  
+    5000,  // Reconnect delay: 5s
     10,    // Max reconnect attempts
     30     // Connection timeout: 30s
 );
 
 globalSSHConfig.setBufferConfig(
-    8192,  // Buffer size: 8KB
-    5,     // Max channels: 5
-    300000 // Channel timeout: 5min
+    8192,       // Buffer size: 8KB
+    5,          // Max channels: 5
+    300000,     // (unused in v2, must be >0)
+    64 * 1024   // Ring buffer size per channel (per direction, default 64KB total)
 );
-// Optional 4th argument lets you override the per-channel ring buffer size.
 ```
+
+### Multi-tunnel / multiple listeners
+
+Use `addTunnelMapping()` and `setMaxReverseListeners()` to expose several
+local services through a single SSH connection:
+
+```cpp
+globalSSHConfig.clearTunnelMappings();
+globalSSHConfig.setMaxReverseListeners(3);
+
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22080, "192.168.1.100", 80);
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22081, "192.168.1.150", 502);
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, "192.168.1.200", 22);
+```
+
+> **Note:** Listeners are created at `connectSSH()` time. Adding mappings
+> while a session is active requires a reconnect to take effect.
 
 ## 📞 Support
 
