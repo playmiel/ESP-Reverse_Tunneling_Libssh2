@@ -104,8 +104,8 @@ void TransportPump::pumpSshTransport() {
 
     // Skip if toLocal ring is paused (too full)
     if (ch.sshReadPaused) {
-      if (ch.toLocal && ch.toLocal->size() <
-              ch.toLocal->capacityBytes() * BACKPRESSURE_LOW_PCT / 100) {
+      if (ch.toLocal && ch.toLocal->size() < ch.toLocal->capacityBytes() *
+                                                 BACKPRESSURE_LOW_PCT / 100) {
         ch.sshReadPaused = false;
         LOGF_D("SSH", "Channel %d: SSH read resumed (toLocal=%zu)", i,
                ch.toLocal->size());
@@ -161,17 +161,16 @@ void TransportPump::pumpSshTransport() {
         ch.consecutiveErrors++;
         LOGF_W("SSH", "Channel %d: SSH read error %d (errors=%d)", i, rc,
                ch.consecutiveErrors);
-        if (ch.consecutiveErrors > 3 &&
-            ch.state == ChannelSlot::State::Open) {
+        if (ch.consecutiveErrors > 3 && ch.state == ChannelSlot::State::Open) {
           channels_->beginClose(i, ChannelCloseReason::Error);
         }
         break;
       }
     }
 
-    // Check for SSH channel EOF flag (in case libssh2 sets it without returning 0)
-    if (!ch.remoteEof && ch.sshChannel &&
-        libssh2_channel_eof(ch.sshChannel)) {
+    // Check for SSH channel EOF flag (in case libssh2 sets it without returning
+    // 0)
+    if (!ch.remoteEof && ch.sshChannel && libssh2_channel_eof(ch.sshChannel)) {
       ch.remoteEof = true;
       LOGF_I("SSH", "Channel %d: remote EOF (eof flag)", i);
     }
@@ -254,8 +253,9 @@ void TransportPump::drainLocalToSsh() {
       continue;
     }
 
-    // --- Step A: Drain toRemote -> SSH using writeToFront() for partial writes ---
-    // Data goes: ring.read() -> SSH write. Unsent remainder -> ring.writeToFront().
+    // --- Step A: Drain toRemote -> SSH using writeToFront() for partial writes
+    // --- Data goes: ring.read() -> SSH write. Unsent remainder ->
+    // ring.writeToFront().
     if (ch.toRemote) {
       size_t budget = MAX_WRITE_PER_CHANNEL;
       bool hitEagain = false;
@@ -263,10 +263,11 @@ void TransportPump::drainLocalToSsh() {
       while (budget > 0 && !ch.toRemote->empty() && !hitEagain) {
         size_t chunkSize = budget < bufSize_ ? budget : bufSize_;
         size_t got = ch.toRemote->read(txBuf_, chunkSize);
-        if (got == 0) break;
+        if (got == 0)
+          break;
 
-        ssize_t written = libssh2_channel_write(ch.sshChannel,
-                                                 (char *)txBuf_, got);
+        ssize_t written =
+            libssh2_channel_write(ch.sshChannel, (char *)txBuf_, got);
         if (written > 0) {
           ch.totalBytesSent += written;
           lastBytesMoved_ += written;
@@ -285,7 +286,8 @@ void TransportPump::drainLocalToSsh() {
           // Put ALL data back at the front of the ring
           ch.toRemote->writeToFront(txBuf_, got);
           ch.eagainCount++;
-          if (ch.firstEagainMs == 0) ch.firstEagainMs = millis();
+          if (ch.firstEagainMs == 0)
+            ch.firstEagainMs = millis();
           hitEagain = true;
         } else {
           ch.consecutiveErrors++;
@@ -320,8 +322,7 @@ void TransportPump::drainLocalToSsh() {
         }
       } else if (used > cap * BACKPRESSURE_HIGH_PCT / 100) {
         ch.localReadPaused = true;
-        LOGF_D("SSH", "Channel %d: local read paused (toRemote=%zu)", i,
-               used);
+        LOGF_D("SSH", "Channel %d: local read paused (toRemote=%zu)", i, used);
       }
     }
 
@@ -447,26 +448,31 @@ void TransportPump::checkCloses() {
              "Channel %d: drain timeout (%lums, toLocal=%zu, toRemote=%zu)", i,
              now - ch.closeStartMs, ch.toLocal ? ch.toLocal->size() : 0,
              ch.toRemote ? ch.toRemote->size() : 0);
-      if (closeCount < arrSize) toClose[closeCount++] = i;
+      if (closeCount < arrSize)
+        toClose[closeCount++] = i;
     } else if (tooManyErrors) {
       LOGF_W("SSH", "Channel %d: closing due to errors (%d)", i,
              ch.consecutiveErrors);
-      if (closeCount < arrSize) toClose[closeCount++] = i;
+      if (closeCount < arrSize)
+        toClose[closeCount++] = i;
     } else if (ringsEmpty) {
       if (ch.eofSentMs == 0) {
         // Rings drained — send SSH EOF first (next sub-step)
-        if (eofCount < arrSize) toSendEof[eofCount++] = i;
+        if (eofCount < arrSize)
+          toSendEof[eofCount++] = i;
       } else if ((now - ch.eofSentMs) >= EOF_GRACE_MS) {
         // Grace period elapsed — safe to finalize
         LOGF_I("SSH", "Channel %d: drain complete (sent=%zu, recv=%zu)", i,
                ch.totalBytesSent, ch.totalBytesReceived);
-        if (closeCount < arrSize) toClose[closeCount++] = i;
+        if (closeCount < arrSize)
+          toClose[closeCount++] = i;
       }
       // else: grace period still running, wait
     }
   }
 
-  // --- Step 2a: Send EOF + pump transport for channels whose rings are empty ---
+  // --- Step 2a: Send EOF + pump transport for channels whose rings are empty
+  // ---
   if (eofCount > 0 && session_->lock(pdMS_TO_TICKS(100))) {
     for (int c = 0; c < eofCount; ++c) {
       int i = toSendEof[c];
@@ -479,8 +485,7 @@ void TransportPump::checkCloses() {
       int rc = libssh2_channel_send_eof(ch.sshChannel);
       if (rc == 0 || rc == LIBSSH2_ERROR_EAGAIN) {
         // Retry EAGAIN a few times
-        for (int retry = 0; rc == LIBSSH2_ERROR_EAGAIN && retry < 10;
-             retry++) {
+        for (int retry = 0; rc == LIBSSH2_ERROR_EAGAIN && retry < 10; retry++) {
           rc = libssh2_channel_send_eof(ch.sshChannel);
         }
       }
@@ -489,8 +494,8 @@ void TransportPump::checkCloses() {
       // libssh2_channel_read() as a side effect processes the outgoing queue.
       uint8_t pumpBuf[512];
       for (int p = 0; p < 8; p++) {
-        int pr =
-            libssh2_channel_read(ch.sshChannel, (char *)pumpBuf, sizeof(pumpBuf));
+        int pr = libssh2_channel_read(ch.sshChannel, (char *)pumpBuf,
+                                      sizeof(pumpBuf));
         if (pr > 0 && ch.toLocal) {
           // Got some data — put it in the ring (will be drained next cycle)
           ch.toLocal->write(reinterpret_cast<uint8_t *>(pumpBuf), pr);

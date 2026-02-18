@@ -46,8 +46,9 @@ struct ChannelSlot {
   ChannelCloseReason closeReason = ChannelCloseReason::Unknown;
 
   // Backpressure flags
-  bool localReadPaused = false; // Stop reading from local socket (toRemote full)
-  bool sshReadPaused = false;   // Stop reading from SSH channel (toLocal full)
+  bool localReadPaused =
+      false;                  // Stop reading from local socket (toRemote full)
+  bool sshReadPaused = false; // Stop reading from SSH channel (toLocal full)
 
   // Statistics
   size_t totalBytesReceived = 0;
@@ -60,7 +61,6 @@ struct ChannelSlot {
   int consecutiveErrors = 0;
   int eagainCount = 0;
   unsigned long firstEagainMs = 0;
-
 };
 
 // Manages a fixed-size array of ChannelSlots.
@@ -90,7 +90,8 @@ public:
   void beginClose(int slotIndex, ChannelCloseReason reason);
 
   // Finalize close: free SSH channel, close local socket, reset slot.
-  // The caller must hold the session lock when calling this (for libssh2_channel_free).
+  // The caller must hold the session lock when calling this (for
+  // libssh2_channel_free).
   void finalizeClose(int slotIndex);
 
   // Should we accept a new connection?

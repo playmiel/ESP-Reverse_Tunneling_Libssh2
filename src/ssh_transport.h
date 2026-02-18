@@ -11,10 +11,11 @@
 // using round-robin fair scheduling across channels.
 //
 // 4-phase pump cycle:
-//   Phase 1: pumpSshTransport()  - Read SSH data into toLocal rings (processes WINDOW_ADJUST)
-//   Phase 2: drainSshToLocal()   - Send toLocal ring data to local sockets
-//   Phase 3: drainLocalToSsh()   - Read local sockets + write toRemote rings to SSH
-//   Phase 4: checkCloses()       - Finalize channels whose rings are empty or timed out
+//   Phase 1: pumpSshTransport()  - Read SSH data into toLocal rings (processes
+//   WINDOW_ADJUST) Phase 2: drainSshToLocal()   - Send toLocal ring data to
+//   local sockets Phase 3: drainLocalToSsh()   - Read local sockets + write
+//   toRemote rings to SSH Phase 4: checkCloses()       - Finalize channels
+//   whose rings are empty or timed out
 class TransportPump {
 public:
   TransportPump();
@@ -43,7 +44,8 @@ private:
   // Phase 2: Drain toLocal rings -> local sockets (round-robin).
   void drainSshToLocal();
 
-  // Phase 3: Read local sockets -> toRemote rings, then drain toRemote -> SSH (round-robin).
+  // Phase 3: Read local sockets -> toRemote rings, then drain toRemote -> SSH
+  // (round-robin).
   void drainLocalToSsh();
 
   // Phase 4: Check channels in Draining state for completion.
@@ -52,11 +54,16 @@ private:
   // Backpressure thresholds (fraction of ring buffer capacity)
   static constexpr int BACKPRESSURE_HIGH_PCT = 75; // Pause reads above 75%
   static constexpr int BACKPRESSURE_LOW_PCT = 25;  // Resume reads below 25%
-  static constexpr size_t MAX_WRITE_PER_CHANNEL = 4096; // Max SSH write per channel per round
-  static constexpr unsigned long DRAIN_TIMEOUT_MS = 15000; // Max time in Draining state
-  static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS = 10000; // Close after remote EOF + 10s idle
-  static constexpr int EAGAIN_STALL_TIMEOUT_MS = 30000;  // Max EAGAIN duration before close
-  static constexpr unsigned long EOF_GRACE_MS = 200;     // Wait after SSH EOF sent before closing
+  static constexpr size_t MAX_WRITE_PER_CHANNEL =
+      4096; // Max SSH write per channel per round
+  static constexpr unsigned long DRAIN_TIMEOUT_MS =
+      15000; // Max time in Draining state
+  static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS =
+      10000; // Close after remote EOF + 10s idle
+  static constexpr int EAGAIN_STALL_TIMEOUT_MS =
+      30000; // Max EAGAIN duration before close
+  static constexpr unsigned long EOF_GRACE_MS =
+      200; // Wait after SSH EOF sent before closing
 
   SSHSession *session_ = nullptr;
   ChannelManager *channels_ = nullptr;

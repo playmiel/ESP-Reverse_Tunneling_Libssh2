@@ -397,8 +397,7 @@ bool SSHSession::verifyHostKey(const SSHServerConfig &sshConfig) {
 
   LOGF_I("SSH", "Server host key: %s", keyTypeStr.c_str());
   LOGF_I("SSH", "Server fingerprint (SHA256 hex): %s", fingerprintHex.c_str());
-  LOGF_I("SSH", "Server fingerprint (OpenSSH): %s",
-         fingerprintOpenSSH.c_str());
+  LOGF_I("SSH", "Server fingerprint (OpenSSH): %s", fingerprintOpenSSH.c_str());
 
   if (sshConfig.hostKeyType.length() > 0 &&
       sshConfig.hostKeyType != keyTypeStr) {
@@ -515,8 +514,7 @@ bool SSHSession::authenticate(const SSHServerConfig &sshConfig) {
       LOGF_E("SSH", "Failed to query authentication methods: %s",
              detail.c_str());
     } else {
-      LOG_E("SSH",
-            "Failed to query authentication methods (no data returned)");
+      LOG_E("SSH", "Failed to query authentication methods (no data returned)");
     }
     return false;
   }
@@ -559,8 +557,7 @@ bool SSHSession::authenticate(const SSHServerConfig &sshConfig) {
     LOGF_I("SSH",
            "Authenticating with keys from memory (private: %d bytes, public: "
            "%d bytes)",
-           sshConfig.privateKeyData.length(),
-           sshConfig.publicKeyData.length());
+           sshConfig.privateKeyData.length(), sshConfig.publicKeyData.length());
 
     // Try 3 passphrase variants: configured, empty string, NULL
     const char *passphrases[] = {
@@ -575,8 +572,8 @@ bool SSHSession::authenticate(const SSHServerConfig &sshConfig) {
         auth_result = libssh2_userauth_publickey_frommemory(
             session_, sshConfig.username.c_str(), sshConfig.username.length(),
             sshConfig.publicKeyData.c_str(), sshConfig.publicKeyData.length(),
-            sshConfig.privateKeyData.c_str(),
-            sshConfig.privateKeyData.length(), passphrases[attempt]);
+            sshConfig.privateKeyData.c_str(), sshConfig.privateKeyData.length(),
+            passphrases[attempt]);
         if (auth_result) {
           char *errmsg = nullptr;
           int errlen = 0;
@@ -604,9 +601,10 @@ bool SSHSession::authenticate(const SSHServerConfig &sshConfig) {
              attempt + 1, 3, passphraseNames[attempt], auth_result, detail);
     }
 
-    LOG_W("SSH",
-          "Note: Your private key may be in OpenSSH format. "
-          "Consider converting to PEM format: ssh-keygen -p -m PEM -f your_key");
+    LOG_W(
+        "SSH",
+        "Note: Your private key may be in OpenSSH format. "
+        "Consider converting to PEM format: ssh-keygen -p -m PEM -f your_key");
     return false;
 
   } else {
@@ -630,8 +628,7 @@ bool SSHSession::authenticate(const SSHServerConfig &sshConfig) {
           detailStr = String(errmsg).substring(0, errlen);
         }
         unlock();
-        const char *detail =
-            detailStr.length() ? detailStr.c_str() : "Unknown";
+        const char *detail = detailStr.length() ? detailStr.c_str() : "Unknown";
         LOGF_E("SSH", "Auth by public key from file failed: %d, Message: %s",
                fileAuth, detail);
         return false;
@@ -668,9 +665,8 @@ bool SSHSession::createListeners(SSHConfiguration *config) {
     entry.mapping = mappings[i];
     if (!createListenerForMapping(entry.mapping, entry)) {
       LOGF_E("SSH", "Failed to create listener for %s:%d -> %s:%d",
-             entry.mapping.remoteBindHost.c_str(),
-             entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
-             entry.mapping.localPort);
+             entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
+             entry.mapping.localHost.c_str(), entry.mapping.localPort);
       cancelAllListeners();
       return false;
     }
