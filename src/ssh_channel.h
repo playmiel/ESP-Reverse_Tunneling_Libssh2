@@ -76,22 +76,6 @@ struct ChannelSlot {
   int eagainCount = 0;
   unsigned long firstEagainMs = 0;
 
-  // Staging buffers: data read from ring goes here before being
-  // written to SSH / local socket. Prevents data reordering when
-  // writes are partial or return EAGAIN. Data is NEVER written
-  // back to the ring buffer (which would put it at the wrong end).
-  static constexpr size_t PENDING_BUF_SIZE = 4096;
-  uint8_t *pendingSsh = nullptr;
-  size_t pendingSshLen = 0;
-  size_t pendingSshOff = 0;
-  uint8_t *pendingLocal = nullptr;
-  size_t pendingLocalLen = 0;
-  size_t pendingLocalOff = 0;
-
-  bool hasPendingSsh() const { return pendingSshLen > 0 && pendingSshOff < pendingSshLen; }
-  bool hasPendingLocal() const { return pendingLocalLen > 0 && pendingLocalOff < pendingLocalLen; }
-  void clearPendingSsh() { pendingSshLen = 0; pendingSshOff = 0; }
-  void clearPendingLocal() { pendingLocalLen = 0; pendingLocalOff = 0; }
 };
 
 // Manages a fixed-size array of ChannelSlots.
