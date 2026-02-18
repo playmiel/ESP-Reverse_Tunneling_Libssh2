@@ -122,7 +122,8 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
       "ch0_toRemote", "ch1_toRemote", "ch2_toRemote", "ch3_toRemote",
       "ch4_toRemote", "ch5_toRemote", "ch6_toRemote", "ch7_toRemote"};
   const char *tagL = (slotIndex < 8) ? kTagsToLocal[slotIndex] : "chN_toLocal";
-  const char *tagR = (slotIndex < 8) ? kTagsToRemote[slotIndex] : "chN_toRemote";
+  const char *tagR =
+      (slotIndex < 8) ? kTagsToRemote[slotIndex] : "chN_toRemote";
 
   DataRingBuffer *toLocal = new DataRingBuffer(ringBufferSize_, tagL);
   DataRingBuffer *toRemote = new DataRingBuffer(ringBufferSize_, tagR);
@@ -153,8 +154,8 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
   libssh2_channel_set_blocking(sshChannel, 0);
 
   activeCount_++;
-  LOGF_I("SSH", "Channel %d bound: %s:%d -> %s:%d (active: %d/%d)",
-         slotIndex, slot.endpoint.remoteHost, slot.endpoint.remotePort,
+  LOGF_I("SSH", "Channel %d bound: %s:%d -> %s:%d (active: %d/%d)", slotIndex,
+         slot.endpoint.remoteHost, slot.endpoint.remotePort,
          slot.endpoint.localHost, slot.endpoint.localPort, activeCount_,
          maxSlots_);
   return true;
@@ -173,7 +174,8 @@ void ChannelManager::beginClose(int slotIndex, ChannelCloseReason reason) {
   slot.state = ChannelSlot::State::Draining;
   slot.closeStartMs = millis();
   slot.closeReason = reason;
-  LOGF_I("SSH", "Channel %d: begin close (reason=%d, toLocal=%zu, toRemote=%zu)",
+  LOGF_I("SSH",
+         "Channel %d: begin close (reason=%d, toLocal=%zu, toRemote=%zu)",
          slotIndex, static_cast<int>(reason),
          slot.toLocal ? slot.toLocal->size() : 0,
          slot.toRemote ? slot.toRemote->size() : 0);
@@ -188,8 +190,7 @@ void ChannelManager::finalizeClose(int slotIndex) {
     return;
   }
 
-  LOGF_I("SSH",
-         "Channel %d: finalize close (sent=%zu, recv=%zu, reason=%d)",
+  LOGF_I("SSH", "Channel %d: finalize close (sent=%zu, recv=%zu, reason=%d)",
          slotIndex, slot.totalBytesSent, slot.totalBytesReceived,
          static_cast<int>(slot.closeReason));
 

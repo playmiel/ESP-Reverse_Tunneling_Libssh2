@@ -303,4 +303,3 @@ void onChannelClosed(int channel, ChannelCloseReason reason) {
 void onTunnelError(int code, const char *detail) {
   LOGF_W("CALLBACK", "Tunnel error %d: %s", code, detail ? detail : "(none)");
 }
-

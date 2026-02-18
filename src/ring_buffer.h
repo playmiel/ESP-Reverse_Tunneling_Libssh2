@@ -160,7 +160,10 @@ public:
     prepend_ = static_cast<uint8_t *>(safeMalloc(PREPEND_CAP, "prepend"));
     if (!handle || !prepend_) {
       LOGF_E("RING", "Failed to create %s (capacity=%d bytes)", tag, capacity);
-      if (handle) { vRingbufferDelete(handle); handle = nullptr; }
+      if (handle) {
+        vRingbufferDelete(handle);
+        handle = nullptr;
+      }
       SAFE_FREE(prepend_);
     } else {
       LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
@@ -206,11 +209,13 @@ public:
 
   // Write data to the FRONT of the buffer (prepend).
   // Used to put back unsent data so it's read first next time.
-  // Returns number of bytes stored (0 if prepend buffer is occupied or too large).
+  // Returns number of bytes stored (0 if prepend buffer is occupied or too
+  // large).
   size_t writeToFront(const uint8_t *data, size_t len) {
     if (!prepend_ || !data || len == 0 || len > PREPEND_CAP)
       return 0;
-    // Must not have existing prepend data (caller drains before next writeToFront)
+    // Must not have existing prepend data (caller drains before next
+    // writeToFront)
     if (prependLen_ > prependOff_)
       return 0;
     memcpy(prepend_, data, len);

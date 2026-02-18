@@ -39,18 +39,20 @@ public:
   // True if session is live and socket is valid.
   bool isConnected() const;
 
-  // Send SSH keepalive. Returns false if the connection should be considered dead.
+  // Send SSH keepalive. Returns false if the connection should be considered
+  // dead.
   bool sendKeepalive();
 
   // Check socket health via SO_ERROR.
   bool checkConnection() const;
 
   // Accept a pending channel from any active listener.
-  // Returns the LIBSSH2_CHANNEL* and fills outMapping with the corresponding config.
-  // Returns nullptr if no channel is pending.
+  // Returns the LIBSSH2_CHANNEL* and fills outMapping with the corresponding
+  // config. Returns nullptr if no channel is pending.
   LIBSSH2_CHANNEL *acceptChannel(TunnelConfig &outMapping);
 
-  // Lock/unlock the session mutex for external libssh2 calls (e.g., channel_read/write).
+  // Lock/unlock the session mutex for external libssh2 calls (e.g.,
+  // channel_read/write).
   bool lock(TickType_t ticks = portMAX_DELAY);
   void unlock();
 
@@ -72,7 +74,8 @@ private:
   bool createListeners(SSHConfiguration *config);
 
   // Listener helpers
-  bool createListenerForMapping(const TunnelConfig &mapping, ListenerEntry &entry);
+  bool createListenerForMapping(const TunnelConfig &mapping,
+                                ListenerEntry &entry);
   void cancelListener(ListenerEntry &entry);
   void cancelAllListeners();
 

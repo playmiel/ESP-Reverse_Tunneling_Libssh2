@@ -132,7 +132,8 @@ void SSHTunnel::loop() {
   unsigned long now = millis();
   int keepAliveInterval =
       config_->getConnectionConfig().keepAliveIntervalSec * 1000;
-  if (keepAliveInterval > 0 && (now - lastKeepAlive_) >= (unsigned long)keepAliveInterval) {
+  if (keepAliveInterval > 0 &&
+      (now - lastKeepAlive_) >= (unsigned long)keepAliveInterval) {
     if (!session_.sendKeepalive()) {
       state_ = TUNNEL_ERROR;
       return;
@@ -249,7 +250,8 @@ bool SSHTunnel::handleNewConnection() {
 }
 
 void SSHTunnel::handleReconnection() {
-  int maxReconnectAttempts = config_->getConnectionConfig().maxReconnectAttempts;
+  int maxReconnectAttempts =
+      config_->getConnectionConfig().maxReconnectAttempts;
   if (reconnectAttempts_ >= maxReconnectAttempts) {
     LOG_E("SSH", "Max reconnection attempts reached");
     state_ = TUNNEL_ERROR;
