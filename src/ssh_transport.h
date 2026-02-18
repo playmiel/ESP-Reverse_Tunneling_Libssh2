@@ -36,6 +36,15 @@ public:
   // Per-pump stats (reset each pumpAll call)
   size_t lastBytesMoved() const { return lastBytesMoved_; }
 
+  // Close events recorded during pumpAll() for the caller to emit callbacks.
+  // Filled by checkCloses(), consumed by the caller after pumpAll() returns.
+  struct CloseEvent {
+    int slot;
+    ChannelCloseReason reason;
+  };
+  static constexpr int MAX_CLOSE_EVENTS = 32;
+  int consumeCloseEvents(CloseEvent *out, int maxEvents);
+
 private:
   // Phase 1: Read from SSH channels into toLocal ring buffers.
   // Also implicitly processes WINDOW_ADJUST packets inside libssh2.
@@ -74,6 +83,10 @@ private:
 
   unsigned int roundRobinOffset_ = 0;
   size_t lastBytesMoved_ = 0;
+
+  // Pending close events (filled by checkCloses, drained by consumeCloseEvents)
+  CloseEvent pendingCloseEvents_[MAX_CLOSE_EVENTS];
+  int pendingCloseCount_ = 0;
 };
 
 #endif // SSH_TRANSPORT_H

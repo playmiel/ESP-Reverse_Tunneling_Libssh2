@@ -148,7 +148,8 @@ private:
   // Prepend buffer: holds data that must be read BEFORE the main ring.
   // Used by writeToFront() when a partial write needs to put data back
   // at the front instead of the end (which would break FIFO ordering).
-  static constexpr size_t PREPEND_CAP = 4096;
+  // Must be >= TransportPump::bufSize_ (default 8192 from ConnectionConfig).
+  static constexpr size_t PREPEND_CAP = 8192;
   uint8_t *prepend_ = nullptr;
   size_t prependLen_ = 0;
   size_t prependOff_ = 0;
