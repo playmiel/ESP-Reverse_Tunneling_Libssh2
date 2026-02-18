@@ -147,6 +147,14 @@ void SSHTunnel::loop() {
   // Pump all data (the core of the new architecture)
   transport_.pumpAll();
 
+  // Emit close events recorded during pumpAll (outside session lock)
+  TransportPump::CloseEvent closeEvents[TransportPump::MAX_CLOSE_EVENTS];
+  int closeCount = transport_.consumeCloseEvents(
+      closeEvents, TransportPump::MAX_CLOSE_EVENTS);
+  for (int i = 0; i < closeCount; ++i) {
+    emitChannelClosed(closeEvents[i].slot, closeEvents[i].reason);
+  }
+
   // Update aggregate stats
   if (statsMutex_ && xSemaphoreTake(statsMutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
     bytesReceived_ = channels_.getTotalBytesReceived();

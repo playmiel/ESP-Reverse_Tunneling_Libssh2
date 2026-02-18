@@ -69,6 +69,15 @@ bool TransportPump::hasAnyBackpressure() const {
   return false;
 }
 
+int TransportPump::consumeCloseEvents(CloseEvent *out, int maxEvents) {
+  int count = pendingCloseCount_ < maxEvents ? pendingCloseCount_ : maxEvents;
+  for (int i = 0; i < count; ++i) {
+    out[i] = pendingCloseEvents_[i];
+  }
+  pendingCloseCount_ = 0;
+  return count;
+}
+
 // ---------------------------------------------------------------------------
 // Phase 1: Pump SSH transport
 // Read from each SSH channel into toLocal ring. This implicitly triggers
@@ -512,10 +521,20 @@ void TransportPump::checkCloses() {
   }
 
   // --- Step 2b: Finalize channels that have completed grace period ---
-  if (closeCount > 0 && session_->lock(pdMS_TO_TICKS(200))) {
+  if (closeCount > 0) {
+    // Record close events BEFORE finalizeClose resets the slot
     for (int c = 0; c < closeCount; ++c) {
-      channels_->finalizeClose(toClose[c]);
+      if (pendingCloseCount_ < MAX_CLOSE_EVENTS) {
+        const ChannelSlot &ch = channels_->getSlot(toClose[c]);
+        pendingCloseEvents_[pendingCloseCount_++] = {
+            toClose[c], ch.closeReason};
+      }
     }
-    session_->unlock();
+    if (session_->lock(pdMS_TO_TICKS(200))) {
+      for (int c = 0; c < closeCount; ++c) {
+        channels_->finalizeClose(toClose[c]);
+      }
+      session_->unlock();
+    }
   }
 }
