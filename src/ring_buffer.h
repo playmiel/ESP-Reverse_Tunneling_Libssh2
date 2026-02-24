@@ -2,6 +2,7 @@
 #include "logger.h"
 #include "memory_fixes.h"
 #include <cstring>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
 #include <stddef.h>
@@ -10,11 +11,20 @@
 // Specialized ring buffer for raw byte data (wraps FreeRTOS ringbuffer).
 // Supports writeToFront() to put data back at the HEAD of the buffer,
 // preserving FIFO order when a write/send is partial or returns EAGAIN.
+//
+// All large allocations (ring storage, struct, prepend) are placed in PSRAM
+// via heap_caps_malloc() to avoid exhausting the ~320KB internal heap.
+// Falls back to regular malloc on boards without PSRAM.
 class DataRingBuffer {
 private:
-  RingbufHandle_t handle;
+  RingbufHandle_t handle = nullptr;
   size_t capacity;
   const char *tag;
+
+  // PSRAM-allocated backing memory for xRingbufferCreateStatic.
+  // vRingbufferDelete does NOT free these — we must free them manually.
+  uint8_t *ringStorage_ = nullptr;
+  StaticRingbuffer_t *ringStruct_ = nullptr;
 
   // Prepend buffer: holds data that must be read BEFORE the main ring.
   // Used by writeToFront() when a partial write needs to put data back
@@ -25,20 +35,49 @@ private:
   size_t prependLen_ = 0;
   size_t prependOff_ = 0;
 
+  // Allocate in PSRAM if available, else fall back to regular malloc.
+  static void *psramAlloc(size_t size) {
+    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+      ptr = malloc(size); // fallback for non-PSRAM boards
+    }
+    return ptr;
+  }
+
+  static void psramFree(void *ptr) {
+    if (ptr) {
+      heap_caps_free(ptr);
+    }
+  }
+
 public:
   DataRingBuffer(size_t size, const char *tagName = "DATA_RING_BUFFER")
-      : handle(nullptr), capacity(size), tag(tagName) {
-    handle = xRingbufferCreate(capacity, RINGBUF_TYPE_BYTEBUF);
-    prepend_ = static_cast<uint8_t *>(safeMalloc(PREPEND_CAP, "prepend"));
+      : capacity(size), tag(tagName) {
+    // Allocate ring storage and control struct in PSRAM
+    ringStorage_ = static_cast<uint8_t *>(psramAlloc(capacity));
+    ringStruct_ =
+        static_cast<StaticRingbuffer_t *>(psramAlloc(sizeof(StaticRingbuffer_t)));
+    if (ringStorage_ && ringStruct_) {
+      handle = xRingbufferCreateStatic(capacity, RINGBUF_TYPE_BYTEBUF,
+                                       ringStorage_, ringStruct_);
+    }
+
+    prepend_ = static_cast<uint8_t *>(psramAlloc(PREPEND_CAP));
+
     if (!handle || !prepend_) {
-      LOGF_E("RING", "Failed to create %s (capacity=%d bytes)", tag, capacity);
+      LOGF_E("RING", "Failed to create %s (capacity=%zu bytes)", tag, capacity);
       if (handle) {
         vRingbufferDelete(handle);
         handle = nullptr;
       }
-      SAFE_FREE(prepend_);
+      psramFree(ringStorage_);
+      ringStorage_ = nullptr;
+      psramFree(ringStruct_);
+      ringStruct_ = nullptr;
+      psramFree(prepend_);
+      prepend_ = nullptr;
     } else {
-      LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
+      LOGF_I("RING", "Created %s: capacity=%zu bytes (PSRAM)", tag, capacity);
     }
   }
 
@@ -47,7 +86,13 @@ public:
       vRingbufferDelete(handle);
       handle = nullptr;
     }
-    SAFE_FREE(prepend_);
+    // xRingbufferCreateStatic does not free storage — we must do it
+    psramFree(ringStorage_);
+    ringStorage_ = nullptr;
+    psramFree(ringStruct_);
+    ringStruct_ = nullptr;
+    psramFree(prepend_);
+    prepend_ = nullptr;
     LOGF_D("RING", "Destroyed %s", tag);
   }
 

@@ -2,6 +2,7 @@
 #include "memory_fixes.h"
 #include "network_optimizations.h"
 #include <arpa/inet.h>
+#include <esp_heap_caps.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -138,6 +139,18 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
     snprintf(extraTagsR[idx], sizeof(extraTagsR[idx]), "ch%d_toRemote", slotIndex);
     tagL = extraTagsL[idx];
     tagR = extraTagsR[idx];
+  }
+
+  // Heap guard: verify enough PSRAM is available before allocating ring buffers.
+  // Each channel needs ~2 × ringBufferSize_ + overhead for ring structs + prepend.
+  size_t requiredPsram = ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
+  size_t freePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+  if (freePsram < requiredPsram) {
+    LOGF_E("SSH",
+           "Not enough PSRAM for channel %d: need %zu, largest free block %zu",
+           slotIndex, requiredPsram, freePsram);
+    close(localSocket);
+    return false;
   }
 
   DataRingBuffer *toLocal = new DataRingBuffer(ringBufferSize_, tagL);
