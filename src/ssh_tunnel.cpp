@@ -1,4 +1,5 @@
 #include "ssh_tunnel.h"
+#include <unistd.h>
 
 // ---------------------------------------------------------------------------
 // SSHTunnel - Facade
@@ -116,15 +117,13 @@ void SSHTunnel::loop() {
   }
 
   if (!session_.isConnected()) {
-    state_ = TUNNEL_ERROR;
-    emitSessionDisconnected();
+    enterErrorState("session lost");
     return;
   }
 
   // Check socket health
   if (!session_.checkConnection()) {
-    LOG_W("SSH", "Socket health check failed");
-    state_ = TUNNEL_ERROR;
+    enterErrorState("socket health check failed");
     return;
   }
 
@@ -135,7 +134,7 @@ void SSHTunnel::loop() {
   if (keepAliveInterval > 0 &&
       (now - lastKeepAlive_) >= (unsigned long)keepAliveInterval) {
     if (!session_.sendKeepalive()) {
-      state_ = TUNNEL_ERROR;
+      enterErrorState("keepalive failed");
       return;
     }
     lastKeepAlive_ = now;
@@ -257,22 +256,72 @@ bool SSHTunnel::handleNewConnection() {
   return true;
 }
 
+void SSHTunnel::enterErrorState(const char *reason) {
+  LOGF_W("SSH", "Entering error state: %s", reason);
+
+  // Close all orphan channels and their local sockets to prevent leaks
+  if (session_.lock(pdMS_TO_TICKS(500))) {
+    for (int i = 0; i < channels_.getMaxSlots(); ++i) {
+      if (channels_.getSlot(i).active) {
+        ChannelCloseReason cr = channels_.getSlot(i).closeReason;
+        if (cr == ChannelCloseReason::Unknown) {
+          cr = ChannelCloseReason::Error;
+        }
+        channels_.finalizeClose(i);
+        emitChannelClosed(i, cr);
+      }
+    }
+    session_.unlock();
+  } else {
+    // Lock failed — at minimum close local sockets to avoid fd leak
+    for (int i = 0; i < channels_.getMaxSlots(); ++i) {
+      ChannelSlot &ch = channels_.getSlot(i);
+      if (ch.active && ch.localSocket >= 0) {
+        close(ch.localSocket);
+        ch.localSocket = -1;
+      }
+    }
+  }
+
+  state_ = TUNNEL_ERROR;
+  lastConnectionAttempt_ = millis();
+  emitSessionDisconnected();
+}
+
 void SSHTunnel::handleReconnection() {
   int maxReconnectAttempts =
       config_->getConnectionConfig().maxReconnectAttempts;
+
   if (reconnectAttempts_ >= maxReconnectAttempts) {
-    LOG_E("SSH", "Max reconnection attempts reached");
-    state_ = TUNNEL_ERROR;
-    return;
+    // All attempts exhausted — wait a long cooldown then reset the counter
+    // so reconnection resumes automatically (essential for 24/7 devices).
+    unsigned long now = millis();
+    unsigned long cooldown = 60000UL; // 60s cooldown after exhausting attempts
+    if (now - lastConnectionAttempt_ < cooldown) {
+      return;
+    }
+    LOGF_I("SSH", "Reconnect cooldown elapsed, resetting attempts (was %d/%d)",
+           reconnectAttempts_, maxReconnectAttempts);
+    reconnectAttempts_ = 0;
   }
 
+  // Exponential backoff: baseDelay * 2^attempt, capped at 60s
   unsigned long now = millis();
-  int reconnectDelay = config_->getConnectionConfig().reconnectDelayMs;
-  if (now - lastConnectionAttempt_ < (unsigned long)reconnectDelay) {
+  int baseDelay = config_->getConnectionConfig().reconnectDelayMs;
+  unsigned long delay = baseDelay;
+  for (int i = 0; i < reconnectAttempts_ && delay < 60000UL; ++i) {
+    delay *= 2;
+  }
+  if (delay > 60000UL) {
+    delay = 60000UL;
+  }
+
+  if (now - lastConnectionAttempt_ < delay) {
     return;
   }
 
-  LOG_I("SSH", "Attempting reconnection...");
+  LOGF_I("SSH", "Attempting reconnection %d/%d (delay was %lums)...",
+         reconnectAttempts_ + 1, maxReconnectAttempts, delay);
   disconnect();
   reconnectAttempts_++;
 
@@ -280,7 +329,8 @@ void SSHTunnel::handleReconnection() {
     LOG_I("SSH", "Reconnection successful");
     reconnectAttempts_ = 0;
   } else {
-    LOG_E("SSH", "Reconnection failed");
+    LOGF_E("SSH", "Reconnection failed (%d/%d)", reconnectAttempts_,
+           maxReconnectAttempts);
   }
 }
 
