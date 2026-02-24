@@ -73,7 +73,10 @@ private:
   // Accept pending SSH channel and bind to a local socket
   bool handleNewConnection();
 
-  // Reconnection logic
+  // Error handling: clean orphan channels + sockets, then set TUNNEL_ERROR
+  void enterErrorState(const char *reason);
+
+  // Reconnection logic (with exponential backoff + auto-reset)
   void handleReconnection();
 
   // Event emission helpers
