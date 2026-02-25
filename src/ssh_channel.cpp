@@ -144,18 +144,32 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
     tagR = extraTagsR[idx];
   }
 
-  // Heap guard: verify enough PSRAM is available before allocating ring
-  // buffers. Each channel needs ~2 × ringBufferSize_ + overhead for ring
-  // structs + prepend.
-  size_t requiredPsram =
-      ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
-  size_t freePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
-  if (freePsram < requiredPsram) {
-    LOGF_E("SSH",
-           "Not enough PSRAM for channel %d: need %zu, largest free block %zu",
-           slotIndex, requiredPsram, freePsram);
-    close(localSocket);
-    return false;
+  // Heap guard: verify enough memory before allocating ring buffers.
+  // Check PSRAM if available, otherwise check internal heap.
+  {
+    size_t required =
+        ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
+    size_t freePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (freePsram > 0) {
+      // Board has PSRAM — check PSRAM availability
+      if (freePsram < required) {
+        LOGF_E("SSH",
+               "Not enough PSRAM for channel %d: need %zu, largest free %zu",
+               slotIndex, required, freePsram);
+        close(localSocket);
+        return false;
+      }
+    } else {
+      // No PSRAM — check internal heap (fallback path)
+      size_t freeInternal = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (freeInternal < required) {
+        LOGF_E("SSH",
+               "Not enough heap for channel %d: need %zu, largest free %zu",
+               slotIndex, required, freeInternal);
+        close(localSocket);
+        return false;
+      }
+    }
   }
 
   DataRingBuffer *toLocal = new DataRingBuffer(ringBufferSize_, tagL);
