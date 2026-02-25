@@ -55,8 +55,8 @@ public:
       : capacity(size), tag(tagName) {
     // Allocate ring storage and control struct in PSRAM
     ringStorage_ = static_cast<uint8_t *>(psramAlloc(capacity));
-    ringStruct_ =
-        static_cast<StaticRingbuffer_t *>(psramAlloc(sizeof(StaticRingbuffer_t)));
+    ringStruct_ = static_cast<StaticRingbuffer_t *>(
+        psramAlloc(sizeof(StaticRingbuffer_t)));
     if (ringStorage_ && ringStruct_) {
       handle = xRingbufferCreateStatic(capacity, RINGBUF_TYPE_BYTEBUF,
                                        ringStorage_, ringStruct_);

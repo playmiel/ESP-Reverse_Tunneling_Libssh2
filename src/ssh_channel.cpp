@@ -134,16 +134,21 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
     tagR = kTagsToRemote[slotIndex];
   } else {
     int idx = slotIndex - 8;
-    if (idx >= 24) idx = 23; // cap at ch31
-    snprintf(extraTagsL[idx], sizeof(extraTagsL[idx]), "ch%d_toLocal", slotIndex);
-    snprintf(extraTagsR[idx], sizeof(extraTagsR[idx]), "ch%d_toRemote", slotIndex);
+    if (idx >= 24)
+      idx = 23; // cap at ch31
+    snprintf(extraTagsL[idx], sizeof(extraTagsL[idx]), "ch%d_toLocal",
+             slotIndex);
+    snprintf(extraTagsR[idx], sizeof(extraTagsR[idx]), "ch%d_toRemote",
+             slotIndex);
     tagL = extraTagsL[idx];
     tagR = extraTagsR[idx];
   }
 
-  // Heap guard: verify enough PSRAM is available before allocating ring buffers.
-  // Each channel needs ~2 × ringBufferSize_ + overhead for ring structs + prepend.
-  size_t requiredPsram = ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
+  // Heap guard: verify enough PSRAM is available before allocating ring
+  // buffers. Each channel needs ~2 × ringBufferSize_ + overhead for ring
+  // structs + prepend.
+  size_t requiredPsram =
+      ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
   size_t freePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
   if (freePsram < requiredPsram) {
     LOGF_E("SSH",
