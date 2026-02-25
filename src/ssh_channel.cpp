@@ -147,7 +147,8 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
   // Heap guard: verify enough memory before allocating ring buffers.
   // Check PSRAM if available, otherwise check internal heap.
   {
-    size_t required = ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
+    size_t required =
+        ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
     size_t freePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
     if (freePsram > 0) {
       // Board has PSRAM — check PSRAM availability
@@ -160,8 +161,7 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
       }
     } else {
       // No PSRAM — check internal heap (fallback path)
-      size_t freeInternal =
-          heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      size_t freeInternal = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
       if (freeInternal < required) {
         LOGF_E("SSH",
                "Not enough heap for channel %d: need %zu, largest free %zu",
