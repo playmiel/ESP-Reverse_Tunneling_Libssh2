@@ -2,148 +2,29 @@
 #include "logger.h"
 #include "memory_fixes.h"
 #include <cstring>
+#include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/ringbuf.h>
-#include <freertos/semphr.h>
 #include <stddef.h>
 #include <stdint.h>
-
-// Generic thread-safe ring buffer
-template <typename T> class RingBuffer {
-private:
-  T *buffer;
-  size_t capacity;
-  volatile size_t writePos;
-  volatile size_t readPos;
-  volatile size_t count;
-  SemaphoreHandle_t mutex;
-  const char *tag;
-
-public:
-  RingBuffer(size_t size, const char *tagName = "RING_BUFFER")
-      : buffer(nullptr), capacity(size), writePos(0), readPos(0), count(0),
-        mutex(nullptr), tag(tagName) {
-    if (capacity == 0) {
-      LOGF_E("RING", "Failed to create %s (capacity=0)",
-             tag ? tag : "RING_BUFFER");
-      return;
-    }
-
-    buffer = (T *)safeMalloc(sizeof(T) * capacity, tag);
-    // Use a real mutex to benefit from priority inheritance and avoid
-    // FreeRTOS assertion in vTaskPriorityDisinheritAfterTimeout
-    mutex = xSemaphoreCreateMutex();
-    if (buffer == nullptr || mutex == nullptr) {
-      LOGF_E("RING", "Failed to create %s (capacity=%u, buffer=%p, mutex=%p)",
-             tag ? tag : "RING_BUFFER", (unsigned)capacity, buffer, mutex);
-      SAFE_FREE(buffer);
-      SAFE_DELETE_SEMAPHORE(mutex);
-      capacity = 0;
-      writePos = 0;
-      readPos = 0;
-      count = 0;
-      return;
-    }
-
-    LOGF_I("RING", "Created %s: capacity=%u, size=%u bytes",
-           tag ? tag : "RING_BUFFER", (unsigned)capacity,
-           (unsigned)(sizeof(T) * capacity));
-  }
-
-  ~RingBuffer() {
-    // Clear pending data objects if applicable
-    clear();
-    SAFE_FREE(buffer);
-    SAFE_DELETE_SEMAPHORE(mutex);
-    LOGF_D("RING", "Destroyed %s", tag);
-  }
-
-  bool push(const T &item) {
-    if (capacity == 0 || buffer == nullptr) {
-      return false;
-    }
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-      return false;
-    }
-
-    if (count >= capacity) {
-      xSemaphoreGive(mutex);
-      return false; // Buffer full
-    }
-    buffer[writePos] = item;
-    writePos = (writePos + 1) % capacity;
-    count = count + 1;
-
-    xSemaphoreGive(mutex);
-    return true;
-  }
-
-  bool pop(T &item) {
-    if (capacity == 0 || buffer == nullptr) {
-      return false;
-    }
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-      return false;
-    }
-
-    if (count == 0) {
-      xSemaphoreGive(mutex);
-      return false; // Buffer empty
-    }
-    item = buffer[readPos];
-    readPos = (readPos + 1) % capacity;
-    count = count - 1;
-
-    xSemaphoreGive(mutex);
-    return true;
-  }
-
-  bool peek(T &item) {
-    if (capacity == 0 || buffer == nullptr) {
-      return false;
-    }
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-      return false;
-    }
-
-    if (count == 0) {
-      xSemaphoreGive(mutex);
-      return false;
-    }
-
-    item = buffer[readPos];
-    xSemaphoreGive(mutex);
-    return true;
-  }
-
-  void clear() {
-    if (!mutex || xSemaphoreTake(mutex, pdMS_TO_TICKS(50)) != pdTRUE) {
-      return;
-    }
-
-    // Reset indexes and counter
-    writePos = 0;
-    readPos = 0;
-    count = 0;
-
-    xSemaphoreGive(mutex);
-  }
-
-  size_t size() const { return count; }
-  size_t availableSpace() const { return capacity - count; }
-  bool empty() const { return count == 0; }
-  bool full() const { return count >= capacity; }
-  float usage() const { return (float)count / capacity * 100.0f; }
-};
 
 // Specialized ring buffer for raw byte data (wraps FreeRTOS ringbuffer).
 // Supports writeToFront() to put data back at the HEAD of the buffer,
 // preserving FIFO order when a write/send is partial or returns EAGAIN.
+//
+// All large allocations (ring storage, struct, prepend) are placed in PSRAM
+// via heap_caps_malloc() to avoid exhausting the ~320KB internal heap.
+// Falls back to regular malloc on boards without PSRAM.
 class DataRingBuffer {
 private:
-  RingbufHandle_t handle;
+  RingbufHandle_t handle = nullptr;
   size_t capacity;
   const char *tag;
+
+  // PSRAM-allocated backing memory for xRingbufferCreateStatic.
+  // vRingbufferDelete does NOT free these — we must free them manually.
+  uint8_t *ringStorage_ = nullptr;
+  StaticRingbuffer_t *ringStruct_ = nullptr;
 
   // Prepend buffer: holds data that must be read BEFORE the main ring.
   // Used by writeToFront() when a partial write needs to put data back
@@ -154,20 +35,49 @@ private:
   size_t prependLen_ = 0;
   size_t prependOff_ = 0;
 
+  // Allocate in PSRAM if available, else fall back to regular malloc.
+  static void *psramAlloc(size_t size) {
+    void *ptr = heap_caps_malloc(size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (!ptr) {
+      ptr = malloc(size); // fallback for non-PSRAM boards
+    }
+    return ptr;
+  }
+
+  static void psramFree(void *ptr) {
+    if (ptr) {
+      heap_caps_free(ptr);
+    }
+  }
+
 public:
   DataRingBuffer(size_t size, const char *tagName = "DATA_RING_BUFFER")
-      : handle(nullptr), capacity(size), tag(tagName) {
-    handle = xRingbufferCreate(capacity, RINGBUF_TYPE_BYTEBUF);
-    prepend_ = static_cast<uint8_t *>(safeMalloc(PREPEND_CAP, "prepend"));
+      : capacity(size), tag(tagName) {
+    // Allocate ring storage and control struct in PSRAM
+    ringStorage_ = static_cast<uint8_t *>(psramAlloc(capacity));
+    ringStruct_ = static_cast<StaticRingbuffer_t *>(
+        psramAlloc(sizeof(StaticRingbuffer_t)));
+    if (ringStorage_ && ringStruct_) {
+      handle = xRingbufferCreateStatic(capacity, RINGBUF_TYPE_BYTEBUF,
+                                       ringStorage_, ringStruct_);
+    }
+
+    prepend_ = static_cast<uint8_t *>(psramAlloc(PREPEND_CAP));
+
     if (!handle || !prepend_) {
-      LOGF_E("RING", "Failed to create %s (capacity=%d bytes)", tag, capacity);
+      LOGF_E("RING", "Failed to create %s (capacity=%zu bytes)", tag, capacity);
       if (handle) {
         vRingbufferDelete(handle);
         handle = nullptr;
       }
-      SAFE_FREE(prepend_);
+      psramFree(ringStorage_);
+      ringStorage_ = nullptr;
+      psramFree(ringStruct_);
+      ringStruct_ = nullptr;
+      psramFree(prepend_);
+      prepend_ = nullptr;
     } else {
-      LOGF_I("RING", "Created %s: capacity=%d bytes", tag, capacity);
+      LOGF_I("RING", "Created %s: capacity=%zu bytes (PSRAM)", tag, capacity);
     }
   }
 
@@ -176,7 +86,13 @@ public:
       vRingbufferDelete(handle);
       handle = nullptr;
     }
-    SAFE_FREE(prepend_);
+    // xRingbufferCreateStatic does not free storage — we must do it
+    psramFree(ringStorage_);
+    ringStorage_ = nullptr;
+    psramFree(ringStruct_);
+    ringStruct_ = nullptr;
+    psramFree(prepend_);
+    prepend_ = nullptr;
     LOGF_D("RING", "Destroyed %s", tag);
   }
 

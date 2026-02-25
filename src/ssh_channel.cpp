@@ -2,6 +2,7 @@
 #include "memory_fixes.h"
 #include "network_optimizations.h"
 #include <arpa/inet.h>
+#include <esp_heap_caps.h>
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <sys/socket.h>
@@ -115,15 +116,61 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
 
   // Use static tag strings so the DataRingBuffer destructor can safely log.
   // DataRingBuffer stores a const char* — stack strings become dangling.
+  // Pre-built tags for channels 0-7; dynamically allocated for 8+.
   static const char *const kTagsToLocal[] = {
       "ch0_toLocal", "ch1_toLocal", "ch2_toLocal", "ch3_toLocal",
       "ch4_toLocal", "ch5_toLocal", "ch6_toLocal", "ch7_toLocal"};
   static const char *const kTagsToRemote[] = {
       "ch0_toRemote", "ch1_toRemote", "ch2_toRemote", "ch3_toRemote",
       "ch4_toRemote", "ch5_toRemote", "ch6_toRemote", "ch7_toRemote"};
-  const char *tagL = (slotIndex < 8) ? kTagsToLocal[slotIndex] : "chN_toLocal";
-  const char *tagR =
-      (slotIndex < 8) ? kTagsToRemote[slotIndex] : "chN_toRemote";
+  // For channels >= 8, allocate persistent tag strings (leaked intentionally
+  // — they live for the process lifetime and are reused across bind cycles).
+  static char extraTagsL[24][16]; // supports up to channel 31
+  static char extraTagsR[24][16];
+  const char *tagL;
+  const char *tagR;
+  if (slotIndex < 8) {
+    tagL = kTagsToLocal[slotIndex];
+    tagR = kTagsToRemote[slotIndex];
+  } else {
+    int idx = slotIndex - 8;
+    if (idx >= 24)
+      idx = 23; // cap at ch31
+    snprintf(extraTagsL[idx], sizeof(extraTagsL[idx]), "ch%d_toLocal",
+             slotIndex);
+    snprintf(extraTagsR[idx], sizeof(extraTagsR[idx]), "ch%d_toRemote",
+             slotIndex);
+    tagL = extraTagsL[idx];
+    tagR = extraTagsR[idx];
+  }
+
+  // Heap guard: verify enough memory before allocating ring buffers.
+  // Check PSRAM if available, otherwise check internal heap.
+  {
+    size_t required =
+        ringBufferSize_ * 2 + 32768; // 2 rings + structs + prepend
+    size_t freePsram = heap_caps_get_largest_free_block(MALLOC_CAP_SPIRAM);
+    if (freePsram > 0) {
+      // Board has PSRAM — check PSRAM availability
+      if (freePsram < required) {
+        LOGF_E("SSH",
+               "Not enough PSRAM for channel %d: need %zu, largest free %zu",
+               slotIndex, required, freePsram);
+        close(localSocket);
+        return false;
+      }
+    } else {
+      // No PSRAM — check internal heap (fallback path)
+      size_t freeInternal = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+      if (freeInternal < required) {
+        LOGF_E("SSH",
+               "Not enough heap for channel %d: need %zu, largest free %zu",
+               slotIndex, required, freeInternal);
+        close(localSocket);
+        return false;
+      }
+    }
+  }
 
   DataRingBuffer *toLocal = new DataRingBuffer(ringBufferSize_, tagL);
   DataRingBuffer *toRemote = new DataRingBuffer(ringBufferSize_, tagR);
