@@ -25,6 +25,13 @@ struct SSHTunnelEvents {
   void (*onError)(int, const char *) = nullptr;
 };
 
+// A forwarded channel waiting for a free slot.
+struct PendingChannel {
+  LIBSSH2_CHANNEL *channel = nullptr;
+  TunnelConfig mapping;
+  unsigned long queuedAtMs = 0;
+};
+
 // SSHTunnel: public facade with the same API as before.
 // Internally delegates to SSHSession, ChannelManager, and TransportPump.
 class SSHTunnel {
@@ -73,6 +80,15 @@ private:
   // Accept pending SSH channel and bind to a local socket
   bool handleNewConnection();
 
+  // Drain queued connections into newly freed slots
+  void drainPendingQueue();
+
+  // Close and free channels that exceeded PENDING_TIMEOUT_MS
+  void cleanExpiredPending();
+
+  // Close and free all pending channels (used on disconnect/error)
+  void clearPendingQueue();
+
   // Error handling: clean orphan channels + sockets, then set TUNNEL_ERROR
   void enterErrorState(const char *reason);
 
@@ -104,6 +120,12 @@ private:
 
   // Configuration
   SSHConfiguration *config_ = nullptr;
+
+  // Pending connection queue
+  static constexpr int MAX_PENDING = 8;
+  static constexpr unsigned long PENDING_TIMEOUT_MS = 30000;
+  PendingChannel pendingQueue_[MAX_PENDING];
+  int pendingCount_ = 0;
 
   // Events
   SSHTunnelEvents eventHandlers_ = {};

@@ -82,6 +82,9 @@ bool SSHTunnel::connectSSH() {
 }
 
 void SSHTunnel::disconnect() {
+  // Close all pending queued channels first
+  clearPendingQueue();
+
   // Close all active channels
   if (session_.isConnected()) {
     if (session_.lock(pdMS_TO_TICKS(2000))) {
@@ -154,6 +157,12 @@ void SSHTunnel::loop() {
     emitChannelClosed(closeEvents[i].slot, closeEvents[i].reason);
   }
 
+  // Drain pending queue into freshly freed slots
+  if (pendingCount_ > 0) {
+    drainPendingQueue();
+    cleanExpiredPending();
+  }
+
   // Update aggregate stats
   if (statsMutex_ && xSemaphoreTake(statsMutex_, pdMS_TO_TICKS(5)) == pdTRUE) {
     bytesReceived_ = channels_.getTotalBytesReceived();
@@ -221,43 +230,115 @@ bool SSHTunnel::hasAnyBackpressure() const {
 // ---------------------------------------------------------------------------
 
 bool SSHTunnel::handleNewConnection() {
-  if (!channels_.shouldAcceptNew()) {
-    return false;
-  }
-
+  // Always try to accept from libssh2, even if slots are full.
+  // This prevents the SSH server from timing out the forwarded channel.
   TunnelConfig mapping;
   LIBSSH2_CHANNEL *ch = session_.acceptChannel(mapping);
   if (!ch) {
     return false;
   }
 
+  // Try to bind directly if a slot is available
   int slot = channels_.allocateSlot();
-  if (slot < 0) {
-    LOG_W("SSH", "No channel slots available, rejecting connection");
-    if (session_.lock(pdMS_TO_TICKS(200))) {
-      libssh2_channel_close(ch);
-      libssh2_channel_free(ch);
-      session_.unlock();
-    }
+  if (slot >= 0 && channels_.bindChannel(slot, ch, mapping)) {
+    emitChannelOpened(slot);
+    return true;
+  }
+
+  // No slot available (or bind failed) — queue the channel
+  if (pendingCount_ < MAX_PENDING) {
+    PendingChannel &pending = pendingQueue_[pendingCount_];
+    pending.channel = ch;
+    pending.mapping = mapping;
+    pending.queuedAtMs = millis();
+    pendingCount_++;
+    LOGF_I("SSH", "Channel queued for later binding (pending: %d/%d)",
+           pendingCount_, MAX_PENDING);
     return false;
   }
 
-  if (!channels_.bindChannel(slot, ch, mapping)) {
-    LOGF_E("SSH", "Failed to bind channel to slot %d", slot);
-    if (session_.lock(pdMS_TO_TICKS(200))) {
-      libssh2_channel_close(ch);
-      libssh2_channel_free(ch);
-      session_.unlock();
-    }
-    return false;
+  // Queue is also full — reject the connection
+  LOG_W("SSH", "Pending queue full, rejecting connection");
+  if (session_.lock(pdMS_TO_TICKS(200))) {
+    libssh2_channel_close(ch);
+    libssh2_channel_free(ch);
+    session_.unlock();
   }
+  return false;
+}
 
-  emitChannelOpened(slot);
-  return true;
+void SSHTunnel::drainPendingQueue() {
+  int writeIdx = 0;
+  for (int i = 0; i < pendingCount_; ++i) {
+    PendingChannel &pending = pendingQueue_[i];
+
+    int slot = channels_.allocateSlot();
+    if (slot >= 0 && channels_.bindChannel(slot, pending.channel, pending.mapping)) {
+      LOGF_I("SSH", "Queued channel bound to slot %d (waited %lums)", slot,
+             millis() - pending.queuedAtMs);
+      emitChannelOpened(slot);
+      pending.channel = nullptr; // consumed
+    } else {
+      // Keep in queue — compact in place
+      if (writeIdx != i) {
+        pendingQueue_[writeIdx] = pending;
+      }
+      writeIdx++;
+    }
+  }
+  pendingCount_ = writeIdx;
+}
+
+void SSHTunnel::cleanExpiredPending() {
+  unsigned long now = millis();
+  int writeIdx = 0;
+  for (int i = 0; i < pendingCount_; ++i) {
+    PendingChannel &pending = pendingQueue_[i];
+    if ((now - pending.queuedAtMs) > PENDING_TIMEOUT_MS) {
+      LOGF_W("SSH", "Pending channel expired after %lums, dropping",
+             now - pending.queuedAtMs);
+      if (session_.lock(pdMS_TO_TICKS(200))) {
+        libssh2_channel_close(pending.channel);
+        libssh2_channel_free(pending.channel);
+        session_.unlock();
+      }
+      pending.channel = nullptr;
+    } else {
+      if (writeIdx != i) {
+        pendingQueue_[writeIdx] = pending;
+      }
+      writeIdx++;
+    }
+  }
+  pendingCount_ = writeIdx;
+}
+
+void SSHTunnel::clearPendingQueue() {
+  if (pendingCount_ == 0) {
+    return;
+  }
+  LOGF_I("SSH", "Clearing %d pending queued channels", pendingCount_);
+  bool locked = session_.lock(pdMS_TO_TICKS(500));
+  for (int i = 0; i < pendingCount_; ++i) {
+    if (pendingQueue_[i].channel) {
+      if (locked) {
+        libssh2_channel_close(pendingQueue_[i].channel);
+        libssh2_channel_free(pendingQueue_[i].channel);
+      }
+      pendingQueue_[i].channel = nullptr;
+    }
+  }
+  if (locked) {
+    session_.unlock();
+  }
+  pendingCount_ = 0;
 }
 
 void SSHTunnel::enterErrorState(const char *reason) {
   LOGF_W("SSH", "Entering error state: %s", reason);
+
+  // Close all pending queued channels
+  clearPendingQueue();
 
   // Close all orphan channels and their local sockets to prevent leaks
   if (session_.lock(pdMS_TO_TICKS(500))) {
