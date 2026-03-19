@@ -112,6 +112,7 @@ private:
   unsigned long lastKeepAlive_ = 0;
   unsigned long lastConnectionAttempt_ = 0;
   int reconnectAttempts_ = 0;
+  int socketHealthFailures_ = 0;
 
   // Statistics
   SemaphoreHandle_t statsMutex_ = nullptr;
