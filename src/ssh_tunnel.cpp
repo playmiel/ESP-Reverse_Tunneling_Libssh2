@@ -1,6 +1,27 @@
 #include "ssh_tunnel.h"
 #include <unistd.h>
 
+namespace {
+
+void closeAcceptedChannel(SSHSession &session, LIBSSH2_CHANNEL *channel,
+                          TickType_t lockTicks, const char *logDetail) {
+  if (!channel) {
+    return;
+  }
+
+  if (logDetail) {
+    LOG_W("SSH", logDetail);
+  }
+
+  if (session.lock(lockTicks)) {
+    libssh2_channel_close(channel);
+    libssh2_channel_free(channel);
+    session.unlock();
+  }
+}
+
+} // namespace
+
 // ---------------------------------------------------------------------------
 // SSHTunnel - Facade
 // ---------------------------------------------------------------------------
@@ -74,6 +95,7 @@ bool SSHTunnel::connectSSH() {
 
   state_ = TUNNEL_CONNECTED;
   reconnectAttempts_ = 0;
+  socketHealthFailures_ = 0;
   lastKeepAlive_ = millis();
   emitSessionConnected();
 
@@ -86,23 +108,37 @@ void SSHTunnel::disconnect() {
   clearPendingQueue();
 
   // Close all active channels
+  bool locked = false;
   if (session_.isConnected()) {
-    if (session_.lock(pdMS_TO_TICKS(2000))) {
-      for (int i = 0; i < channels_.getMaxSlots(); ++i) {
-        if (channels_.getSlot(i).active) {
-          channels_.finalizeClose(i);
-          emitChannelClosed(i, ChannelCloseReason::Manual);
-        }
-      }
-      session_.unlock();
+    locked = session_.lock(pdMS_TO_TICKS(2000));
+  }
+  for (int i = 0; i < channels_.getMaxSlots(); ++i) {
+    if (!channels_.getSlot(i).active) {
+      continue;
     }
+    if (locked) {
+      channels_.finalizeClose(i);
+    } else {
+      channels_.abandonSlot(i, ChannelCloseReason::Manual);
+    }
+    emitChannelClosed(i, ChannelCloseReason::Manual);
+  }
+  if (locked) {
+    session_.unlock();
   }
 
   session_.disconnect();
 
+  // If session teardown invalidated libssh2 state before the slots were
+  // finalized, make sure no stale active slots remain blocked forever.
+  for (int i = 0; i < channels_.getMaxSlots(); ++i) {
+    channels_.abandonSlot(i, ChannelCloseReason::Manual);
+  }
+
   if (state_ == TUNNEL_CONNECTED) {
     emitSessionDisconnected();
   }
+  socketHealthFailures_ = 0;
   state_ = TUNNEL_DISCONNECTED;
 }
 
@@ -126,8 +162,15 @@ void SSHTunnel::loop() {
 
   // Check socket health
   if (!session_.checkConnection()) {
-    enterErrorState("socket health check failed");
-    return;
+    socketHealthFailures_++;
+    if (socketHealthFailures_ >= 3) {
+      enterErrorState("socket health check failed");
+      return;
+    }
+    LOGF_W("SSH", "Socket health check failed (%d/3), waiting for confirmation",
+           socketHealthFailures_);
+  } else {
+    socketHealthFailures_ = 0;
   }
 
   // Send keepalive if needed
@@ -240,12 +283,24 @@ bool SSHTunnel::handleNewConnection() {
 
   // Try to bind directly if a slot is available
   int slot = channels_.allocateSlot();
-  if (slot >= 0 && channels_.bindChannel(slot, ch, mapping)) {
-    emitChannelOpened(slot);
-    return true;
+  if (slot >= 0) {
+    if (channels_.bindChannel(slot, ch, mapping)) {
+      emitChannelOpened(slot);
+      return true;
+    }
+
+    // Bind failure means the local endpoint or channel resources are not
+    // usable right now. Keeping the SSH channel queued only makes the remote
+    // client hang until the pending timeout expires.
+    LOGF_W("SSH", "Rejecting accepted channel for %s:%d -> %s:%d after bind "
+                  "failure",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+           mapping.localHost.c_str(), mapping.localPort);
+    closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(200), nullptr);
+    return false;
   }
 
-  // No slot available (or bind failed) — queue the channel
+  // No slot available — queue the channel
   if (pendingCount_ < MAX_PENDING) {
     PendingChannel &pending = pendingQueue_[pendingCount_];
     pending.channel = ch;
@@ -273,11 +328,22 @@ void SSHTunnel::drainPendingQueue() {
     PendingChannel &pending = pendingQueue_[i];
 
     int slot = channels_.allocateSlot();
-    if (slot >= 0 && channels_.bindChannel(slot, pending.channel, pending.mapping)) {
-      LOGF_I("SSH", "Queued channel bound to slot %d (waited %lums)", slot,
-             millis() - pending.queuedAtMs);
-      emitChannelOpened(slot);
-      pending.channel = nullptr; // consumed
+    if (slot >= 0) {
+      if (channels_.bindChannel(slot, pending.channel, pending.mapping)) {
+        LOGF_I("SSH", "Queued channel bound to slot %d (waited %lums)", slot,
+               millis() - pending.queuedAtMs);
+        emitChannelOpened(slot);
+        pending.channel = nullptr; // consumed
+      } else {
+        LOGF_W("SSH", "Dropping queued channel for %s:%d -> %s:%d after bind "
+                      "failure",
+               pending.mapping.remoteBindHost.c_str(),
+               pending.mapping.remoteBindPort,
+               pending.mapping.localHost.c_str(), pending.mapping.localPort);
+        closeAcceptedChannel(session_, pending.channel, pdMS_TO_TICKS(200),
+                             nullptr);
+        pending.channel = nullptr; // dropped
+      }
     } else {
       // Keep in queue — compact in place
       if (writeIdx != i) {
@@ -354,17 +420,28 @@ void SSHTunnel::enterErrorState(const char *reason) {
     }
     session_.unlock();
   } else {
-    // Lock failed — at minimum close local sockets to avoid fd leak
+    // Lock failed — the SSH session is already unhealthy, so release the
+    // local resources and free the slots without touching libssh2.
     for (int i = 0; i < channels_.getMaxSlots(); ++i) {
       ChannelSlot &ch = channels_.getSlot(i);
-      if (ch.active && ch.localSocket >= 0) {
-        close(ch.localSocket);
-        ch.localSocket = -1;
+      if (ch.active) {
+        ChannelCloseReason cr = ch.closeReason;
+        if (cr == ChannelCloseReason::Unknown) {
+          cr = ChannelCloseReason::Error;
+        }
+        channels_.abandonSlot(i, cr);
+        emitChannelClosed(i, cr);
       }
     }
   }
 
+  session_.disconnect();
+  for (int i = 0; i < channels_.getMaxSlots(); ++i) {
+    channels_.abandonSlot(i, ChannelCloseReason::Error);
+  }
+
   state_ = TUNNEL_ERROR;
+  socketHealthFailures_ = 0;
   lastConnectionAttempt_ = millis();
   emitSessionDisconnected();
 }
@@ -403,7 +480,11 @@ void SSHTunnel::handleReconnection() {
 
   LOGF_I("SSH", "Attempting reconnection %d/%d (delay was %lums)...",
          reconnectAttempts_ + 1, maxReconnectAttempts, delay);
-  disconnect();
+  clearPendingQueue();
+  session_.disconnect();
+  for (int i = 0; i < channels_.getMaxSlots(); ++i) {
+    channels_.abandonSlot(i, ChannelCloseReason::Error);
+  }
   reconnectAttempts_++;
 
   if (connectSSH()) {
