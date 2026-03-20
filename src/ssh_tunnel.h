@@ -27,9 +27,12 @@ struct SSHTunnelEvents {
 
 // A forwarded channel waiting for a free slot.
 struct PendingChannel {
+  enum class Action { Bind, Close };
+
   LIBSSH2_CHANNEL *channel = nullptr;
   TunnelConfig mapping;
   unsigned long queuedAtMs = 0;
+  Action action = Action::Bind;
 };
 
 // SSHTunnel: public facade with the same API as before.
@@ -83,11 +86,21 @@ private:
   // Drain queued connections into newly freed slots
   void drainPendingQueue();
 
+  // Retry closing channels that could not be freed immediately because the
+  // session lock was unavailable.
+  void drainDeferredCloseQueue();
+
   // Close and free channels that exceeded PENDING_TIMEOUT_MS
   void cleanExpiredPending();
 
   // Close and free all pending channels (used on disconnect/error)
-  void clearPendingQueue();
+  bool clearPendingQueue();
+
+  // Track accepted channels that must be closed later once the session lock is
+  // available again.
+  bool enqueueDeferredClose(LIBSSH2_CHANNEL *channel,
+                            const TunnelConfig &mapping, const char *reason);
+  bool clearDeferredCloseQueue();
 
   // Error handling: clean orphan channels + sockets, then set TUNNEL_ERROR
   void enterErrorState(const char *reason);
@@ -124,9 +137,12 @@ private:
 
   // Pending connection queue
   static constexpr int MAX_PENDING = 8;
+  static constexpr int MAX_DEFERRED_CLOSE = 4;
   static constexpr unsigned long PENDING_TIMEOUT_MS = 30000;
   PendingChannel pendingQueue_[MAX_PENDING];
   int pendingCount_ = 0;
+  PendingChannel deferredCloseQueue_[MAX_DEFERRED_CLOSE];
+  int deferredCloseCount_ = 0;
 
   // Events
   SSHTunnelEvents eventHandlers_ = {};
