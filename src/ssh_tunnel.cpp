@@ -292,8 +292,9 @@ bool SSHTunnel::handleNewConnection() {
     // Bind failure means the local endpoint or channel resources are not
     // usable right now. Keeping the SSH channel queued only makes the remote
     // client hang until the pending timeout expires.
-    LOGF_W("SSH", "Rejecting accepted channel for %s:%d -> %s:%d after bind "
-                  "failure",
+    LOGF_W("SSH",
+           "Rejecting accepted channel for %s:%d -> %s:%d after bind "
+           "failure",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
            mapping.localHost.c_str(), mapping.localPort);
     closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(200), nullptr);
@@ -335,8 +336,9 @@ void SSHTunnel::drainPendingQueue() {
         emitChannelOpened(slot);
         pending.channel = nullptr; // consumed
       } else {
-        LOGF_W("SSH", "Dropping queued channel for %s:%d -> %s:%d after bind "
-                      "failure",
+        LOGF_W("SSH",
+               "Dropping queued channel for %s:%d -> %s:%d after bind "
+               "failure",
                pending.mapping.remoteBindHost.c_str(),
                pending.mapping.remoteBindPort,
                pending.mapping.localHost.c_str(), pending.mapping.localPort);
