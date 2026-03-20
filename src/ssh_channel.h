@@ -94,6 +94,10 @@ public:
   // libssh2_channel_free).
   void finalizeClose(int slotIndex);
 
+  // Force-reset a slot when the SSH session is already unusable and the
+  // caller cannot safely run libssh2 channel cleanup.
+  void abandonSlot(int slotIndex, ChannelCloseReason reason);
+
   // Should we accept a new connection?
   bool shouldAcceptNew() const;
 

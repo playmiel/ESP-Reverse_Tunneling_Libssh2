@@ -268,6 +268,36 @@ void ChannelManager::finalizeClose(int slotIndex) {
          maxSlots_);
 }
 
+void ChannelManager::abandonSlot(int slotIndex, ChannelCloseReason reason) {
+  if (slotIndex < 0 || slotIndex >= maxSlots_) {
+    return;
+  }
+  ChannelSlot &slot = slots_[slotIndex];
+  if (!slot.active) {
+    return;
+  }
+
+  LOGF_W("SSH",
+         "Channel %d: abandoning slot without libssh2 cleanup (reason=%d)",
+         slotIndex, static_cast<int>(reason));
+
+  if (slot.localSocket >= 0) {
+    close(slot.localSocket);
+    slot.localSocket = -1;
+  }
+
+  delete slot.toLocal;
+  slot.toLocal = nullptr;
+  delete slot.toRemote;
+  slot.toRemote = nullptr;
+
+  slot.sshChannel = nullptr;
+  if (activeCount_ > 0) {
+    activeCount_--;
+  }
+  resetSlot(slotIndex);
+}
+
 bool ChannelManager::shouldAcceptNew() const {
   if (activeCount_ >= maxSlots_) {
     return false;
