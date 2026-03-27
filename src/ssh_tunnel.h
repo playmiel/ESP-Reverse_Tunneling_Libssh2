@@ -138,7 +138,8 @@ private:
   // Pending connection queue
   static constexpr int MAX_PENDING = 8;
   static constexpr int MAX_DEFERRED_CLOSE = 4;
-  static constexpr unsigned long PENDING_TIMEOUT_MS = 30000;
+  static constexpr unsigned long PENDING_TIMEOUT_MS = 5000;
+  static constexpr unsigned long CLOSE_RETRY_TIMEOUT_MS = 5000;
   PendingChannel pendingQueue_[MAX_PENDING];
   int pendingCount_ = 0;
   PendingChannel deferredCloseQueue_[MAX_DEFERRED_CLOSE];

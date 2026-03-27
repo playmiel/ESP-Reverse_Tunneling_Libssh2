@@ -339,18 +339,22 @@ bool SSHTunnel::handleNewConnection() {
                pendingCount_, MAX_PENDING);
         return false;
       }
+      // Pending queue full + lock unavailable: queue as Close, don't destroy
+      // the tunnel for transient contention
+      if (!enqueueDeferredClose(ch, mapping,
+                                "Deferring close: lock unavailable and "
+                                "pending queue full")) {
+        LOG_W("SSH", "All queues full, dropping channel (transient)");
+      }
+      return false;
     }
 
     // Bind failure means the local endpoint or channel resources are not
-    // usable right now. Keeping the SSH channel queued only makes the remote
-    // client hang until the pending timeout expires.
+    // usable right now — close the channel, don't keep it hanging.
     if (!enqueueDeferredClose(ch, mapping,
-                              bindResult == BindResult::Failed
-                                  ? "Rejecting accepted channel after bind "
-                                    "failure"
-                                  : "Deferring close of accepted channel "
-                                    "because session lock is unavailable")) {
-      enterErrorState("deferred close queue full");
+                              "Rejecting accepted channel after bind "
+                              "failure")) {
+      LOG_W("SSH", "Deferred close queue full, dropping channel");
     }
     return false;
   }
@@ -368,17 +372,21 @@ bool SSHTunnel::handleNewConnection() {
     return false;
   }
 
-  // Queue is also full — reject the connection
+  // Queue is also full — reject the connection, but don't destroy the tunnel
   LOG_W("SSH", "Pending queue full, rejecting connection");
   if (!closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(500), nullptr) &&
       !enqueueDeferredClose(ch, mapping,
                             "Pending queue full and close deferred")) {
-    enterErrorState("pending queue overflow while deferring close");
+    // All queues saturated — last resort: leak the channel rather than
+    // tearing down the entire tunnel for a transient overload.
+    LOG_E("SSH", "All queues full, channel leaked (will be freed on session "
+                 "disconnect)");
   }
   return false;
 }
 
 void SSHTunnel::drainPendingQueue() {
+  unsigned long now = millis();
   int writeIdx = 0;
   for (int i = 0; i < pendingCount_; ++i) {
     PendingChannel &pending = pendingQueue_[i];
@@ -388,6 +396,18 @@ void SSHTunnel::drainPendingQueue() {
     }
 
     if (pending.action == PendingChannel::Action::Close) {
+      unsigned long age = now - pending.queuedAtMs;
+      if (age > CLOSE_RETRY_TIMEOUT_MS) {
+        // Close retry timed out — force-free with session lock or abandon
+        LOGF_W("SSH",
+               "Pending close entry expired after %lums, force-freeing", age);
+        if (session_.lock(pdMS_TO_TICKS(100))) {
+          libssh2_channel_free(pending.channel);
+          session_.unlock();
+        }
+        pending.channel = nullptr;
+        continue;
+      }
       if (!closeAcceptedChannel(session_, pending.channel, pdMS_TO_TICKS(200),
                                 "Retrying deferred close of queued channel")) {
         if (writeIdx != i) {
@@ -400,7 +420,6 @@ void SSHTunnel::drainPendingQueue() {
       continue;
     }
 
-    unsigned long now = millis();
     if ((now - pending.queuedAtMs) > PENDING_TIMEOUT_MS) {
       LOGF_W("SSH", "Pending channel expired after %lums, dropping",
              now - pending.queuedAtMs);
@@ -465,10 +484,22 @@ void SSHTunnel::drainPendingQueue() {
 }
 
 void SSHTunnel::drainDeferredCloseQueue() {
+  unsigned long now = millis();
   int writeIdx = 0;
   for (int i = 0; i < deferredCloseCount_; ++i) {
     PendingChannel &pending = deferredCloseQueue_[i];
     if (!pending.channel) {
+      continue;
+    }
+    unsigned long age = now - pending.queuedAtMs;
+    if (age > CLOSE_RETRY_TIMEOUT_MS) {
+      LOGF_W("SSH",
+             "Deferred close entry expired after %lums, force-freeing", age);
+      if (session_.lock(pdMS_TO_TICKS(100))) {
+        libssh2_channel_free(pending.channel);
+        session_.unlock();
+      }
+      pending.channel = nullptr;
       continue;
     }
     if (!closeAcceptedChannel(session_, pending.channel, pdMS_TO_TICKS(200),
