@@ -119,10 +119,8 @@ void TransportPump::pumpSshTransport() {
         LOGF_D("SSH", "Channel %d: SSH read resumed (toLocal=%zu)", i,
                ch.toLocal->size());
       } else {
-        // Still do a transport pump read even when paused
-        char pumpBuf[64];
-        libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-        anyReadDone = true;
+        // Do NOT read from this channel — it would discard real data.
+        // Transport pumping is handled by reads on other (non-paused) channels.
         continue;
       }
     }
@@ -185,6 +183,23 @@ void TransportPump::pumpSshTransport() {
     }
   }
 
+  // Fallback: if no channel was read (all paused, no remoteEof channels),
+  // we still need to pump the SSH transport to process WINDOW_ADJUST packets
+  // that unblock writes on other channels.  Pick the first active channel
+  // and do a tiny read — for remoteEof channels this is safe (no useful data);
+  // for paused channels the data is already in libssh2's buffer and a 0-byte
+  // read still pumps the transport internally.
+  if (!anyReadDone) {
+    for (int i = 0; i < maxSlots; ++i) {
+      ChannelSlot &ch = channels_->getSlot(i);
+      if (ch.active && ch.sshChannel) {
+        char pumpBuf[1];
+        libssh2_channel_read(ch.sshChannel, pumpBuf, 0);
+        break;
+      }
+    }
+  }
+
   session_->unlock();
 }
 
@@ -206,37 +221,43 @@ void TransportPump::drainSshToLocal() {
       continue;
     }
 
-    if (ch.toLocal->empty()) {
-      continue;
-    }
-
-    size_t available = ch.toLocal->size();
-    size_t toDrain = available < bufSize_ ? available : bufSize_;
-
-    size_t got = ch.toLocal->read(txBuf_, toDrain);
-    if (got == 0) {
-      continue;
-    }
-
-    ssize_t sent = send(ch.localSocket, txBuf_, got, MSG_DONTWAIT);
-    if (sent > 0) {
-      lastBytesMoved_ += sent;
-      ch.lastActivity = millis();
-      if (static_cast<size_t>(sent) < got) {
-        // Partial send: put unsent data back at the front of the ring
-        if (ch.toLocal->writeToFront(txBuf_ + sent, got - sent) == 0) {
-          // Prepend buffer occupied — re-append to preserve data
-          ch.toLocal->write(txBuf_ + sent, got - sent);
-        }
+    // Drain up to 4 chunks per channel to match Phase 1's read throughput
+    for (int attempt = 0; attempt < 4; ++attempt) {
+      if (ch.toLocal->empty()) {
+        break;
       }
-    } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
-      ch.localEof = true;
-      LOGF_W("SSH", "Channel %d: local send error %d (%s)", i, errno,
-             strerror(errno));
-    } else {
-      // EAGAIN/EWOULDBLOCK: put ALL data back at the front
-      if (ch.toLocal->writeToFront(txBuf_, got) == 0) {
-        ch.toLocal->write(txBuf_, got);
+
+      size_t available = ch.toLocal->size();
+      size_t toDrain = available < bufSize_ ? available : bufSize_;
+
+      size_t got = ch.toLocal->read(txBuf_, toDrain);
+      if (got == 0) {
+        break;
+      }
+
+      ssize_t sent = send(ch.localSocket, txBuf_, got, MSG_DONTWAIT);
+      if (sent > 0) {
+        lastBytesMoved_ += sent;
+        ch.lastActivity = millis();
+        if (static_cast<size_t>(sent) < got) {
+          // Partial send: put unsent data back at the front of the ring
+          if (ch.toLocal->writeToFront(txBuf_ + sent, got - sent) == 0) {
+            // Prepend buffer occupied — re-append to preserve data
+            ch.toLocal->write(txBuf_ + sent, got - sent);
+          }
+          break; // Socket can't take more right now
+        }
+      } else if (sent < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+        ch.localEof = true;
+        LOGF_W("SSH", "Channel %d: local send error %d (%s)", i, errno,
+               strerror(errno));
+        break;
+      } else {
+        // EAGAIN/EWOULDBLOCK: put ALL data back at the front
+        if (ch.toLocal->writeToFront(txBuf_, got) == 0) {
+          ch.toLocal->write(txBuf_, got);
+        }
+        break; // Socket busy, stop draining this channel
       }
     }
   }
