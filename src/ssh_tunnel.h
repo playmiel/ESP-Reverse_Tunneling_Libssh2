@@ -68,6 +68,8 @@ public:
   unsigned long getBytesSent();
   unsigned long getBytesDropped();
   int getActiveChannels();
+  int getKeepAliveFailures() const { return session_.getKeepAliveFailures(); }
+  int getSocketHealthFailures() const { return socketHealthFailures_; }
 
   // Event handlers
   void setEventHandlers(const SSHTunnelEvents &handlers);

@@ -39,6 +39,9 @@ public:
   // True if session is live and socket is valid.
   bool isConnected() const;
 
+  // Number of consecutive keepalive failures seen since the last success.
+  int getKeepAliveFailures() const { return keepAliveFailures_; }
+
   // Send SSH keepalive. Returns false if the connection should be considered
   // dead.
   bool sendKeepalive();
