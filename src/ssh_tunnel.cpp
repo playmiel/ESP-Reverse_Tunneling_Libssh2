@@ -217,9 +217,10 @@ void SSHTunnel::loop() {
     drainDeferredCloseQueue();
   }
 
-  // Accept new connections (one per loop to avoid PSRAM heap fragmentation
-  // from rapid ring buffer allocation cycles)
-  handleNewConnection();
+  // Accept new connections (drain all pending channels from libssh2)
+  while (handleNewConnection()) {
+    // keep accepting until no more pending channels
+  }
 
   // Pump all data (the core of the new architecture)
   transport_.pumpAll();
