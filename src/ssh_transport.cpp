@@ -183,23 +183,6 @@ void TransportPump::pumpSshTransport() {
     }
   }
 
-  // Fallback: if no channel was read (all paused, no remoteEof channels),
-  // we still need to pump the SSH transport to process WINDOW_ADJUST packets
-  // that unblock writes on other channels.  Pick the first active channel
-  // and do a tiny read — for remoteEof channels this is safe (no useful data);
-  // for paused channels the data is already in libssh2's buffer and a 0-byte
-  // read still pumps the transport internally.
-  if (!anyReadDone) {
-    for (int i = 0; i < maxSlots; ++i) {
-      ChannelSlot &ch = channels_->getSlot(i);
-      if (ch.active && ch.sshChannel) {
-        char pumpBuf[1];
-        libssh2_channel_read(ch.sshChannel, pumpBuf, 0);
-        break;
-      }
-    }
-  }
-
   session_->unlock();
 }
 

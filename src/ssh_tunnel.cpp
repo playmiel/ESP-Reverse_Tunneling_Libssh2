@@ -217,10 +217,9 @@ void SSHTunnel::loop() {
     drainDeferredCloseQueue();
   }
 
-  // Accept new connections (up to 3 per loop to avoid heap fragmentation
-  // from rapid ring buffer allocation/deallocation in PSRAM)
-  for (int accepts = 0; accepts < 3 && handleNewConnection(); ++accepts) {
-  }
+  // Accept new connections (one per loop to avoid PSRAM heap fragmentation
+  // from rapid ring buffer allocation cycles)
+  handleNewConnection();
 
   // Pump all data (the core of the new architecture)
   transport_.pumpAll();
