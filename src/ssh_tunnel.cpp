@@ -401,8 +401,8 @@ void SSHTunnel::drainPendingQueue() {
       unsigned long age = now - pending.queuedAtMs;
       if (age > CLOSE_RETRY_TIMEOUT_MS) {
         // Close retry timed out — force-free with session lock or abandon
-        LOGF_W("SSH",
-               "Pending close entry expired after %lums, force-freeing", age);
+        LOGF_W("SSH", "Pending close entry expired after %lums, force-freeing",
+               age);
         if (session_.lock(pdMS_TO_TICKS(100))) {
           libssh2_channel_free(pending.channel);
           session_.unlock();
@@ -495,8 +495,8 @@ void SSHTunnel::drainDeferredCloseQueue() {
     }
     unsigned long age = now - pending.queuedAtMs;
     if (age > CLOSE_RETRY_TIMEOUT_MS) {
-      LOGF_W("SSH",
-             "Deferred close entry expired after %lums, force-freeing", age);
+      LOGF_W("SSH", "Deferred close entry expired after %lums, force-freeing",
+             age);
       if (session_.lock(pdMS_TO_TICKS(100))) {
         libssh2_channel_free(pending.channel);
         session_.unlock();

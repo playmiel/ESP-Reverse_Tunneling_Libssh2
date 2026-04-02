@@ -357,7 +357,8 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
   int flags = fcntl(localSocket, F_GETFL, 0);
   fcntl(localSocket, F_SETFL, flags | O_NONBLOCK);
 
-  int connectResult = ::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr));
+  int connectResult =
+      ::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr));
   if (connectResult < 0 && errno != EINPROGRESS) {
     LOGF_E("SSH", "Failed to connect to local endpoint %s:%d",
            mapping.localHost.c_str(), mapping.localPort);
@@ -371,7 +372,7 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
     FD_ZERO(&writefds);
     FD_SET(localSocket, &writefds);
     struct timeval tv;
-    tv.tv_sec = 2;  // 2 second max wait (was potentially 20-75s blocking)
+    tv.tv_sec = 2; // 2 second max wait (was potentially 20-75s blocking)
     tv.tv_usec = 0;
     int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
     if (sel <= 0) {

@@ -308,8 +308,8 @@ void TransportPump::drainLocalToSsh() {
             ch.firstEagainMs = 0;
             ch.consecutiveErrors = 0;
             if (static_cast<size_t>(written) < got) {
-              if (ch.toRemote->writeToFront(txBuf_ + written,
-                                            got - written) == 0) {
+              if (ch.toRemote->writeToFront(txBuf_ + written, got - written) ==
+                  0) {
                 ch.toRemote->write(txBuf_ + written, got - written);
               }
               break;
@@ -336,9 +336,8 @@ void TransportPump::drainLocalToSsh() {
         if (ch.firstEagainMs > 0 &&
             (millis() - ch.firstEagainMs) >
                 static_cast<unsigned long>(EAGAIN_STALL_TIMEOUT_MS)) {
-          LOGF_W("SSH",
-                 "Channel %d: EAGAIN stall timeout (%dms, toRemote=%zu)", i,
-                 EAGAIN_STALL_TIMEOUT_MS, ch.toRemote->size());
+          LOGF_W("SSH", "Channel %d: EAGAIN stall timeout (%dms, toRemote=%zu)",
+                 i, EAGAIN_STALL_TIMEOUT_MS, ch.toRemote->size());
           if (ch.state == ChannelSlot::State::Open) {
             channels_->beginClose(i, ChannelCloseReason::Error);
           }
