@@ -64,7 +64,7 @@ private:
   static constexpr int BACKPRESSURE_HIGH_PCT = 75; // Pause reads above 75%
   static constexpr int BACKPRESSURE_LOW_PCT = 25;  // Resume reads below 25%
   static constexpr size_t MAX_WRITE_PER_CHANNEL =
-      4096; // Max SSH write per channel per round
+      16384; // Max SSH write per channel per round
   static constexpr unsigned long DRAIN_TIMEOUT_MS =
       15000; // Max time in Draining state
   static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS =

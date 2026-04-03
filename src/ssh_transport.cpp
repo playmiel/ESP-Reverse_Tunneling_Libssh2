@@ -119,8 +119,20 @@ void TransportPump::pumpSshTransport() {
         LOGF_D("SSH", "Channel %d: SSH read resumed (toLocal=%zu)", i,
                ch.toLocal->size());
       } else {
-        // Do NOT read from this channel — it would discard real data.
-        // Transport pumping is handled by reads on other (non-paused) channels.
+        // Pump transport with a small read — store data safely in toLocal
+        // (ring is at ~75%, not 100%, so there's room for a small read).
+        // This processes WINDOW_ADJUST packets that unblock SSH writes.
+        if (ch.toLocal && ch.toLocal->available() > 0) {
+          size_t pumpSize = ch.toLocal->available() < 64
+                                ? ch.toLocal->available()
+                                : 64;
+          int rc =
+              libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, pumpSize);
+          if (rc > 0) {
+            ch.toLocal->write(rxBuf_, rc);
+          }
+        }
+        anyReadDone = true;
         continue;
       }
     }
@@ -184,17 +196,14 @@ void TransportPump::pumpSshTransport() {
   }
 
   // Fallback: if no channel was read (all paused, no remoteEof channels),
-  // we still need to pump the SSH transport to process WINDOW_ADJUST packets
-  // that unblock writes on other channels.  Pick the first active channel
-  // and do a tiny read — for remoteEof channels this is safe (no useful data);
-  // for paused channels the data is already in libssh2's buffer and a 0-byte
-  // read still pumps the transport internally.
+  // pump the transport via a 1-byte read on a remoteEof channel (safe, no
+  // useful data left) or any active channel as last resort.
   if (!anyReadDone) {
     for (int i = 0; i < maxSlots; ++i) {
       ChannelSlot &ch = channels_->getSlot(i);
-      if (ch.active && ch.sshChannel) {
+      if (ch.active && ch.sshChannel && ch.remoteEof) {
         char pumpBuf[1];
-        libssh2_channel_read(ch.sshChannel, pumpBuf, 0);
+        libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
         break;
       }
     }
