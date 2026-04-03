@@ -418,7 +418,8 @@ void SSHTunnel::drainPendingQueue() {
           continue;
         }
         // Lock failed — keep in queue for next attempt (don't leak the pointer)
-        LOGF_W("SSH", "Lock unavailable for expired close, retrying next cycle");
+        LOGF_W("SSH",
+               "Lock unavailable for expired close, retrying next cycle");
         if (writeIdx != i) {
           pendingQueue_[writeIdx] = pending;
         }
