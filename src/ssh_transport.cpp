@@ -285,6 +285,10 @@ void TransportPump::drainLocalToSsh() {
     }
 
     // --- Step A: Drain toRemote -> SSH (requires session lock) ---
+    // Skip if SSH EOF already sent — writes would fail with error -27
+    if (ch.eofSentMs > 0) {
+      continue;
+    }
     if (ch.toRemote && !ch.toRemote->empty()) {
       if (session_->lock(pdMS_TO_TICKS(20))) {
         size_t budget = MAX_WRITE_PER_CHANNEL;
@@ -363,8 +367,9 @@ void TransportPump::drainLocalToSsh() {
     }
 
     // --- Step B: Read from local socket -> toRemote ring (no lock needed) ---
+    // Skip if channel is draining with EOF sent — no point reading more data
     if (!ch.localEof && !ch.localReadPaused && ch.localSocket >= 0 &&
-        ch.toRemote) {
+        ch.toRemote && ch.eofSentMs == 0) {
       size_t freeSpace = ch.toRemote->available();
       if (freeSpace > 0) {
         size_t readSize = freeSpace < bufSize_ ? freeSpace : bufSize_;
