@@ -379,10 +379,17 @@ bool SSHTunnel::handleNewConnection() {
   if (!closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(500), nullptr) &&
       !enqueueDeferredClose(ch, mapping,
                             "Pending queue full and close deferred")) {
-    // All queues saturated — last resort: leak the channel rather than
-    // tearing down the entire tunnel for a transient overload.
-    LOG_E("SSH", "All queues full, channel leaked (will be freed on session "
-                 "disconnect)");
+    // All queues saturated — last resort: force-close with a longer lock wait
+    // rather than leaking the channel pointer permanently.
+    LOG_E("SSH", "All queues full, attempting force-close with extended wait");
+    if (session_.lock(pdMS_TO_TICKS(1000))) {
+      libssh2_channel_close(ch);
+      libssh2_channel_free(ch);
+      session_.unlock();
+    } else {
+      // Truly cannot free — the channel will be reclaimed on session disconnect
+      LOG_E("SSH", "Force-close failed, channel will be freed on disconnect");
+    }
   }
   return false;
 }
@@ -400,14 +407,22 @@ void SSHTunnel::drainPendingQueue() {
     if (pending.action == PendingChannel::Action::Close) {
       unsigned long age = now - pending.queuedAtMs;
       if (age > CLOSE_RETRY_TIMEOUT_MS) {
-        // Close retry timed out — force-free with session lock or abandon
+        // Close retry timed out — force-free with session lock
         LOGF_W("SSH", "Pending close entry expired after %lums, force-freeing",
                age);
         if (session_.lock(pdMS_TO_TICKS(100))) {
+          libssh2_channel_close(pending.channel);
           libssh2_channel_free(pending.channel);
           session_.unlock();
+          pending.channel = nullptr;
+          continue;
         }
-        pending.channel = nullptr;
+        // Lock failed — keep in queue for next attempt (don't leak the pointer)
+        LOGF_W("SSH", "Lock unavailable for expired close, retrying next cycle");
+        if (writeIdx != i) {
+          pendingQueue_[writeIdx] = pending;
+        }
+        writeIdx++;
         continue;
       }
       if (!closeAcceptedChannel(session_, pending.channel, pdMS_TO_TICKS(200),
@@ -498,10 +513,18 @@ void SSHTunnel::drainDeferredCloseQueue() {
       LOGF_W("SSH", "Deferred close entry expired after %lums, force-freeing",
              age);
       if (session_.lock(pdMS_TO_TICKS(100))) {
+        libssh2_channel_close(pending.channel);
         libssh2_channel_free(pending.channel);
         session_.unlock();
+        pending.channel = nullptr;
+        continue;
       }
-      pending.channel = nullptr;
+      // Lock failed — keep in queue for next attempt (don't leak the pointer)
+      LOGF_W("SSH", "Lock unavailable for expired deferred close, retrying");
+      if (writeIdx != i) {
+        deferredCloseQueue_[writeIdx] = pending;
+      }
+      writeIdx++;
       continue;
     }
     if (!closeAcceptedChannel(session_, pending.channel, pdMS_TO_TICKS(200),
