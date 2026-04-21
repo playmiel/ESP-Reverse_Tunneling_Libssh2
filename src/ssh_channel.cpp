@@ -5,6 +5,7 @@
 #include <esp_heap_caps.h>
 #include <fcntl.h>
 #include <netinet/in.h>
+#include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
 
@@ -352,20 +353,69 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
     return -1;
   }
 
-  if (::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d",
-           mapping.localHost.c_str(), mapping.localPort);
+  // Set non-blocking BEFORE connect to avoid stalling the entire loop()
+  int flags = fcntl(localSocket, F_GETFL, 0);
+  if (flags < 0) {
+    LOGF_E("SSH", "fcntl F_GETFL failed for local socket (errno=%d)", errno);
     close(localSocket);
     return -1;
+  }
+  if (fcntl(localSocket, F_SETFL, flags | O_NONBLOCK) < 0) {
+    LOGF_E("SSH", "fcntl F_SETFL failed for local socket (errno=%d)", errno);
+    close(localSocket);
+    return -1;
+  }
+
+  int connectResult =
+      ::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr));
+  if (connectResult < 0 && errno != EINPROGRESS) {
+    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d (errno=%d)",
+           mapping.localHost.c_str(), mapping.localPort, errno);
+    close(localSocket);
+    return -1;
+  }
+
+  if (connectResult != 0) {
+    // Non-blocking connect in progress — wait with a short timeout
+    fd_set writefds;
+    FD_ZERO(&writefds);
+    FD_SET(localSocket, &writefds);
+    struct timeval tv;
+    tv.tv_sec = 2; // 2 second max wait (was potentially 20-75s blocking)
+    tv.tv_usec = 0;
+    int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
+    if (sel < 0) {
+      LOGF_E("SSH", "select() error connecting to %s:%d (errno=%d)",
+             mapping.localHost.c_str(), mapping.localPort, errno);
+      close(localSocket);
+      return -1;
+    }
+    if (sel == 0 || !FD_ISSET(localSocket, &writefds)) {
+      LOGF_E("SSH", "Timeout connecting to local endpoint %s:%d",
+             mapping.localHost.c_str(), mapping.localPort);
+      close(localSocket);
+      return -1;
+    }
+    // Check if connect actually succeeded
+    int sockErr = 0;
+    socklen_t errLen = sizeof(sockErr);
+    if (getsockopt(localSocket, SOL_SOCKET, SO_ERROR, &sockErr, &errLen) != 0) {
+      LOGF_E("SSH", "getsockopt SO_ERROR failed for %s:%d (errno=%d)",
+             mapping.localHost.c_str(), mapping.localPort, errno);
+      close(localSocket);
+      return -1;
+    }
+    if (sockErr != 0) {
+      LOGF_E("SSH", "Failed to connect to local endpoint %s:%d (err=%d)",
+             mapping.localHost.c_str(), mapping.localPort, sockErr);
+      close(localSocket);
+      return -1;
+    }
   }
 
   if (!NetworkOptimizer::optimizeSocket(localSocket)) {
     LOG_W("SSH", "Failed to optimize local socket");
   }
-
-  // Set non-blocking
-  int flags = fcntl(localSocket, F_GETFL, 0);
-  fcntl(localSocket, F_SETFL, flags | O_NONBLOCK);
 
   return localSocket;
 }
