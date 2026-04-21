@@ -34,6 +34,7 @@ Thumbs.db
 
 # Local development documentation (was French)
 AGENTS.md
+.claude/
 
 # Submodule changes (to avoid automatic commits)
 # Note: This helps with the submodule issue mentioned by user

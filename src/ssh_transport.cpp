@@ -123,9 +123,8 @@ void TransportPump::pumpSshTransport() {
         // (ring is at ~75%, not 100%, so there's room for a small read).
         // This processes WINDOW_ADJUST packets that unblock SSH writes.
         if (ch.toLocal && ch.toLocal->available() > 0) {
-          size_t pumpSize = ch.toLocal->available() < 64
-                                ? ch.toLocal->available()
-                                : 64;
+          size_t pumpSize =
+              ch.toLocal->available() < 64 ? ch.toLocal->available() : 64;
           int rc =
               libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, pumpSize);
           if (rc > 0) {
