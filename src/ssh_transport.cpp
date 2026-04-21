@@ -127,11 +127,29 @@ void TransportPump::pumpSshTransport() {
               ch.toLocal->available() < 64 ? ch.toLocal->available() : 64;
           int rc =
               libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, pumpSize);
+          anyReadDone = true;
           if (rc > 0) {
-            ch.toLocal->write(rxBuf_, rc);
+            size_t written = ch.toLocal->write(rxBuf_, rc);
+            ch.totalBytesReceived += written;
+            lastBytesMoved_ += written;
+            ch.lastSuccessfulRead = millis();
+            ch.lastActivity = ch.lastSuccessfulRead;
+            ch.eagainCount = 0;
+            ch.firstEagainMs = 0;
+            ch.consecutiveErrors = 0;
+          } else if (rc == 0) {
+            ch.remoteEof = true;
+            LOGF_I("SSH", "Channel %d: remote EOF (paused read)", i);
+          } else if (rc != LIBSSH2_ERROR_EAGAIN) {
+            ch.consecutiveErrors++;
+            LOGF_W("SSH", "Channel %d: SSH read error %d (errors=%d)", i, rc,
+                   ch.consecutiveErrors);
+            if (ch.consecutiveErrors > 3 &&
+                ch.state == ChannelSlot::State::Open) {
+              channels_->beginClose(i, ChannelCloseReason::Error);
+            }
           }
         }
-        anyReadDone = true;
         continue;
       }
     }
@@ -198,12 +216,24 @@ void TransportPump::pumpSshTransport() {
   // pump the transport via a 1-byte read on a remoteEof channel (safe, no
   // useful data left) or any active channel as last resort.
   if (!anyReadDone) {
+    bool fallbackDone = false;
     for (int i = 0; i < maxSlots; ++i) {
       ChannelSlot &ch = channels_->getSlot(i);
       if (ch.active && ch.sshChannel && ch.remoteEof) {
         char pumpBuf[1];
         libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
+        fallbackDone = true;
         break;
+      }
+    }
+    if (!fallbackDone) {
+      for (int i = 0; i < maxSlots; ++i) {
+        ChannelSlot &ch = channels_->getSlot(i);
+        if (ch.active && ch.sshChannel && !ch.remoteEof) {
+          char pumpBuf[1];
+          libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
+          break;
+        }
       }
     }
   }
@@ -335,9 +365,16 @@ void TransportPump::drainLocalToSsh() {
               ch.firstEagainMs = millis();
             hitEagain = true;
           } else {
+            if (ch.toRemote->writeToFront(txBuf_, got) == 0) {
+              ch.toRemote->write(txBuf_, got);
+            }
             ch.consecutiveErrors++;
             LOGF_W("SSH", "Channel %d: SSH write error %ld (errors=%d)", i,
                    (long)written, ch.consecutiveErrors);
+            if (ch.consecutiveErrors > 3 &&
+                ch.state == ChannelSlot::State::Open) {
+              channels_->beginClose(i, ChannelCloseReason::Error);
+            }
             break;
           }
         }
