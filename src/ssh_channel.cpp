@@ -383,7 +383,6 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
     struct timeval tv;
     tv.tv_sec = 0;
     tv.tv_usec = 200000; // 200ms max wait — session lock is held during this call
-    tv.tv_usec = 0;
     int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
     if (sel < 0) {
       LOGF_E("SSH", "select() error connecting to %s:%d (errno=%d)",
