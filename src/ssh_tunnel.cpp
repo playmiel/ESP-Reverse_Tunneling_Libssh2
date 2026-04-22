@@ -317,6 +317,22 @@ bool SSHTunnel::handleNewConnection() {
     return false;
   }
 
+  // Circuit breaker: if this mapping's local endpoint has been failing,
+  // reject the channel without burning a slot. Prevents a dead backend
+  // from saturating the tunnel with repeated bind attempts.
+  if (channels_.isMappingBackedOff(mapping.remoteBindPort, millis())) {
+    LOGF_W("SSH",
+           "Mapping %s:%d in circuit-breaker back-off, rejecting channel",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+    if (!closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(200),
+                              nullptr) &&
+        !enqueueDeferredClose(ch, mapping,
+                              "Circuit breaker: close deferred")) {
+      LOG_W("SSH", "Circuit breaker rejection: all queues full");
+    }
+    return false;
+  }
+
   // Try to bind directly if a slot is available
   int slot = channels_.allocateSlot();
   if (slot >= 0) {

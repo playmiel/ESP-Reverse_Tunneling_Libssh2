@@ -60,7 +60,16 @@ struct ChannelSlot {
   // Error tracking
   int consecutiveErrors = 0;
   int eagainCount = 0;
-  unsigned long firstEagainMs = 0;
+  unsigned long firstEagainMs = 0;          // SSH write EAGAIN stall start
+  unsigned long firstLocalSendEagainMs = 0; // local send EAGAIN stall start
+};
+
+// Circuit breaker state per mapping (keyed by remoteBindPort).
+// Protects against a dead local endpoint consuming every incoming channel.
+struct MappingHealth {
+  int remoteBindPort = 0; // 0 = entry unused
+  uint16_t consecutiveFails = 0;
+  unsigned long backoffUntilMs = 0;
 };
 
 // Manages a fixed-size array of ChannelSlots.
@@ -120,15 +129,32 @@ public:
   size_t getTotalBytesReceived() const;
   size_t getTotalBytesSent() const;
 
+  // Circuit breaker: returns true if the mapping identified by remoteBindPort
+  // is currently in back-off due to recent local-endpoint failures.
+  bool isMappingBackedOff(int remoteBindPort, unsigned long now) const;
+
 private:
   int connectToLocalEndpoint(const TunnelConfig &mapping);
   void snapshotEndpoint(ChannelSlot &slot, const TunnelConfig &mapping);
   void resetSlot(int index);
 
+  // Circuit breaker bookkeeping
+  void recordMappingFailure(int remoteBindPort, unsigned long now);
+  void recordMappingSuccess(int remoteBindPort);
+  MappingHealth *findOrAllocHealth(int remoteBindPort);
+  const MappingHealth *findHealth(int remoteBindPort) const;
+
   ChannelSlot *slots_ = nullptr;
   int maxSlots_ = 0;
   int activeCount_ = 0;
   size_t ringBufferSize_ = 32 * 1024; // Per ring buffer (default 32KB)
+
+  static constexpr int MAX_MAPPING_HEALTH = 8;
+  // Threshold before back-off kicks in, then exponential: base << (fails - thr)
+  static constexpr int MAPPING_FAIL_THRESHOLD = 3;
+  static constexpr unsigned long MAPPING_BACKOFF_BASE_MS = 1000;
+  static constexpr unsigned long MAPPING_BACKOFF_CAP_MS = 60000;
+  MappingHealth mappingHealth_[MAX_MAPPING_HEALTH] = {};
 };
 
 #endif // SSH_CHANNEL_H

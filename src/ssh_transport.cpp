@@ -278,6 +278,7 @@ void TransportPump::drainSshToLocal() {
       if (sent > 0) {
         lastBytesMoved_ += sent;
         ch.lastActivity = millis();
+        ch.firstLocalSendEagainMs = 0; // forward progress clears stall timer
         if (static_cast<size_t>(sent) < got) {
           // Partial send: put unsent data back at the front of the ring
           if (ch.toLocal->writeToFront(txBuf_ + sent, got - sent) == 0) {
@@ -296,8 +297,26 @@ void TransportPump::drainSshToLocal() {
         if (ch.toLocal->writeToFront(txBuf_, got) == 0) {
           ch.toLocal->write(txBuf_, got);
         }
+        if (ch.firstLocalSendEagainMs == 0) {
+          ch.firstLocalSendEagainMs = millis();
+        }
         break; // Socket busy, stop draining this channel
       }
+    }
+
+    // Detect a dead local socket: EAGAIN has persisted longer than the
+    // stall timeout while the ring still has data to send. Mirrors the
+    // SSH-write stall detection in drainLocalToSsh().
+    if (ch.firstLocalSendEagainMs > 0 && ch.toLocal && !ch.toLocal->empty() &&
+        (millis() - ch.firstLocalSendEagainMs) >
+            static_cast<unsigned long>(LOCAL_SEND_STALL_TIMEOUT_MS)) {
+      LOGF_W("SSH",
+             "Channel %d: local send stall timeout (%dms, toLocal=%zu)", i,
+             LOCAL_SEND_STALL_TIMEOUT_MS, ch.toLocal->size());
+      if (ch.state == ChannelSlot::State::Open) {
+        channels_->beginClose(i, ChannelCloseReason::Error);
+      }
+      ch.firstLocalSendEagainMs = millis(); // re-arm to avoid log spam
     }
   }
 }
