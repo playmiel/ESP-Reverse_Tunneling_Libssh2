@@ -70,7 +70,7 @@ private:
   static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS =
       500; // Close after remote EOF + 500ms idle (HTTP responses complete fast)
   static constexpr int EAGAIN_STALL_TIMEOUT_MS =
-      10000; // Max EAGAIN duration before close (detect dead channels faster)
+      3000; // Max EAGAIN duration before close (detect dead channels faster)
   static constexpr unsigned long EOF_GRACE_MS =
       200; // Wait after SSH EOF sent before closing
 

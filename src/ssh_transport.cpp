@@ -413,11 +413,16 @@ void TransportPump::drainLocalToSsh() {
     }
 
     // --- Step B: Read from local socket -> toRemote ring (no lock needed) ---
-    // Skip if channel is draining with EOF sent — no point reading more data
+    // Loop up to 3 reads per cycle to match Phase 1's SSH read throughput.
     if (!ch.localEof && !ch.localReadPaused && ch.localSocket >= 0 &&
         ch.toRemote && ch.eofSentMs == 0) {
-      size_t freeSpace = ch.toRemote->available();
-      if (freeSpace > 0) {
+      for (int attempt = 0; attempt < 3 && !ch.localEof && !ch.localReadPaused;
+           ++attempt) {
+        size_t freeSpace = ch.toRemote->available();
+        if (freeSpace == 0) {
+          ch.localReadPaused = true;
+          break;
+        }
         size_t readSize = freeSpace < bufSize_ ? freeSpace : bufSize_;
         ssize_t recvd = recv(ch.localSocket, rxBuf_, readSize, MSG_DONTWAIT);
         if (recvd > 0) {
@@ -427,10 +432,14 @@ void TransportPump::drainLocalToSsh() {
         } else if (recvd == 0) {
           ch.localEof = true;
           LOGF_I("SSH", "Channel %d: local EOF", i);
+          break;
         } else if (errno != EAGAIN && errno != EWOULDBLOCK) {
           ch.localEof = true;
           LOGF_W("SSH", "Channel %d: local recv error %d (%s)", i, errno,
                  strerror(errno));
+          break;
+        } else {
+          break; // EAGAIN — socket has no more data right now
         }
       }
     }
