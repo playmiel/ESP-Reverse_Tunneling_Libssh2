@@ -68,7 +68,7 @@ private:
   static constexpr unsigned long DRAIN_TIMEOUT_MS =
       15000; // Max time in Draining state
   static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS =
-      3000; // Close after remote EOF + 3s idle (HTTP responses complete fast)
+      500; // Close after remote EOF + 500ms idle (HTTP responses complete fast)
   static constexpr int EAGAIN_STALL_TIMEOUT_MS =
       10000; // Max EAGAIN duration before close (detect dead channels faster)
   static constexpr unsigned long EOF_GRACE_MS =

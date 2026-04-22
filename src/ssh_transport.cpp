@@ -95,7 +95,8 @@ void TransportPump::pumpSshTransport() {
   int maxSlots = channels_->getMaxSlots();
   bool anyReadDone = false;
 
-  for (int i = 0; i < maxSlots; ++i) {
+  for (int n = 0; n < maxSlots; ++n) {
+    int i = (n + roundRobinOffset_) % maxSlots;
     ChannelSlot &ch = channels_->getSlot(i);
     if (!ch.active || !ch.sshChannel) {
       continue;
@@ -468,6 +469,16 @@ void TransportPump::checkCloses() {
       continue;
     }
 
+    // Local closed first and outbound ring drained → begin graceful drain.
+    // Covers both clean local EOF (recv==0) and local send/recv errors.
+    // Without this, the channel would stall until the 30s inactivity timeout.
+    if (ch.localEof && !ch.remoteEof &&
+        (!ch.toRemote || ch.toRemote->empty())) {
+      LOGF_I("SSH", "Channel %d: local EOF, toRemote drained → closing", i);
+      channels_->beginClose(i, ChannelCloseReason::LocalClosed);
+      continue;
+    }
+
     // Consecutive errors on an open channel
     if (ch.consecutiveErrors > 5) {
       channels_->beginClose(i, ChannelCloseReason::Error);
@@ -476,8 +487,7 @@ void TransportPump::checkCloses() {
 
     // Half-closed timeout: remote EOF received but local hasn't closed.
     // For HTTP: the request is done, and if the local web server hasn't
-    // sent any data for 3 seconds, the response is likely complete
-    // (keep-alive connection staying open). Close proactively.
+    // sent any data for 500ms, the response is likely complete.
     if (ch.remoteEof && !ch.localEof && ch.lastActivity > 0 &&
         (now - ch.lastActivity) > HALF_CLOSE_TIMEOUT_MS) {
       bool toRemoteEmpty = !ch.toRemote || ch.toRemote->empty();
