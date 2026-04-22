@@ -381,7 +381,8 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
     FD_ZERO(&writefds);
     FD_SET(localSocket, &writefds);
     struct timeval tv;
-    tv.tv_sec = 2; // 2 second max wait (was potentially 20-75s blocking)
+    tv.tv_sec = 0;
+    tv.tv_usec = 200000; // 200ms max wait — session lock is held during this call
     tv.tv_usec = 0;
     int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
     if (sel < 0) {
