@@ -68,9 +68,14 @@ private:
   static constexpr unsigned long DRAIN_TIMEOUT_MS =
       15000; // Max time in Draining state
   static constexpr unsigned long HALF_CLOSE_TIMEOUT_MS =
-      500; // Close after remote EOF + 500ms idle (HTTP responses complete fast)
+      5000; // Close after remote EOF + 5s idle (tolerates slow backends: DB
+            // queries, external APIs). Active streams update lastActivity so
+            // this only fires on truly silent channels.
   static constexpr int EAGAIN_STALL_TIMEOUT_MS =
-      3000; // Max EAGAIN duration before close (detect dead channels faster)
+      3000; // Max SSH-write EAGAIN duration before close (detect dead channels)
+  static constexpr int LOCAL_SEND_STALL_TIMEOUT_MS =
+      8000; // Max local-socket send EAGAIN duration before close (symmetric
+            // stall detection for the SSH->local direction)
   static constexpr unsigned long EOF_GRACE_MS =
       200; // Wait after SSH EOF sent before closing
 
