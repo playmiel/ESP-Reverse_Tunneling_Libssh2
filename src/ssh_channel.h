@@ -1,6 +1,7 @@
 #ifndef SSH_CHANNEL_H
 #define SSH_CHANNEL_H
 
+#include "circuit_breaker.h"
 #include "ring_buffer.h"
 #include "ssh_config.h"
 #include <libssh2_esp.h>
@@ -64,14 +65,6 @@ struct ChannelSlot {
   unsigned long firstLocalSendEagainMs = 0; // local send EAGAIN stall start
 };
 
-// Circuit breaker state per mapping (keyed by remoteBindPort).
-// Protects against a dead local endpoint consuming every incoming channel.
-struct MappingHealth {
-  int remoteBindPort = 0; // 0 = entry unused
-  uint16_t consecutiveFails = 0;
-  unsigned long backoffUntilMs = 0;
-};
-
 // Manages a fixed-size array of ChannelSlots.
 // Handles allocation, binding (connect local socket + init ring buffers),
 // close state transitions, and iteration.
@@ -131,30 +124,23 @@ public:
 
   // Circuit breaker: returns true if the mapping identified by remoteBindPort
   // is currently in back-off due to recent local-endpoint failures.
-  bool isMappingBackedOff(int remoteBindPort, unsigned long now) const;
+  bool isMappingBackedOff(int remoteBindPort, unsigned long now) const {
+    return breaker_.isBackedOff(remoteBindPort, now);
+  }
+  // Total number of CLOSED -> OPEN transitions since construction.
+  unsigned long getBreakerTrips() const { return breaker_.totalTrips(); }
 
 private:
   int connectToLocalEndpoint(const TunnelConfig &mapping);
   void snapshotEndpoint(ChannelSlot &slot, const TunnelConfig &mapping);
   void resetSlot(int index);
 
-  // Circuit breaker bookkeeping
-  void recordMappingFailure(int remoteBindPort, unsigned long now);
-  void recordMappingSuccess(int remoteBindPort);
-  MappingHealth *findOrAllocHealth(int remoteBindPort);
-  const MappingHealth *findHealth(int remoteBindPort) const;
-
   ChannelSlot *slots_ = nullptr;
   int maxSlots_ = 0;
   int activeCount_ = 0;
   size_t ringBufferSize_ = 32 * 1024; // Per ring buffer (default 32KB)
 
-  static constexpr int MAX_MAPPING_HEALTH = 8;
-  // Threshold before back-off kicks in, then exponential: base << (fails - thr)
-  static constexpr int MAPPING_FAIL_THRESHOLD = 3;
-  static constexpr unsigned long MAPPING_BACKOFF_BASE_MS = 1000;
-  static constexpr unsigned long MAPPING_BACKOFF_CAP_MS = 60000;
-  MappingHealth mappingHealth_[MAX_MAPPING_HEALTH] = {};
+  CircuitBreaker breaker_;
 };
 
 #endif // SSH_CHANNEL_H
