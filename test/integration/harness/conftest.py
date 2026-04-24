@@ -31,7 +31,7 @@ def serial_monitor():
 def wait_tunnel_ready(serial_monitor):
     def _wait():
         return serial_monitor.wait_for(
-            lambda s: s.get("state") == "CONNECTED",
+            lambda s: s.get("state") == TH.TUNNEL_STATE_CONNECTED,
             timeout_s=TH.TUNNEL_READY_TIMEOUT_S)
     return _wait
 

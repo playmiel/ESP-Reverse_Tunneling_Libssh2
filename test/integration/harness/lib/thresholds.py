@@ -33,6 +33,9 @@ G2_BURST_BYTES = 1 * 1024 * 1024
 G2_LIVE_THROUGHPUT_TOLERANCE = 0.30
 
 TUNNEL_READY_TIMEOUT_S = 30.0
-SERIAL_PORT = "/dev/ttyUSB0"
+SERIAL_PORT = "/dev/ttyUSB1"
 SERIAL_BAUD = 115200
 DOCKER_HOST_FOR_CLIENT = "127.0.0.1"
+# String value emitted by SSHTunnel::getStateString() when the SSH session
+# is fully established (matches the firmware, not an arbitrary constant).
+TUNNEL_STATE_CONNECTED = "Connected"

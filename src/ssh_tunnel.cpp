@@ -279,6 +279,10 @@ unsigned long SSHTunnel::getBytesDropped() {
 
 int SSHTunnel::getActiveChannels() { return channels_.getActiveCount(); }
 
+unsigned long SSHTunnel::getBreakerTrips() {
+  return channels_.getBreakerTrips();
+}
+
 void SSHTunnel::setEventHandlers(const SSHTunnelEvents &handlers) {
   eventHandlers_ = handlers;
 }
