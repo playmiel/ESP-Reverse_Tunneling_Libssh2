@@ -1,6 +1,7 @@
 #pragma once
 #include "logger.h"
 #include "memory_fixes.h"
+#include "prepend_buffer.h"
 #include <cstring>
 #include <esp_heap_caps.h>
 #include <freertos/FreeRTOS.h>
@@ -29,11 +30,12 @@ private:
   // Prepend buffer: holds data that must be read BEFORE the main ring.
   // Used by writeToFront() when a partial write needs to put data back
   // at the front instead of the end (which would break FIFO ordering).
-  // Must be >= TransportPump::bufSize_ (default 8192 from ConnectionConfig).
+  // Capacity must be >= TransportPump::bufSize_ (default 8192 from
+  // ConnectionConfig). The storage is PSRAM-allocated below; PrependBuffer
+  // is bound to it via reset() in the constructor.
   static constexpr size_t PREPEND_CAP = 8192;
-  uint8_t *prepend_ = nullptr;
-  size_t prependLen_ = 0;
-  size_t prependOff_ = 0;
+  uint8_t *prependStorage_ = nullptr;
+  PrependBuffer prepend_;
 
   // Allocate in PSRAM if available, else fall back to regular malloc.
   static void *psramAlloc(size_t size) {
@@ -62,9 +64,9 @@ public:
                                        ringStorage_, ringStruct_);
     }
 
-    prepend_ = static_cast<uint8_t *>(psramAlloc(PREPEND_CAP));
+    prependStorage_ = static_cast<uint8_t *>(psramAlloc(PREPEND_CAP));
 
-    if (!handle || !prepend_) {
+    if (!handle || !prependStorage_) {
       LOGF_E("RING", "Failed to create %s (capacity=%zu bytes)", tag, capacity);
       if (handle) {
         vRingbufferDelete(handle);
@@ -74,9 +76,10 @@ public:
       ringStorage_ = nullptr;
       psramFree(ringStruct_);
       ringStruct_ = nullptr;
-      psramFree(prepend_);
-      prepend_ = nullptr;
+      psramFree(prependStorage_);
+      prependStorage_ = nullptr;
     } else {
+      prepend_.reset(prependStorage_, PREPEND_CAP);
       LOGF_I("RING", "Created %s: capacity=%zu bytes (PSRAM)", tag, capacity);
     }
   }
@@ -91,8 +94,9 @@ public:
     ringStorage_ = nullptr;
     psramFree(ringStruct_);
     ringStruct_ = nullptr;
-    psramFree(prepend_);
-    prepend_ = nullptr;
+    prepend_.reset(nullptr, 0); // unbind before freeing storage
+    psramFree(prependStorage_);
+    prependStorage_ = nullptr;
     LOGF_D("RING", "Destroyed %s", tag);
   }
 
@@ -129,16 +133,7 @@ public:
   // Returns number of bytes stored (0 if prepend buffer is occupied or too
   // large).
   size_t writeToFront(const uint8_t *data, size_t len) {
-    if (!prepend_ || !data || len == 0 || len > PREPEND_CAP)
-      return 0;
-    // Must not have existing prepend data (caller drains before next
-    // writeToFront)
-    if (prependLen_ > prependOff_)
-      return 0;
-    memcpy(prepend_, data, len);
-    prependLen_ = len;
-    prependOff_ = 0;
-    return len;
+    return prepend_.writeToFront(data, len);
   }
 
   // Read data: first drains prepend buffer, then the FreeRTOS ring.
@@ -149,16 +144,8 @@ public:
     size_t total = 0;
 
     // First: drain prepend buffer (data that was put back via writeToFront)
-    if (prependLen_ > prependOff_) {
-      size_t avail = prependLen_ - prependOff_;
-      size_t copy = avail < len ? avail : len;
-      memcpy(data, prepend_ + prependOff_, copy);
-      prependOff_ += copy;
-      total += copy;
-      if (prependOff_ >= prependLen_) {
-        prependLen_ = 0;
-        prependOff_ = 0;
-      }
+    if (!prepend_.empty()) {
+      total += prepend_.read(data, len);
       if (total >= len)
         return total;
     }
@@ -180,8 +167,7 @@ public:
   }
 
   void clear() {
-    prependLen_ = 0;
-    prependOff_ = 0;
+    prepend_.clear();
     if (!handle)
       return;
     size_t itemSize = 0;
@@ -193,8 +179,7 @@ public:
   }
 
   size_t size() const {
-    size_t prependRemain =
-        (prependLen_ > prependOff_) ? (prependLen_ - prependOff_) : 0;
+    size_t prependRemain = prepend_.pending();
     if (!handle)
       return prependRemain;
     size_t freeSpace = xRingbufferGetCurFreeSize(handle);
