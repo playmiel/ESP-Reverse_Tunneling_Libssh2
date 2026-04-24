@@ -68,6 +68,10 @@ public:
   unsigned long getBytesSent();
   unsigned long getBytesDropped();
   int getActiveChannels();
+  // Total CLOSED -> OPEN transitions of any per-mapping circuit breaker
+  // since boot. Surfaced so integration tests can structurally detect
+  // breaker engagement without parsing log text.
+  unsigned long getBreakerTrips();
   int getKeepAliveFailures() const { return session_.getKeepAliveFailures(); }
   int getSocketHealthFailures() const { return socketHealthFailures_; }
 
