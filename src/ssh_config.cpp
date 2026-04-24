@@ -1,6 +1,7 @@
 #include "ssh_config.h"
 #include "LittleFS.h"
 #include "logger.h"
+#include "ssh_config_validators.h"
 
 // Global configuration instance
 SSHConfiguration globalSSHConfig;
@@ -551,17 +552,17 @@ void SSHConfiguration::unlockConfig() const {
 }
 
 bool SSHConfiguration::validateSSHConfig() const {
-  if (sshConfig.host.length() == 0) {
+  if (!ssh_validators::isValidHostname(sshConfig.host.c_str())) {
     LOG_E("CONFIG", "SSH host cannot be empty");
     return false;
   }
 
-  if (sshConfig.port <= 0 || sshConfig.port > 65535) {
+  if (!ssh_validators::isValidPort(sshConfig.port)) {
     LOG_E("CONFIG", "SSH port must be between 1 and 65535");
     return false;
   }
 
-  if (sshConfig.username.length() == 0) {
+  if (!ssh_validators::isValidHostname(sshConfig.username.c_str())) {
     LOG_E("CONFIG", "SSH username cannot be empty");
     return false;
   }
@@ -598,23 +599,23 @@ bool SSHConfiguration::validateTunnelConfig() const {
 
   for (size_t i = 0; i < tunnelMappings.size(); ++i) {
     const TunnelConfig &mapping = tunnelMappings[i];
-    if (mapping.remoteBindHost.length() == 0) {
+    if (!ssh_validators::isValidHostname(mapping.remoteBindHost.c_str())) {
       LOGF_E("CONFIG", "Mapping #%u: Remote bind host cannot be empty",
              (unsigned)i);
       return false;
     }
-    if (mapping.remoteBindPort <= 0 || mapping.remoteBindPort > 65535) {
+    if (!ssh_validators::isValidPort(mapping.remoteBindPort)) {
       LOGF_E("CONFIG",
              "Mapping #%u: Remote bind port must be between 1 and "
              "65535",
              (unsigned)i);
       return false;
     }
-    if (mapping.localHost.length() == 0) {
+    if (!ssh_validators::isValidHostname(mapping.localHost.c_str())) {
       LOGF_E("CONFIG", "Mapping #%u: Local host cannot be empty", (unsigned)i);
       return false;
     }
-    if (mapping.localPort <= 0 || mapping.localPort > 65535) {
+    if (!ssh_validators::isValidPort(mapping.localPort)) {
       LOGF_E("CONFIG", "Mapping #%u: Local port must be between 1 and 65535",
              (unsigned)i);
       return false;
@@ -625,32 +626,34 @@ bool SSHConfiguration::validateTunnelConfig() const {
 }
 
 bool SSHConfiguration::validateConnectionConfig() const {
-  if (connectionConfig.keepAliveIntervalSec <= 0) {
+  if (!ssh_validators::isValidKeepAlive(connectionConfig.keepAliveIntervalSec)) {
     LOG_E("CONFIG", "Keep-alive interval must be positive");
     return false;
   }
 
-  if (connectionConfig.reconnectDelayMs <= 0) {
+  if (!ssh_validators::isValidReconnectDelay(connectionConfig.reconnectDelayMs)) {
     LOG_E("CONFIG", "Reconnect delay must be positive");
     return false;
   }
 
-  if (connectionConfig.maxReconnectAttempts <= 0) {
+  if (!ssh_validators::isValidMaxReconnectAttempts(
+          connectionConfig.maxReconnectAttempts)) {
     LOG_E("CONFIG", "Max reconnect attempts must be positive");
     return false;
   }
 
-  if (connectionConfig.connectionTimeoutSec <= 0) {
+  if (!ssh_validators::isValidConnectionTimeout(
+          connectionConfig.connectionTimeoutSec)) {
     LOG_E("CONFIG", "Connection timeout must be positive");
     return false;
   }
 
-  if (connectionConfig.bufferSize <= 0) {
+  if (!ssh_validators::isValidBufferSize(connectionConfig.bufferSize)) {
     LOG_E("CONFIG", "Buffer size must be positive");
     return false;
   }
 
-  if (connectionConfig.maxChannels <= 0) {
+  if (!ssh_validators::isValidMaxChannels(connectionConfig.maxChannels)) {
     LOG_E("CONFIG", "Max channels must be positive");
     return false;
   }
