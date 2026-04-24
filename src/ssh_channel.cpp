@@ -112,10 +112,27 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
   // Connect to local endpoint
   int localSocket = connectToLocalEndpoint(mapping);
   if (localSocket < 0) {
-    recordMappingFailure(mapping.remoteBindPort, millis());
+    unsigned long now = millis();
+    if (breaker_.recordFailure(mapping.remoteBindPort, now)) {
+      const auto *h = breaker_.peek(mapping.remoteBindPort);
+      if (h) {
+        unsigned long delay = h->backoffUntilMs - now;
+        LOGF_W("SSH",
+               "Mapping port %d: %u consecutive local-connect failures, "
+               "back-off %lums",
+               mapping.remoteBindPort, h->consecutiveFails, delay);
+      }
+    }
     return false;
   }
-  recordMappingSuccess(mapping.remoteBindPort);
+  {
+    const auto *h = breaker_.peek(mapping.remoteBindPort);
+    if (h && (h->consecutiveFails > 0 || h->backoffUntilMs > 0)) {
+      LOGF_I("SSH", "Mapping port %d: recovered after %u failures",
+             mapping.remoteBindPort, h->consecutiveFails);
+    }
+  }
+  breaker_.recordSuccess(mapping.remoteBindPort);
 
   // Use static tag strings so the DataRingBuffer destructor can safely log.
   // DataRingBuffer stores a const char* — stack strings become dangling.
@@ -462,90 +479,6 @@ void ChannelManager::resetSlot(int index) {
   memset(&slot.endpoint, 0, sizeof(slot.endpoint));
 }
 
-// ---------------------------------------------------------------------------
-// Circuit breaker per mapping
-// ---------------------------------------------------------------------------
-
-bool ChannelManager::isMappingBackedOff(int remoteBindPort,
-                                        unsigned long now) const {
-  const MappingHealth *h = findHealth(remoteBindPort);
-  if (!h || h->backoffUntilMs == 0) {
-    return false;
-  }
-  // Unsigned subtraction handles millis() wrap correctly: if now has
-  // passed backoffUntilMs, the difference stays small (positive).
-  return (long)(now - h->backoffUntilMs) < 0;
-}
-
-void ChannelManager::recordMappingFailure(int remoteBindPort,
-                                          unsigned long now) {
-  if (remoteBindPort == 0) {
-    return;
-  }
-  MappingHealth *h = findOrAllocHealth(remoteBindPort);
-  if (!h) {
-    return; // table full — silently skip circuit breaker for this mapping
-  }
-  if (h->consecutiveFails < 100) {
-    h->consecutiveFails++; // cap counter; the exponent below is clamped anyway
-  }
-  if (h->consecutiveFails >= MAPPING_FAIL_THRESHOLD) {
-    int exp = h->consecutiveFails - MAPPING_FAIL_THRESHOLD;
-    if (exp > 16) {
-      exp = 16; // cap shift to avoid UB
-    }
-    unsigned long delay = MAPPING_BACKOFF_BASE_MS << exp;
-    if (delay > MAPPING_BACKOFF_CAP_MS) {
-      delay = MAPPING_BACKOFF_CAP_MS;
-    }
-    h->backoffUntilMs = now + delay;
-    LOGF_W("SSH",
-           "Mapping port %d: %u consecutive local-connect failures, back-off "
-           "%lums",
-           remoteBindPort, h->consecutiveFails, delay);
-  }
-}
-
-void ChannelManager::recordMappingSuccess(int remoteBindPort) {
-  if (remoteBindPort == 0) {
-    return;
-  }
-  MappingHealth *h = findOrAllocHealth(remoteBindPort);
-  if (!h) {
-    return;
-  }
-  if (h->consecutiveFails > 0 || h->backoffUntilMs > 0) {
-    LOGF_I("SSH", "Mapping port %d: recovered after %u failures",
-           remoteBindPort, h->consecutiveFails);
-  }
-  h->consecutiveFails = 0;
-  h->backoffUntilMs = 0;
-}
-
-MappingHealth *ChannelManager::findOrAllocHealth(int remoteBindPort) {
-  // First pass: existing entry
-  for (int i = 0; i < MAX_MAPPING_HEALTH; ++i) {
-    if (mappingHealth_[i].remoteBindPort == remoteBindPort) {
-      return &mappingHealth_[i];
-    }
-  }
-  // Second pass: free slot
-  for (int i = 0; i < MAX_MAPPING_HEALTH; ++i) {
-    if (mappingHealth_[i].remoteBindPort == 0) {
-      mappingHealth_[i].remoteBindPort = remoteBindPort;
-      mappingHealth_[i].consecutiveFails = 0;
-      mappingHealth_[i].backoffUntilMs = 0;
-      return &mappingHealth_[i];
-    }
-  }
-  return nullptr;
-}
-
-const MappingHealth *ChannelManager::findHealth(int remoteBindPort) const {
-  for (int i = 0; i < MAX_MAPPING_HEALTH; ++i) {
-    if (mappingHealth_[i].remoteBindPort == remoteBindPort) {
-      return &mappingHealth_[i];
-    }
-  }
-  return nullptr;
-}
+// Circuit breaker logic now lives in src/circuit_breaker.h and is composed
+// as the breaker_ member. Public isMappingBackedOff()/getBreakerTrips()
+// forwarders are inline in the header.
