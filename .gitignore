@@ -42,3 +42,8 @@ examples/.pio/libdeps/*/
 examples/.pio/
 *.piopm
 
+# Python bytecode (integration test harness)
+__pycache__/
+*.pyc
+.pytest_cache/
+
