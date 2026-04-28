@@ -17,7 +17,11 @@ def _compose(*args: str) -> subprocess.CompletedProcess:
 
 
 def up() -> None:
-    _compose("up", "-d", "--build")
+    # --no-recreate keeps existing containers running so we don't drop the
+    # ESP32's SSH session between pytest runs. --build is intentionally
+    # NOT used here: rebuild manually with `make test-integration-down &&
+    # docker compose ... build` if you change a Dockerfile or sshd_config.
+    _compose("up", "-d", "--no-recreate")
 
 
 def down() -> None:

@@ -12,10 +12,17 @@ from lib.serial_stats import StatsMonitor
 
 @pytest.fixture(scope="session", autouse=True)
 def _docker_stack():
-    docker_ctl.up()
-    time.sleep(3)
+    """Ensure docker stack is up at session start.
+
+    Does NOT tear it down at session end: that would kill the ESP32's
+    SSH session and force a 5-30s reconnect on the next pytest invocation.
+    Use `make test-integration-down` (or `docker compose ... down`) to stop
+    the stack manually when done iterating.
+    """
+    if not docker_ctl.is_running("sshd"):
+        docker_ctl.up()
+        time.sleep(3)
     yield
-    docker_ctl.down()
 
 
 @pytest.fixture(scope="session")
@@ -30,8 +37,13 @@ def serial_monitor():
 @pytest.fixture
 def wait_tunnel_ready(serial_monitor):
     def _wait():
+        # Wait for both: session connected AND no leftover active channels
+        # from a prior test. Without the ch==0 check, opening a new channel
+        # too early after the previous one closed sometimes fails with
+        # BrokenPipe (ESP32 still tearing down the previous slot).
         return serial_monitor.wait_for(
-            lambda s: s.get("state") == TH.TUNNEL_STATE_CONNECTED,
+            lambda s: (s.get("state") == TH.TUNNEL_STATE_CONNECTED
+                       and s.get("ch", 99) == 0),
             timeout_s=TH.TUNNEL_READY_TIMEOUT_S)
     return _wait
 
