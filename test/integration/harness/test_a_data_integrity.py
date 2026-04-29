@@ -100,3 +100,79 @@ def test_echo_data_integrity(size, chunk, wait_tunnel_ready, tunnel_socket,
     dropped_delta = final.get("dropped", 0) - baseline.get("dropped", 0)
     assert dropped_delta == 0, (
         f"ESP32 reports {dropped_delta} bytes dropped during transfer")
+
+
+def _run_one_echo_transfer(open_socket_fn, chunk_size: int, total_bytes: int,
+                           seed: int = TH.A_PRNG_SEED) -> None:
+    """One full open -> send -> recv -> verify -> close cycle.
+
+    Raises on byte loss, length mismatch, or socket errors. Used by the
+    Bug #1 narrowing tests below to drive many cycles in a row through
+    the same pytest session.
+    """
+    payload = make_stream(seed, total_bytes)
+    sock = open_socket_fn(22080, timeout_s=120.0)
+    try:
+        received = _send_recv_echo(sock, payload, chunk_size)
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
+    if len(received) != total_bytes:
+        raise AssertionError(
+            f"expected {total_bytes} bytes, got {len(received)}")
+    mismatches, first_off = verify_stream(seed, received)
+    if mismatches:
+        raise AssertionError(
+            f"{mismatches} byte mismatches; first at offset {first_off}")
+
+
+@pytest.mark.parametrize("chunk_size,total_bytes,cycles", [
+    (1024, 100 * 1024, 10),
+])
+def test_echo_repeat_small(chunk_size, total_bytes, cycles,
+                           wait_tunnel_ready, tunnel_socket,
+                           reset_stats_baseline, serial_monitor):
+    """Bug #1 narrowing: 10 small-chunk transfers back-to-back.
+
+    No inter-cycle sleep — the goal is to reproduce the byte-loss /
+    BrokenPipe race that appears when channels are torn down and
+    re-opened rapidly on the same pytest session.
+    """
+    wait_tunnel_ready()
+    failures: list[tuple[int, str]] = []
+    for cycle in range(cycles):
+        try:
+            _run_one_echo_transfer(tunnel_socket, chunk_size, total_bytes)
+        except (AssertionError, ConnectionError, BrokenPipeError, OSError) as e:
+            failures.append((cycle, repr(e)))
+    if failures:
+        raise AssertionError(
+            f"{len(failures)}/{cycles} cycles failed (chunk={chunk_size}, "
+            f"total={total_bytes}): {failures}")
+
+
+@pytest.mark.parametrize("chunk_size,total_bytes,cycles", [
+    (256, 1 * 1024 * 1024, 5),
+])
+def test_echo_repeat_mid(chunk_size, total_bytes, cycles,
+                         wait_tunnel_ready, tunnel_socket,
+                         reset_stats_baseline, serial_monitor):
+    """Bug #1 narrowing: 5 medium-volume transfers at 256B chunks.
+
+    Same structure as test_echo_repeat_small but pushes more total
+    volume through the small-chunk code path.
+    """
+    wait_tunnel_ready()
+    failures: list[tuple[int, str]] = []
+    for cycle in range(cycles):
+        try:
+            _run_one_echo_transfer(tunnel_socket, chunk_size, total_bytes)
+        except (AssertionError, ConnectionError, BrokenPipeError, OSError) as e:
+            failures.append((cycle, repr(e)))
+    if failures:
+        raise AssertionError(
+            f"{len(failures)}/{cycles} cycles failed (chunk={chunk_size}, "
+            f"total={total_bytes}): {failures}")
