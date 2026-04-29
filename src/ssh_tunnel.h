@@ -68,6 +68,11 @@ public:
   unsigned long getBytesSent();
   unsigned long getBytesDropped();
   int getActiveChannels();
+  // Number of reverse-tunnel listeners currently bound on the remote side.
+  // Test/diagnostic helper; surfaces SSHSession::getActiveListenerCount().
+  int getActiveListenerCount() const {
+    return session_.getActiveListenerCount();
+  }
   // Total CLOSED -> OPEN transitions of any per-mapping circuit breaker
   // since boot. Surfaced so integration tests can structurally detect
   // breaker engagement without parsing log text.

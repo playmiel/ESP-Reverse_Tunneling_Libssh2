@@ -67,6 +67,16 @@ public:
   int getBoundPort() const { return boundPort_; }
   const std::vector<ListenerEntry> &getListeners() const { return listeners_; }
 
+  // Number of listeners that are currently bound on the remote side.
+  // Test/diagnostic only; cheap to call.
+  int getActiveListenerCount() const {
+    int n = 0;
+    for (const auto &e : listeners_) {
+      if (e.listener != nullptr) ++n;
+    }
+    return n;
+  }
+
 private:
   // Connection steps
   bool tcpConnect(const SSHServerConfig &sshConfig);

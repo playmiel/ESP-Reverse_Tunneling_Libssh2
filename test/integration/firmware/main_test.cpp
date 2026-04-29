@@ -94,11 +94,12 @@ void loop() {
 
     Serial.printf(
         "STATS_TEST t=%lu state=%s ch=%d sent=%lu recv=%lu dropped=%lu "
-        "heap=%u minheap=%u largest=%u breaker_trips=%lu\n",
+        "heap=%u minheap=%u largest=%u breaker_trips=%lu listeners_ready=%d\n",
         now, tunnel.getStateString().c_str(), tunnel.getActiveChannels(),
         tunnel.getBytesSent(), tunnel.getBytesReceived(),
         tunnel.getBytesDropped(), (unsigned)freeHeap, (unsigned)minHeap,
-        (unsigned)largest, tunnel.getBreakerTrips());
+        (unsigned)largest, tunnel.getBreakerTrips(),
+        tunnel.getActiveListenerCount());
   }
 
   vTaskDelay(pdMS_TO_TICKS(1));
