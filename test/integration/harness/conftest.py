@@ -36,14 +36,17 @@ def serial_monitor():
 
 @pytest.fixture
 def wait_tunnel_ready(serial_monitor):
-    def _wait():
-        # Wait for both: session connected AND no leftover active channels
-        # from a prior test. Without the ch==0 check, opening a new channel
-        # too early after the previous one closed sometimes fails with
-        # BrokenPipe (ESP32 still tearing down the previous slot).
+    def _wait(expected_listeners: int = TH.EXPECTED_LISTENER_COUNT):
+        # Wait for: session connected, no leftover active channels from a
+        # prior test, AND all reverse-tunnel listeners are bound on sshd.
+        # The listeners_ready check guards against the "Connected but
+        # zero-forward" state caused by stale tcpip-forward listeners
+        # surviving an ESP32 reconnect (Bug #2 in 2026-04-28 baseline
+        # report).
         return serial_monitor.wait_for(
             lambda s: (s.get("state") == TH.TUNNEL_STATE_CONNECTED
-                       and s.get("ch", 99) == 0),
+                       and s.get("ch", 99) == 0
+                       and s.get("listeners_ready", -1) == expected_listeners),
             timeout_s=TH.TUNNEL_READY_TIMEOUT_S)
     return _wait
 

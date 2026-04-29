@@ -42,6 +42,9 @@ TUNNEL_READY_TIMEOUT_S = 30.0
 SERIAL_PORT = "/dev/ttyUSB1"
 SERIAL_BAUD = 115200
 DOCKER_HOST_FOR_CLIENT = "127.0.0.1"
+# Number of reverse-tunnel listeners the test firmware should bind:
+# 22080 (echo), 22081 (slow_echo), 22082 (placeholder / dead-port for G1).
+EXPECTED_LISTENER_COUNT = 3
 # String value emitted by SSHTunnel::getStateString() when the SSH session
 # is fully established (matches the firmware, not an arbitrary constant).
 TUNNEL_STATE_CONNECTED = "Connected"
