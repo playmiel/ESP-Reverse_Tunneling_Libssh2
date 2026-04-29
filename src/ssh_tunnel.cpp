@@ -696,6 +696,8 @@ void SSHTunnel::enterErrorState(const char *reason) {
     }
   }
 
+  // Closes session; also calls cancelAllListeners() so sshd can release
+  // tcpip-forward bindings before the next reconnect attempt (Bug #2).
   session_.disconnect();
   for (int i = 0; i < channels_.getMaxSlots(); ++i) {
     channels_.abandonSlot(i, ChannelCloseReason::Error);
