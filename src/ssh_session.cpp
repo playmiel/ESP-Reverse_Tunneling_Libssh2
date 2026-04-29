@@ -714,15 +714,39 @@ bool SSHSession::createListenerForMapping(const TunnelConfig &mapping,
   }
 
   if (!handle) {
-    LOGF_E("SSH", "Unable to create reverse listener for %s:%d -> %s:%d",
+    // Fetch libssh2's last error string for diagnostics. If sshd refused
+    // the bind because a previous listener is still bound (Bug #2 in the
+    // 2026-04-28 baseline report), the message will be along the lines
+    // of "channel_setup_fwd_listener_tcpip: cannot listen to port: <N>".
+    String errDetail;
+    if (lock(pdMS_TO_TICKS(100))) {
+      char *errmsg = nullptr;
+      int errlen = 0;
+      libssh2_session_last_error(session_, &errmsg, &errlen, 0);
+      if (errmsg) {
+        errDetail = errmsg;
+      }
+      unlock();
+    }
+    LOGF_E("SSH",
+           "Unable to create reverse listener for %s:%d -> %s:%d "
+           "(libssh2: %s) — possible stale listener on sshd; check "
+           "ClientAliveInterval / ClientAliveCountMax.",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
-           mapping.localHost.c_str(), mapping.localPort);
+           mapping.localHost.c_str(), mapping.localPort,
+           errDetail.length() ? errDetail.c_str() : "no detail");
     return false;
   }
 
   entry.listener = handle;
   entry.mapping = mapping;
   entry.boundPort = boundPortResult;
+  if (boundPortResult != bindPort && bindPort != 0) {
+    LOGF_W("SSH",
+           "Listener bound on port %d but %d was requested — sshd may have "
+           "fallen back to a random port",
+           boundPortResult, bindPort);
+  }
   LOGF_I("SSH", "Reverse listener ready %s:%d (bound %d) -> %s:%d",
          mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
          boundPortResult, mapping.localHost.c_str(), mapping.localPort);
