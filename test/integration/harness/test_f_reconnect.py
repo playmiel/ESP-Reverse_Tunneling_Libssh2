@@ -7,11 +7,52 @@ verify no panic appeared in the serial log.
 """
 from __future__ import annotations
 
+import socket
 import threading
 import time
 
 from lib import docker_ctl, thresholds as TH
 from lib.pattern import make_stream
+
+
+def _probe_post_reconnect(open_socket_fn, mapping_port, payload,
+                          attempts=3, gap_s=5.0, sock_timeout_s=10.0):
+    """After a reconnect, sshd may take a few seconds to re-establish the
+    tcpip-forward listeners even though the ESP32 reports state=Connected
+    and listeners_ready==N. Retry the probe up to `attempts` times.
+
+    Bug #2 in 2026-04-28 baseline report.
+    """
+    last_err = None
+    for i in range(attempts):
+        try:
+            s = open_socket_fn(mapping_port, timeout_s=sock_timeout_s)
+            try:
+                s.sendall(payload)
+                s.shutdown(socket.SHUT_WR)
+                got = b""
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    got += chunk
+                if got == payload:
+                    return got
+                last_err = AssertionError(
+                    f"echo mismatch on attempt {i+1}: "
+                    f"got {len(got)} of {len(payload)} bytes")
+            finally:
+                try:
+                    s.close()
+                except OSError:
+                    pass
+        except (ConnectionResetError, BrokenPipeError, socket.timeout,
+                OSError) as e:
+            last_err = e
+        if i < attempts - 1:
+            time.sleep(gap_s)
+    raise AssertionError(
+        f"post-reconnect probe failed after {attempts} attempts: {last_err!r}")
 
 
 def test_reconnect_after_sshd_kill(wait_tunnel_ready, tunnel_socket,
@@ -61,12 +102,5 @@ def test_reconnect_after_sshd_kill(wait_tunnel_ready, tunnel_socket,
     # New transfer must succeed after reconnect. Wait for ch=0 first so the
     # killed channel has been cleaned up before we open a new one.
     serial_monitor.wait_for(lambda s: s.get("ch", 99) == 0, timeout_s=10.0)
-    sock2 = tunnel_socket(22080, timeout_s=10.0)
-    sock2.sendall(b"hello-after-reconnect")
-    sock2.settimeout(10.0)
-    try:
-        echoed = sock2.recv(64)
-    finally:
-        sock2.close()
-    assert echoed.startswith(b"hello-after-reconnect"), (
-        f"new transfer after reconnect failed: got {echoed!r}")
+    probe_payload = b"hello-after-reconnect-%d" % int(time.time())
+    _probe_post_reconnect(tunnel_socket, 22080, probe_payload)
