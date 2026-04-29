@@ -1,4 +1,5 @@
 #include "ssh_channel.h"
+#include "channel_slot_alloc.h"
 #include "memory_fixes.h"
 #include "network_optimizations.h"
 #include <arpa/inet.h>
@@ -76,16 +77,17 @@ int ChannelManager::allocateSlot() {
     return -1;
   }
 
-  // First pass: find inactive slot
-  for (int i = 0; i < maxSlots_; ++i) {
-    if (!slots_[i].active) {
-      LOGF_D("SSH", "Channel slot %d selected (inactive)", i);
-      return i;
-    }
+  unsigned long now = millis();
+
+  // First pass: find inactive slot, skipping any slot that is still in
+  // its post-finalize cooldown window (Bug #1 guard).
+  int idx = channel_alloc::findFreeSlot(slots_, maxSlots_, now);
+  if (idx >= 0) {
+    LOGF_D("SSH", "Channel slot %d selected (inactive)", idx);
+    return idx;
   }
 
   // Second pass: recycle stale slot (30s inactivity)
-  unsigned long now = millis();
   for (int i = 0; i < maxSlots_; ++i) {
     if (slots_[i].active && (now - slots_[i].lastActivity) > 30000) {
       LOGF_I("SSH", "Recycling stale channel %d", i);
@@ -282,6 +284,9 @@ void ChannelManager::finalizeClose(int slotIndex) {
 
   slot.active = false;
   slot.state = ChannelSlot::State::Closed;
+  // Stamp the finalize time so allocateSlot's cooldown can guard against
+  // immediate re-bind racing libssh2's channel teardown.
+  slot.lastFinalizeMs = millis();
   activeCount_--;
 
   LOGF_I("SSH", "Channel %d closed (active: %d/%d)", slotIndex, activeCount_,
