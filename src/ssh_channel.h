@@ -63,6 +63,14 @@ struct ChannelSlot {
   int eagainCount = 0;
   unsigned long firstEagainMs = 0;          // SSH write EAGAIN stall start
   unsigned long firstLocalSendEagainMs = 0; // local send EAGAIN stall start
+
+  // millis() at the most recent finalizeClose; 0 if never finalized.
+  // Used by allocateSlot (channel_alloc::findFreeSlot) to enforce a short
+  // cooldown after teardown so libssh2's channel free can settle before
+  // the slot is re-bound (Bug #1 in 2026-04-28 baseline report).
+  // Intentionally NOT reset by resetSlot — the cooldown must survive
+  // a slot's transient lifecycle.
+  unsigned long lastFinalizeMs = 0;
 };
 
 // Manages a fixed-size array of ChannelSlots.
