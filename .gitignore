@@ -47,3 +47,6 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Local-only design docs / specs / plans / test reports
+docs/superpowers/
+
