@@ -472,7 +472,15 @@ void TransportPump::drainLocalToSsh() {
     if (ch.eofSentMs > 0) {
       continue;
     }
-    if (ch.toRemote && !ch.toRemote->empty()) {
+    // Per-channel write backoff: when this slot is in EAGAIN backoff
+    // (set only when toRemote is at high-water — the slow-consumer
+    // signature), skip Step A so sibling channels can claim the
+    // freed session capacity. Step B (read from local socket) still
+    // runs — toRemote backpressure stops local reads naturally once
+    // the ring fills further. (G2 backpressure fix.)
+    bool writeBackoffActive =
+        (ch.nextWriteRetryMs > 0 && millis() < ch.nextWriteRetryMs);
+    if (!writeBackoffActive && ch.toRemote && !ch.toRemote->empty()) {
       if (session_->lock(pdMS_TO_TICKS(20))) {
         size_t budget = MAX_WRITE_PER_CHANNEL;
         bool hitEagain = false;
@@ -497,6 +505,7 @@ void TransportPump::drainLocalToSsh() {
             ch.lastActivity = ch.lastSuccessfulWrite;
             ch.eagainCount = 0;
             ch.firstEagainMs = 0;
+            ch.nextWriteRetryMs = 0;
             ch.consecutiveErrors = 0;
             if (static_cast<size_t>(written) < got) {
               if (ch.toRemote->writeToFront(txBuf_ + written, got - written) ==
@@ -512,6 +521,15 @@ void TransportPump::drainLocalToSsh() {
             ch.eagainCount++;
             if (ch.firstEagainMs == 0)
               ch.firstEagainMs = millis();
+            // Only arm the per-channel backoff when toRemote is at
+            // high-water — that's the signature of a slow downstream
+            // peer congesting the session, not just a transient
+            // session-level EAGAIN that the live channel also sees.
+            size_t cap = ch.toRemote->capacityBytes();
+            size_t used = ch.toRemote->size();
+            if (cap > 0 && used > cap * BACKPRESSURE_HIGH_PCT / 100) {
+              ch.nextWriteRetryMs = millis() + EAGAIN_WRITE_BACKOFF_MS;
+            }
             hitEagain = true;
           } else {
             if (ch.toRemote->writeToFront(txBuf_, got) == 0) {
