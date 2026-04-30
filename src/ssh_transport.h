@@ -105,12 +105,6 @@ private:
             // this only fires on truly silent channels.
   static constexpr int EAGAIN_STALL_TIMEOUT_MS =
       3000; // Max SSH-write EAGAIN duration before close (detect dead channels)
-  static constexpr unsigned long EAGAIN_WRITE_BACKOFF_MS =
-      5; // After SSH write EAGAIN, defer this channel's next write attempt
-         // by this many ms so sibling channels can use the freed session
-         // capacity. Targets the G2 starvation pattern where one slow
-         // peer with persistent partial-write progress monopolises the
-         // shared SSH session's TCP send buffer.
   static constexpr int LOCAL_SEND_STALL_TIMEOUT_MS =
       8000; // Max local-socket send EAGAIN duration before close (symmetric
             // stall detection for the SSH->local direction)
