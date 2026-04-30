@@ -472,7 +472,15 @@ void TransportPump::drainLocalToSsh() {
     if (ch.eofSentMs > 0) {
       continue;
     }
-    if (ch.toRemote && !ch.toRemote->empty()) {
+    // Per-channel write backoff: a recent EAGAIN told us the SSH session
+    // can't accept more bytes for this slot right now. Skip Step A on
+    // it for EAGAIN_WRITE_BACKOFF_MS so sibling channels can claim the
+    // freed session capacity (G2 backpressure fix). Step B (read from
+    // local socket) still runs — toRemote backpressure stops local reads
+    // naturally once the ring fills.
+    bool writeBackoffActive =
+        (ch.nextWriteRetryMs > 0 && millis() < ch.nextWriteRetryMs);
+    if (!writeBackoffActive && ch.toRemote && !ch.toRemote->empty()) {
       if (session_->lock(pdMS_TO_TICKS(20))) {
         size_t budget = MAX_WRITE_PER_CHANNEL;
         bool hitEagain = false;
@@ -497,6 +505,7 @@ void TransportPump::drainLocalToSsh() {
             ch.lastActivity = ch.lastSuccessfulWrite;
             ch.eagainCount = 0;
             ch.firstEagainMs = 0;
+            ch.nextWriteRetryMs = 0;
             ch.consecutiveErrors = 0;
             if (static_cast<size_t>(written) < got) {
               if (ch.toRemote->writeToFront(txBuf_ + written, got - written) ==
@@ -512,6 +521,7 @@ void TransportPump::drainLocalToSsh() {
             ch.eagainCount++;
             if (ch.firstEagainMs == 0)
               ch.firstEagainMs = millis();
+            ch.nextWriteRetryMs = millis() + EAGAIN_WRITE_BACKOFF_MS;
             hitEagain = true;
           } else {
             if (ch.toRemote->writeToFront(txBuf_, got) == 0) {
