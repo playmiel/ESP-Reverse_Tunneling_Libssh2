@@ -42,6 +42,8 @@ struct ChannelSlot {
   enum class State { Open, Draining, Closed } state = State::Closed;
   bool localEof = false;  // Local socket sent EOF / closed
   bool remoteEof = false; // SSH channel sent EOF
+  bool localShutdownSent =
+      false; // shutdown(SHUT_WR) issued on local socket after remote EOF
   unsigned long closeStartMs = 0;
   unsigned long eofSentMs = 0; // When SSH EOF was sent (0 = not yet sent)
   ChannelCloseReason closeReason = ChannelCloseReason::Unknown;

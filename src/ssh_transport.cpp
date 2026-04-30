@@ -513,6 +513,17 @@ void TransportPump::checkCloses() {
       continue;
     }
 
+    // Forward SSH EOF to local socket as soon as our outbound ring is
+    // drained. Without this, echo-style backends never close their side
+    // (they only echo what we send, so they have nothing to volunteer),
+    // and we burn the full HALF_CLOSE_TIMEOUT_MS on every cycle, blocking
+    // back-to-back tunnel reuse (Bug #1, Suspect B).
+    if (ch.remoteEof && !ch.localShutdownSent && ch.localSocket >= 0 &&
+        (!ch.toRemote || ch.toRemote->empty())) {
+      ::shutdown(ch.localSocket, SHUT_WR);
+      ch.localShutdownSent = true;
+    }
+
     // Half-closed timeout: remote EOF received but local hasn't closed.
     // For HTTP: the request is done, and if the local web server hasn't
     // sent any data for 500ms, the response is likely complete.
