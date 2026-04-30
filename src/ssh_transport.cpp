@@ -120,12 +120,14 @@ void TransportPump::pumpSshTransport() {
         LOGF_D("SSH", "Channel %d: SSH read resumed (toLocal=%zu)", i,
                ch.toLocal->size());
       } else {
-        // Pump transport with a small read — store data safely in toLocal
-        // (ring is at ~75%, not 100%, so there's room for a small read).
-        // This processes WINDOW_ADJUST packets that unblock SSH writes.
+        // Pump transport with a 1-byte read — keeps remote-EOF detection
+        // (rc == 0 path) and processes WINDOW_ADJUST packets, but does
+        // NOT meaningfully grow this channel's receive window. Larger
+        // pumps (the previous 64 B) kept prompting sshd to refill a
+        // backend that can't keep up, choking sibling channels at the
+        // session level (Bug "G2 slow consumer starves live channel").
         if (ch.toLocal && ch.toLocal->available() > 0) {
-          size_t pumpSize =
-              ch.toLocal->available() < 64 ? ch.toLocal->available() : 64;
+          size_t pumpSize = 1;
           int rc =
               libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, pumpSize);
           anyReadDone = true;
