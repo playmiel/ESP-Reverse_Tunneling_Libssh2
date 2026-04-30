@@ -466,7 +466,6 @@ void ChannelManager::resetSlot(int index) {
   slot.localEof = false;
   slot.remoteEof = false;
   slot.localShutdownSent = false;
-  slot.nextWriteRetryMs = 0;
   slot.closeStartMs = 0;
   slot.eofSentMs = 0;
   slot.closeReason = ChannelCloseReason::Unknown;

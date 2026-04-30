@@ -65,12 +65,6 @@ struct ChannelSlot {
   int eagainCount = 0;
   unsigned long firstEagainMs = 0;          // SSH write EAGAIN stall start
   unsigned long firstLocalSendEagainMs = 0; // local send EAGAIN stall start
-  // Per-channel SSH-write backoff: when an EAGAIN hits AND this channel's
-  // toRemote ring is at high-water (i.e. a slow downstream peer is
-  // congesting the session), defer next writes on this slot until this
-  // timestamp so sibling channels can claim freed session capacity
-  // (G2 backpressure fix).
-  unsigned long nextWriteRetryMs = 0;
 
   // millis() at the most recent finalizeClose; 0 if never finalized.
   // Used by allocateSlot (channel_alloc::findFreeSlot) to enforce a short
