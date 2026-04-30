@@ -90,6 +90,14 @@ public:
   // Backpressure query for adaptive delay in caller loop
   bool hasAnyBackpressure() const;
 
+#ifdef TUNNEL_INSTRUMENT
+  // Test-only: dump cumulative TransportPump instrumentation (lock waits,
+  // phase timings, per-channel libssh2 read/write counters) into out.
+  size_t dumpTransportInstrumentation(char *out, size_t outSize) const {
+    return transport_.formatInstrumentation(out, outSize);
+  }
+#endif
+
 private:
   // Accept pending SSH channel and bind to a local socket
   bool handleNewConnection();

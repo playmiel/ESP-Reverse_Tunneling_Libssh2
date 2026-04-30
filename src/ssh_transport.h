@@ -6,6 +6,31 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#ifdef TUNNEL_INSTRUMENT
+#include <libssh2.h>
+// Per-channel cumulative timings around libssh2 syscalls. Microseconds.
+struct InstrChannel {
+  uint64_t read_us = 0;
+  uint32_t read_calls = 0;
+  uint32_t read_eagain = 0;
+  uint32_t read_zero = 0; // EOF detections
+  uint64_t read_bytes = 0;
+  uint64_t write_us = 0;
+  uint32_t write_calls = 0;
+  uint32_t write_eagain = 0;
+  uint64_t write_bytes = 0;
+};
+struct InstrSession {
+  uint64_t lock_wait_us = 0;
+  uint32_t lock_calls = 0;   // successful acquisitions
+  uint32_t lock_failed = 0;  // timed-out acquisitions
+  uint64_t phase1_us = 0;    // total time in pumpSshTransport
+  uint32_t phase1_cycles = 0;
+  uint64_t phase3_us = 0;    // total time in drainLocalToSsh
+  uint32_t phase3_cycles = 0;
+};
+#endif
+
 // TransportPump: the single data movement engine.
 // Called once per loop() iteration. Handles all SSH <-> Local data flow
 // using round-robin fair scheduling across channels.
@@ -44,6 +69,13 @@ public:
   };
   static constexpr int MAX_CLOSE_EVENTS = 32;
   int consumeCloseEvents(CloseEvent *out, int maxEvents);
+
+#ifdef TUNNEL_INSTRUMENT
+  static constexpr int INSTR_MAX_CHANNELS = 8;
+  // Format current cumulative instrumentation into a single line. Returns
+  // bytes written (excluding NUL). Test-firmware only.
+  size_t formatInstrumentation(char *out, size_t outSize) const;
+#endif
 
 private:
   // Phase 1: Read from SSH channels into toLocal ring buffers.
@@ -92,6 +124,16 @@ private:
   // Pending close events (filled by checkCloses, drained by consumeCloseEvents)
   CloseEvent pendingCloseEvents_[MAX_CLOSE_EVENTS];
   int pendingCloseCount_ = 0;
+
+#ifdef TUNNEL_INSTRUMENT
+  // Wrap libssh2_channel_read with timing + counters. slotIdx may be -1 if
+  // unknown (won't be recorded).
+  int instrRead(int slotIdx, LIBSSH2_CHANNEL *ch, char *buf, size_t sz);
+  int instrWrite(int slotIdx, LIBSSH2_CHANNEL *ch, const char *buf, size_t sz);
+
+  InstrChannel instrCh_[INSTR_MAX_CHANNELS];
+  InstrSession instrSess_;
+#endif
 };
 
 #endif // SSH_TRANSPORT_H
