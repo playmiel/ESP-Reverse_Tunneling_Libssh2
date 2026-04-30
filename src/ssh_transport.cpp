@@ -112,7 +112,16 @@ void TransportPump::pumpSshTransport() {
       continue;
     }
 
-    // Skip if toLocal ring is paused (too full)
+    // Skip if toLocal ring is paused (too full).
+    // We do NOT pump-read here: any libssh2_channel_read on this slot
+    // would (a) advance the receive window, prompting sshd to send more
+    // for a backend that can't keep up, and (b) sit on the session lock
+    // while it digests the channel's already-queued packets — starving
+    // sibling channels (Bug "G2 slow consumer starves live channel").
+    // libssh2_channel_read on any other channel still pumps the SSH
+    // transport for the whole session (incl. WINDOW_ADJUST packets), so
+    // outbound writes on sibling channels are not blocked by skipping
+    // this slot.
     if (ch.sshReadPaused) {
       if (ch.toLocal && ch.toLocal->size() < ch.toLocal->capacityBytes() *
                                                  BACKPRESSURE_LOW_PCT / 100) {
@@ -120,37 +129,6 @@ void TransportPump::pumpSshTransport() {
         LOGF_D("SSH", "Channel %d: SSH read resumed (toLocal=%zu)", i,
                ch.toLocal->size());
       } else {
-        // Pump transport with a small read — store data safely in toLocal
-        // (ring is at ~75%, not 100%, so there's room for a small read).
-        // This processes WINDOW_ADJUST packets that unblock SSH writes.
-        if (ch.toLocal && ch.toLocal->available() > 0) {
-          size_t pumpSize =
-              ch.toLocal->available() < 64 ? ch.toLocal->available() : 64;
-          int rc =
-              libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, pumpSize);
-          anyReadDone = true;
-          if (rc > 0) {
-            size_t written = ch.toLocal->write(rxBuf_, rc);
-            ch.totalBytesReceived += written;
-            lastBytesMoved_ += written;
-            ch.lastSuccessfulRead = millis();
-            ch.lastActivity = ch.lastSuccessfulRead;
-            ch.eagainCount = 0;
-            ch.firstEagainMs = 0;
-            ch.consecutiveErrors = 0;
-          } else if (rc == 0) {
-            ch.remoteEof = true;
-            LOGF_I("SSH", "Channel %d: remote EOF (paused read)", i);
-          } else if (rc != LIBSSH2_ERROR_EAGAIN) {
-            ch.consecutiveErrors++;
-            LOGF_W("SSH", "Channel %d: SSH read error %d (errors=%d)", i, rc,
-                   ch.consecutiveErrors);
-            if (ch.consecutiveErrors > 3 &&
-                ch.state == ChannelSlot::State::Open) {
-              channels_->beginClose(i, ChannelCloseReason::Error);
-            }
-          }
-        }
         continue;
       }
     }
