@@ -100,6 +100,15 @@ void loop() {
         tunnel.getBytesDropped(), (unsigned)freeHeap, (unsigned)minHeap,
         (unsigned)largest, tunnel.getBreakerTrips(),
         tunnel.getActiveListenerCount());
+#ifdef TUNNEL_INSTRUMENT
+    {
+      char instrBuf[640];
+      size_t n = tunnel.dumpTransportInstrumentation(instrBuf, sizeof(instrBuf));
+      if (n > 0) {
+        Serial.printf("INSTR_TEST t=%lu %s\n", now, instrBuf);
+      }
+    }
+#endif
   }
 
   vTaskDelay(pdMS_TO_TICKS(1));
