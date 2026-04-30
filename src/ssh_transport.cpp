@@ -3,11 +3,6 @@
 #include <errno.h>
 #include <sys/socket.h>
 
-#ifdef TUNNEL_INSTRUMENT
-#include <esp_timer.h>
-#include <stdio.h>
-#endif
-
 // ---------------------------------------------------------------------------
 // TransportPump
 // ---------------------------------------------------------------------------
@@ -74,83 +69,6 @@ bool TransportPump::hasAnyBackpressure() const {
   return false;
 }
 
-#ifdef TUNNEL_INSTRUMENT
-int TransportPump::instrRead(int slotIdx, LIBSSH2_CHANNEL *ch, char *buf,
-                             size_t sz) {
-  int64_t t0 = esp_timer_get_time();
-  int rc = libssh2_channel_read(ch, buf, sz);
-  int64_t dt = esp_timer_get_time() - t0;
-  if (slotIdx >= 0 && slotIdx < INSTR_MAX_CHANNELS) {
-    InstrChannel &ic = instrCh_[slotIdx];
-    ic.read_us += dt;
-    ic.read_calls++;
-    if (rc == LIBSSH2_ERROR_EAGAIN) {
-      ic.read_eagain++;
-    } else if (rc == 0) {
-      ic.read_zero++;
-    } else if (rc > 0) {
-      ic.read_bytes += rc;
-    }
-  }
-  return rc;
-}
-
-int TransportPump::instrWrite(int slotIdx, LIBSSH2_CHANNEL *ch, const char *buf,
-                              size_t sz) {
-  int64_t t0 = esp_timer_get_time();
-  int rc = libssh2_channel_write(ch, buf, sz);
-  int64_t dt = esp_timer_get_time() - t0;
-  if (slotIdx >= 0 && slotIdx < INSTR_MAX_CHANNELS) {
-    InstrChannel &ic = instrCh_[slotIdx];
-    ic.write_us += dt;
-    ic.write_calls++;
-    if (rc == LIBSSH2_ERROR_EAGAIN) {
-      ic.write_eagain++;
-    } else if (rc > 0) {
-      ic.write_bytes += rc;
-    }
-  }
-  return rc;
-}
-
-size_t TransportPump::formatInstrumentation(char *out, size_t outSize) const {
-  // Single-line format. Session-level + first 3 channels.
-  size_t off = 0;
-  int n = snprintf(
-      out + off, outSize - off,
-      "lock_us=%llu lock_n=%u lock_fail=%u p1_us=%llu p1_n=%u p3_us=%llu p3_n=%u",
-      (unsigned long long)instrSess_.lock_wait_us, instrSess_.lock_calls,
-      instrSess_.lock_failed, (unsigned long long)instrSess_.phase1_us,
-      instrSess_.phase1_cycles, (unsigned long long)instrSess_.phase3_us,
-      instrSess_.phase3_cycles);
-  if (n < 0)
-    return off;
-  off += (size_t)n;
-  if (off >= outSize)
-    return outSize - 1;
-  for (int i = 0; i < INSTR_MAX_CHANNELS && off < outSize - 1; ++i) {
-    const InstrChannel &ic = instrCh_[i];
-    if (ic.read_calls == 0 && ic.write_calls == 0)
-      continue; // skip silent slots
-    n = snprintf(
-        out + off, outSize - off,
-        " ch%d_r_us=%llu ch%d_r_n=%u ch%d_r_eag=%u ch%d_r_zero=%u "
-        "ch%d_r_b=%llu ch%d_w_us=%llu ch%d_w_n=%u ch%d_w_eag=%u ch%d_w_b=%llu",
-        i, (unsigned long long)ic.read_us, i, ic.read_calls, i, ic.read_eagain,
-        i, ic.read_zero, i, (unsigned long long)ic.read_bytes, i,
-        (unsigned long long)ic.write_us, i, ic.write_calls, i, ic.write_eagain,
-        i, (unsigned long long)ic.write_bytes);
-    if (n < 0)
-      break;
-    off += (size_t)n;
-  }
-  if (off >= outSize)
-    off = outSize - 1;
-  out[off] = '\0';
-  return off;
-}
-#endif // TUNNEL_INSTRUMENT
-
 int TransportPump::consumeCloseEvents(CloseEvent *out, int maxEvents) {
   int count = pendingCloseCount_ < maxEvents ? pendingCloseCount_ : maxEvents;
   for (int i = 0; i < count; ++i) {
@@ -170,21 +88,9 @@ int TransportPump::consumeCloseEvents(CloseEvent *out, int maxEvents) {
 // The channel stays open to let the local side finish sending its response.
 // ---------------------------------------------------------------------------
 void TransportPump::pumpSshTransport() {
-#ifdef TUNNEL_INSTRUMENT
-  int64_t _phase1_t0 = esp_timer_get_time();
-  int64_t _lock_t0 = esp_timer_get_time();
-#endif
   if (!session_->lock(pdMS_TO_TICKS(50))) {
-#ifdef TUNNEL_INSTRUMENT
-    instrSess_.lock_wait_us += esp_timer_get_time() - _lock_t0;
-    instrSess_.lock_failed++;
-#endif
     return;
   }
-#ifdef TUNNEL_INSTRUMENT
-  instrSess_.lock_wait_us += esp_timer_get_time() - _lock_t0;
-  instrSess_.lock_calls++;
-#endif
 
   int maxSlots = channels_->getMaxSlots();
   bool anyReadDone = false;
@@ -201,16 +107,21 @@ void TransportPump::pumpSshTransport() {
     // But don't try to store data — just pump and move on.
     if (ch.remoteEof) {
       char pumpBuf[64];
-#ifdef TUNNEL_INSTRUMENT
-      instrRead(i, ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-#else
       libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-#endif
       anyReadDone = true;
       continue;
     }
 
-    // Skip if toLocal ring is paused (too full)
+    // Skip if toLocal ring is paused (too full).
+    // We do NOT pump-read here: any libssh2_channel_read on this slot
+    // would (a) advance the receive window, prompting sshd to send more
+    // for a backend that can't keep up, and (b) sit on the session lock
+    // while it digests the channel's already-queued packets — starving
+    // sibling channels (Bug "G2 slow consumer starves live channel").
+    // libssh2_channel_read on any other channel still pumps the SSH
+    // transport for the whole session (incl. WINDOW_ADJUST packets), so
+    // outbound writes on sibling channels are not blocked by skipping
+    // this slot.
     if (ch.sshReadPaused) {
       if (ch.toLocal && ch.toLocal->size() < ch.toLocal->capacityBytes() *
                                                  BACKPRESSURE_LOW_PCT / 100) {
@@ -218,41 +129,6 @@ void TransportPump::pumpSshTransport() {
         LOGF_D("SSH", "Channel %d: SSH read resumed (toLocal=%zu)", i,
                ch.toLocal->size());
       } else {
-        // Pump transport with a small read — store data safely in toLocal
-        // (ring is at ~75%, not 100%, so there's room for a small read).
-        // This processes WINDOW_ADJUST packets that unblock SSH writes.
-        if (ch.toLocal && ch.toLocal->available() > 0) {
-          size_t pumpSize =
-              ch.toLocal->available() < 64 ? ch.toLocal->available() : 64;
-#ifdef TUNNEL_INSTRUMENT
-          int rc = instrRead(i, ch.sshChannel, (char *)rxBuf_, pumpSize);
-#else
-          int rc =
-              libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, pumpSize);
-#endif
-          anyReadDone = true;
-          if (rc > 0) {
-            size_t written = ch.toLocal->write(rxBuf_, rc);
-            ch.totalBytesReceived += written;
-            lastBytesMoved_ += written;
-            ch.lastSuccessfulRead = millis();
-            ch.lastActivity = ch.lastSuccessfulRead;
-            ch.eagainCount = 0;
-            ch.firstEagainMs = 0;
-            ch.consecutiveErrors = 0;
-          } else if (rc == 0) {
-            ch.remoteEof = true;
-            LOGF_I("SSH", "Channel %d: remote EOF (paused read)", i);
-          } else if (rc != LIBSSH2_ERROR_EAGAIN) {
-            ch.consecutiveErrors++;
-            LOGF_W("SSH", "Channel %d: SSH read error %d (errors=%d)", i, rc,
-                   ch.consecutiveErrors);
-            if (ch.consecutiveErrors > 3 &&
-                ch.state == ChannelSlot::State::Open) {
-              channels_->beginClose(i, ChannelCloseReason::Error);
-            }
-          }
-        }
         continue;
       }
     }
@@ -269,11 +145,7 @@ void TransportPump::pumpSshTransport() {
         break;
       }
       size_t readSize = freeSpace < bufSize_ ? freeSpace : bufSize_;
-#ifdef TUNNEL_INSTRUMENT
-      int rc = instrRead(i, ch.sshChannel, (char *)rxBuf_, readSize);
-#else
       int rc = libssh2_channel_read(ch.sshChannel, (char *)rxBuf_, readSize);
-#endif
       anyReadDone = true;
 
       if (rc > 0) {
@@ -328,11 +200,7 @@ void TransportPump::pumpSshTransport() {
       ChannelSlot &ch = channels_->getSlot(i);
       if (ch.active && ch.sshChannel && ch.remoteEof) {
         char pumpBuf[1];
-#ifdef TUNNEL_INSTRUMENT
-        instrRead(i, ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-#else
         libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-#endif
         fallbackDone = true;
         break;
       }
@@ -342,11 +210,7 @@ void TransportPump::pumpSshTransport() {
         ChannelSlot &ch = channels_->getSlot(i);
         if (ch.active && ch.sshChannel && !ch.remoteEof) {
           char pumpBuf[1];
-#ifdef TUNNEL_INSTRUMENT
-          instrRead(i, ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-#else
           libssh2_channel_read(ch.sshChannel, pumpBuf, sizeof(pumpBuf));
-#endif
           break;
         }
       }
@@ -354,10 +218,6 @@ void TransportPump::pumpSshTransport() {
   }
 
   session_->unlock();
-#ifdef TUNNEL_INSTRUMENT
-  instrSess_.phase1_us += esp_timer_get_time() - _phase1_t0;
-  instrSess_.phase1_cycles++;
-#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -448,15 +308,8 @@ void TransportPump::drainSshToLocal() {
 // after the request, but the local web server is still sending the response.
 // ---------------------------------------------------------------------------
 void TransportPump::drainLocalToSsh() {
-#ifdef TUNNEL_INSTRUMENT
-  int64_t _phase3_t0 = esp_timer_get_time();
-#endif
   int maxSlots = channels_->getMaxSlots();
   if (maxSlots == 0) {
-#ifdef TUNNEL_INSTRUMENT
-    instrSess_.phase3_us += esp_timer_get_time() - _phase3_t0;
-    instrSess_.phase3_cycles++;
-#endif
     return;
   }
 
@@ -483,12 +336,8 @@ void TransportPump::drainLocalToSsh() {
           if (got == 0)
             break;
 
-#ifdef TUNNEL_INSTRUMENT
-          ssize_t written = instrWrite(i, ch.sshChannel, (char *)txBuf_, got);
-#else
           ssize_t written =
               libssh2_channel_write(ch.sshChannel, (char *)txBuf_, got);
-#endif
           if (written > 0) {
             ch.totalBytesSent += written;
             lastBytesMoved_ += written;
@@ -594,10 +443,6 @@ void TransportPump::drainLocalToSsh() {
   }
 
   roundRobinOffset_++;
-#ifdef TUNNEL_INSTRUMENT
-  instrSess_.phase3_us += esp_timer_get_time() - _phase3_t0;
-  instrSess_.phase3_cycles++;
-#endif
 }
 
 // ---------------------------------------------------------------------------
