@@ -55,10 +55,17 @@ def _probe_post_reconnect(open_socket_fn, mapping_port, payload,
         f"post-reconnect probe failed after {attempts} attempts: {last_err!r}")
 
 
+def _count_reconnects(monitor) -> int:
+    """How many fresh SSH reconnect cycles have completed since boot."""
+    return sum(1 for line in monitor.raw_log()
+               if "Reconnection successful" in line)
+
+
 def test_reconnect_after_sshd_kill(wait_tunnel_ready, tunnel_socket,
                                     reset_stats_baseline, serial_monitor):
     wait_tunnel_ready()
     baseline = reset_stats_baseline()  # noqa: F841 — captured for telemetry baseline
+    base_reconnects = _count_reconnects(serial_monitor)
 
     payload = make_stream(0x1F1F, TH.F_TRANSFER_BYTES)
     half = int(len(payload) * TH.F_KILL_AT_FRACTION)
@@ -82,11 +89,26 @@ def test_reconnect_after_sshd_kill(wait_tunnel_ready, tunnel_socket,
 
     docker_ctl.kill("sshd")
     time.sleep(TH.F_DOWN_S)
-    docker_ctl.start("sshd")
+    # Use recreate (not start) so the new sshd doesn't inherit the killed
+    # sshd's listening socket from the same network namespace — Docker
+    # `start` on the same container preserves the namespace, causing the
+    # next tcpip-forward to fail with "bind: Address in use".
+    docker_ctl.recreate("sshd")
 
-    snap = serial_monitor.wait_for(
-        lambda s: s.get("state") == TH.TUNNEL_STATE_CONNECTED,
-        timeout_s=TH.F_RECONNECT_TIMEOUT_S)
+    # Wait for a NEW "Reconnection successful" log line. Plain
+    # state==Connected isn't enough: it can still reflect the dying
+    # session that ESP32 has not yet detected as broken (keepalive
+    # cascade is 30 s × 3 strikes ≈ 90 s before reconnect fires).
+    deadline = time.monotonic() + TH.F_RECONNECT_TIMEOUT_S
+    while time.monotonic() < deadline:
+        if _count_reconnects(serial_monitor) > base_reconnects:
+            break
+        time.sleep(1.0)
+    else:
+        raise AssertionError(
+            f"no fresh 'Reconnection successful' within "
+            f"{TH.F_RECONNECT_TIMEOUT_S} s after sshd recreate")
+    snap = serial_monitor.latest()
     print(f"[F] reconnected after sshd kill: {snap}")
 
     try:
@@ -99,8 +121,11 @@ def test_reconnect_after_sshd_kill(wait_tunnel_ready, tunnel_socket,
     panics = [line for line in raw if any(m in line for m in panic_markers)]
     assert not panics, f"panic markers in serial log: {panics[:3]}"
 
-    # New transfer must succeed after reconnect. Wait for ch=0 first so the
-    # killed channel has been cleaned up before we open a new one.
-    serial_monitor.wait_for(lambda s: s.get("ch", 99) == 0, timeout_s=10.0)
+    # New transfer must succeed after reconnect. Use the same readiness
+    # check as session startup: state=Connected, ch=0, listeners_ready==N.
+    # Plain "ch=0 + state=Connected" is not enough — sshd may still be
+    # rejecting the new tcpip-forward with "Address in use" (Bug #2),
+    # leaving the firmware's `listeners_ready` count below N.
+    wait_tunnel_ready()
     probe_payload = b"hello-after-reconnect-%d" % int(time.time())
     _probe_post_reconnect(tunnel_socket, 22080, probe_payload)
