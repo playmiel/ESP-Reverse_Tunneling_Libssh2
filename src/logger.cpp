@@ -1,6 +1,23 @@
 #include "logger.h"
 #include "ssh_config.h"
 #include <stdarg.h>
+#include <string.h>
+
+namespace {
+bool tunnelDiagLogTagAllowed(const char *tag) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  if (!tag) {
+    return false;
+  }
+  return strcmp(tag, "SSH") == 0 || strcmp(tag, "CONFIG") == 0 ||
+         strcmp(tag, "MAIN") == 0 || strcmp(tag, "MEM") == 0 ||
+         strcmp(tag, "RING") == 0;
+#else
+  (void)tag;
+  return true;
+#endif
+}
+} // namespace
 
 void Logger::init() {
   Serial.begin(globalSSHConfig.getDebugConfig().serialBaudRate);
@@ -13,6 +30,9 @@ void Logger::init() {
 void Logger::log(LogLevel level, const char *tag, const char *message) {
   const DebugConfig &debugConfig = globalSSHConfig.getDebugConfig();
   if (level > debugConfig.minLogLevel) {
+    return;
+  }
+  if (!tunnelDiagLogTagAllowed(tag)) {
     return;
   }
 

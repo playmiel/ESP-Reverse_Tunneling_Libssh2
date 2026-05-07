@@ -1,6 +1,7 @@
 #ifndef SSH_CHANNEL_H
 #define SSH_CHANNEL_H
 
+#include "channel_close_progress.h"
 #include "circuit_breaker.h"
 #include "ring_buffer.h"
 #include "ssh_config.h"
@@ -47,6 +48,7 @@ struct ChannelSlot {
   unsigned long closeStartMs = 0;
   unsigned long eofSentMs = 0; // When SSH EOF was sent (0 = not yet sent)
   ChannelCloseReason closeReason = ChannelCloseReason::Unknown;
+  channel_close_progress::Progress sshCloseProgress;
 
   // Backpressure flags
   bool localReadPaused =
@@ -65,6 +67,23 @@ struct ChannelSlot {
   int eagainCount = 0;
   unsigned long firstEagainMs = 0;          // SSH write EAGAIN stall start
   unsigned long firstLocalSendEagainMs = 0; // local send EAGAIN stall start
+
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  bool diagRequestParsed = false;
+  bool diagLocalWriteLogged = false;
+  bool diagResponseLogged = false;
+  bool diagNoRequestLogged = false;
+  bool diagNoLocalWriteLogged = false;
+  bool diagNoResponseLogged = false;
+  unsigned long diagBoundMs = 0;
+  unsigned long diagRequestMs = 0;
+  unsigned long diagLocalWriteMs = 0;
+  char diagMethod[8] = {};
+  char diagUrl[160] = {};
+  char diagRequestId[40] = {};
+  char diagRequestBuffer[2048] = {};
+  size_t diagRequestBufferLen = 0;
+#endif
 
   // millis() at the most recent finalizeClose; 0 if never finalized.
   // Used by allocateSlot (channel_alloc::findFreeSlot) to enforce a short
@@ -104,7 +123,8 @@ public:
   // Finalize close: free SSH channel, close local socket, reset slot.
   // The caller must hold the session lock when calling this (for
   // libssh2_channel_free).
-  void finalizeClose(int slotIndex);
+  // Returns false if non-blocking libssh2 close/free needs another retry.
+  bool finalizeClose(int slotIndex);
 
   // Force-reset a slot when the SSH session is already unusable and the
   // caller cannot safely run libssh2 channel cleanup.

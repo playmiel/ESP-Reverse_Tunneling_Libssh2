@@ -1,4 +1,5 @@
 #include "ssh_session.h"
+#include "forward_accept_error.h"
 #include "network_optimizations.h"
 #include <arpa/inet.h>
 #include <lwip/netdb.h>
@@ -73,6 +74,8 @@ static bool isValidHexFingerprint(const String &value) {
   return true;
 }
 
+static constexpr int kAcceptFatalReconnectThreshold = 3;
+
 // ---------------------------------------------------------------------------
 // SSHSession
 // ---------------------------------------------------------------------------
@@ -107,6 +110,7 @@ bool SSHSession::init() {
 
 bool SSHSession::connect(SSHConfiguration *config) {
   config_ = config;
+  resetAcceptState();
 
   if (session_) {
     LOG_W("SSH", "connect: leftover session, cleaning up");
@@ -211,24 +215,130 @@ bool SSHSession::checkConnection() const {
   return true;
 }
 
+void SSHSession::resetAcceptState() {
+  lastAcceptError_ = 0;
+  consecutiveFatalAcceptErrors_ = 0;
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  acceptDiag_.reset();
+#endif
+}
+
+void SSHSession::recordAcceptSuccess() {
+  lastAcceptError_ = 0;
+  consecutiveFatalAcceptErrors_ = 0;
+}
+
+void SSHSession::recordAcceptNoChannel(int err) {
+  lastAcceptError_ = err;
+  if (isFatalAcceptError(err)) {
+    ++consecutiveFatalAcceptErrors_;
+    return;
+  }
+  consecutiveFatalAcceptErrors_ = 0;
+}
+
+bool SSHSession::isFatalAcceptError(int err) const {
+  return forward_accept_error::isFatal(
+      err, LIBSSH2_ERROR_EAGAIN, LIBSSH2_ERROR_CHANNEL_UNKNOWN,
+      LIBSSH2_ERROR_CHANNEL_CLOSED, LIBSSH2_ERROR_SOCKET_SEND,
+      LIBSSH2_ERROR_SOCKET_DISCONNECT);
+}
+
+bool SSHSession::hasFatalAcceptFailure() const {
+  return forward_accept_error::shouldReconnectAfterConsecutiveErrors(
+      consecutiveFatalAcceptErrors_, lastAcceptError_, LIBSSH2_ERROR_EAGAIN,
+      LIBSSH2_ERROR_CHANNEL_UNKNOWN, LIBSSH2_ERROR_CHANNEL_CLOSED,
+      LIBSSH2_ERROR_SOCKET_SEND, LIBSSH2_ERROR_SOCKET_DISCONNECT);
+}
+
 LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
   if (!session_ || listeners_.empty()) {
     return nullptr;
   }
 
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  static constexpr unsigned long ACCEPT_IDLE_LOG_INTERVAL_MS = 1000;
+#endif
+
   for (auto &entry : listeners_) {
     if (!entry.listener) {
       continue;
     }
+#ifdef TUNNEL_DIAG_LOG_ONLY
+    unsigned long pollNow = millis();
+    acceptDiag_.recordPoll(pollNow);
+#endif
     if (!lock(pdMS_TO_TICKS(50))) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+      acceptDiag_.recordLockUnavailable(millis());
+      LOGF_W("SSH", "SERVERDIAG forward_accept_lock_unavailable remote=%s:%d "
+                    "local=%s:%d",
+             entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
+             entry.mapping.localHost.c_str(), entry.mapping.localPort);
+#endif
       continue;
     }
     LIBSSH2_CHANNEL *ch = libssh2_channel_forward_accept(entry.listener);
+    int acceptErr = ch ? 0 : libssh2_session_last_errno(session_);
     unlock();
     if (ch) {
       outMapping = entry.mapping;
+      recordAcceptSuccess();
+#ifdef TUNNEL_DIAG_LOG_ONLY
+      forward_accept_diag::Snapshot diag = acceptDiag_.recordAccept(millis());
+      LOGF_I("SSH", "SERVERDIAG forward_accept channel=%p remote=%s:%d "
+                    "local=%s:%d bound=%d idle_ms=%lu polls=%lu eagain=%lu "
+                    "errors=%lu lock_miss=%lu total_polls=%lu "
+                    "total_accepts=%lu last_err=%d",
+             ch, entry.mapping.remoteBindHost.c_str(),
+             entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+             entry.mapping.localPort, entry.boundPort,
+             static_cast<unsigned long>(diag.idleMs),
+             static_cast<unsigned long>(diag.pollsSinceAccept),
+             static_cast<unsigned long>(diag.eagainSinceAccept),
+             static_cast<unsigned long>(diag.errorsSinceAccept),
+             static_cast<unsigned long>(diag.lockMissesSinceAccept),
+             static_cast<unsigned long>(diag.totalPolls),
+             static_cast<unsigned long>(diag.totalAccepts), diag.lastErr);
+#endif
       return ch;
     }
+    recordAcceptNoChannel(acceptErr);
+#ifdef TUNNEL_DIAG_LOG_ONLY
+    acceptDiag_.recordNoChannel(millis(), acceptErr,
+                                acceptErr == LIBSSH2_ERROR_EAGAIN);
+    if (acceptErr != 0 && acceptErr != LIBSSH2_ERROR_EAGAIN) {
+      const bool fatal = isFatalAcceptError(acceptErr);
+      const bool logNow =
+          !fatal || consecutiveFatalAcceptErrors_ == 1 ||
+          consecutiveFatalAcceptErrors_ == kAcceptFatalReconnectThreshold ||
+          (consecutiveFatalAcceptErrors_ % 100) == 0;
+      if (logNow) {
+        LOGF_W("SSH", "SERVERDIAG forward_accept_error err=%d fatal=%d "
+                      "fatal_count=%d remote=%s:%d local=%s:%d bound=%d",
+               acceptErr, fatal ? 1 : 0, consecutiveFatalAcceptErrors_,
+               entry.mapping.remoteBindHost.c_str(),
+               entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+               entry.mapping.localPort, entry.boundPort);
+      }
+    }
+    unsigned long now = millis();
+    if (acceptDiag_.idleSummaryDue(now, ACCEPT_IDLE_LOG_INTERVAL_MS)) {
+      forward_accept_diag::Snapshot diag = acceptDiag_.snapshot(now);
+      LOGF_W("SSH", "SERVERDIAG forward_accept_idle idle_ms=%lu polls=%lu "
+                    "eagain=%lu errors=%lu lock_miss=%lu total_polls=%lu "
+                    "total_accepts=%lu last_err=%d listeners=%d",
+             static_cast<unsigned long>(diag.idleMs),
+             static_cast<unsigned long>(diag.pollsSinceAccept),
+             static_cast<unsigned long>(diag.eagainSinceAccept),
+             static_cast<unsigned long>(diag.errorsSinceAccept),
+             static_cast<unsigned long>(diag.lockMissesSinceAccept),
+             static_cast<unsigned long>(diag.totalPolls),
+             static_cast<unsigned long>(diag.totalAccepts), diag.lastErr,
+             getActiveListenerCount());
+      acceptDiag_.markIdleSummary(now);
+    }
+#endif
   }
   return nullptr;
 }
@@ -799,4 +909,5 @@ void SSHSession::cleanupSession() {
   }
 
   keepAliveFailures_ = 0;
+  resetAcceptState();
 }

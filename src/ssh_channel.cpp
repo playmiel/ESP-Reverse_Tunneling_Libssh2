@@ -227,6 +227,13 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
          slot.endpoint.remoteHost, slot.endpoint.remotePort,
          slot.endpoint.localHost, slot.endpoint.localPort, activeCount_,
          maxSlots_);
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  slot.diagBoundMs = slot.lastActivity;
+  LOGF_I("SSH", "HTTPDIAG ch=%d bound remote=%s:%d local=%s:%d active=%d/%d",
+         slotIndex, slot.endpoint.remoteHost, slot.endpoint.remotePort,
+         slot.endpoint.localHost, slot.endpoint.localPort, activeCount_,
+         maxSlots_);
+#endif
   return true;
 }
 
@@ -250,13 +257,13 @@ void ChannelManager::beginClose(int slotIndex, ChannelCloseReason reason) {
          slot.toRemote ? slot.toRemote->size() : 0);
 }
 
-void ChannelManager::finalizeClose(int slotIndex) {
+bool ChannelManager::finalizeClose(int slotIndex) {
   if (slotIndex < 0 || slotIndex >= maxSlots_) {
-    return;
+    return true;
   }
   ChannelSlot &slot = slots_[slotIndex];
   if (!slot.active) {
-    return;
+    return true;
   }
 
   LOGF_I("SSH", "Channel %d: finalize close (sent=%zu, recv=%zu, reason=%d)",
@@ -265,8 +272,35 @@ void ChannelManager::finalizeClose(int slotIndex) {
 
   // Free SSH channel (caller must hold session lock)
   if (slot.sshChannel) {
-    libssh2_channel_close(slot.sshChannel);
-    libssh2_channel_free(slot.sshChannel);
+    if (!slot.sshCloseProgress.closeComplete) {
+      int closeRc = libssh2_channel_close(slot.sshChannel);
+      if (!channel_close_progress::recordCloseResult(
+              slot.sshCloseProgress, closeRc, LIBSSH2_ERROR_EAGAIN)) {
+        LOGF_D("SSH", "Channel %d: SSH close EAGAIN, retrying", slotIndex);
+        return false;
+      }
+      if (closeRc != 0) {
+        LOGF_W("SSH", "Channel %d: SSH close returned %d, continuing cleanup",
+               slotIndex, closeRc);
+      }
+    }
+
+    if (channel_close_progress::readyForFree(slot.sshCloseProgress)) {
+      int freeRc = libssh2_channel_free(slot.sshChannel);
+      if (!channel_close_progress::recordFreeResult(
+              slot.sshCloseProgress, freeRc, LIBSSH2_ERROR_EAGAIN)) {
+        LOGF_D("SSH", "Channel %d: SSH free EAGAIN, retrying", slotIndex);
+        return false;
+      }
+      if (freeRc != 0) {
+        LOGF_W("SSH", "Channel %d: SSH free returned %d, dropping local slot",
+               slotIndex, freeRc);
+      }
+    }
+
+    if (!channel_close_progress::readyForFinalize(slot.sshCloseProgress)) {
+      return false;
+    }
     slot.sshChannel = nullptr;
   }
 
@@ -291,6 +325,7 @@ void ChannelManager::finalizeClose(int slotIndex) {
 
   LOGF_I("SSH", "Channel %d closed (active: %d/%d)", slotIndex, activeCount_,
          maxSlots_);
+  return true;
 }
 
 void ChannelManager::abandonSlot(int slotIndex, ChannelCloseReason reason) {
@@ -469,6 +504,7 @@ void ChannelManager::resetSlot(int index) {
   slot.closeStartMs = 0;
   slot.eofSentMs = 0;
   slot.closeReason = ChannelCloseReason::Unknown;
+  slot.sshCloseProgress = channel_close_progress::Progress();
   slot.localReadPaused = false;
   slot.sshReadPaused = false;
   slot.totalBytesReceived = 0;
@@ -483,6 +519,22 @@ void ChannelManager::resetSlot(int index) {
   slot.toLocal = nullptr;
   slot.toRemote = nullptr;
   memset(&slot.endpoint, 0, sizeof(slot.endpoint));
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  slot.diagRequestParsed = false;
+  slot.diagLocalWriteLogged = false;
+  slot.diagResponseLogged = false;
+  slot.diagNoRequestLogged = false;
+  slot.diagNoLocalWriteLogged = false;
+  slot.diagNoResponseLogged = false;
+  slot.diagBoundMs = 0;
+  slot.diagRequestMs = 0;
+  slot.diagLocalWriteMs = 0;
+  slot.diagRequestBufferLen = 0;
+  memset(slot.diagMethod, 0, sizeof(slot.diagMethod));
+  memset(slot.diagUrl, 0, sizeof(slot.diagUrl));
+  memset(slot.diagRequestId, 0, sizeof(slot.diagRequestId));
+  memset(slot.diagRequestBuffer, 0, sizeof(slot.diagRequestBuffer));
+#endif
 }
 
 // Circuit breaker logic now lives in src/circuit_breaker.h and is composed
