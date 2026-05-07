@@ -1,6 +1,8 @@
 #include "ssh_transport.h"
 #include "memory_fixes.h"
+#include <ctype.h>
 #include <errno.h>
+#include <string.h>
 #include <sys/socket.h>
 
 #ifdef TUNNEL_INSTRUMENT
@@ -11,6 +13,265 @@
 // ---------------------------------------------------------------------------
 // TransportPump
 // ---------------------------------------------------------------------------
+
+#ifdef TUNNEL_DIAG_LOG_ONLY
+namespace {
+static constexpr unsigned long HTTPDIAG_NO_REQUEST_AFTER_MS = 2000;
+static constexpr unsigned long HTTPDIAG_STAGE_STALL_AFTER_MS = 2000;
+
+const char *httpDiagValue(const char *value) {
+  return value && value[0] ? value : "-";
+}
+
+bool ciEquals(const char *a, const char *b, size_t len) {
+  for (size_t i = 0; i < len; ++i) {
+    if (tolower(static_cast<unsigned char>(a[i])) !=
+        tolower(static_cast<unsigned char>(b[i]))) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const char *findHeaderValue(const char *headers, size_t len,
+                            const char *headerName) {
+  const size_t nameLen = strlen(headerName);
+  const char *cursor = headers;
+  const char *end = headers + len;
+  while (cursor < end) {
+    const char *lineEnd =
+        static_cast<const char *>(memchr(cursor, '\n', end - cursor));
+    if (!lineEnd) {
+      lineEnd = end;
+    }
+    const char *lineLimit = lineEnd;
+    if (lineLimit > cursor && lineLimit[-1] == '\r') {
+      --lineLimit;
+    }
+    if (static_cast<size_t>(lineLimit - cursor) > nameLen &&
+        cursor[nameLen] == ':' && ciEquals(cursor, headerName, nameLen)) {
+      const char *value = cursor + nameLen + 1;
+      while (value < lineLimit &&
+             (*value == ' ' || *value == '\t')) {
+        ++value;
+      }
+      return value;
+    }
+    cursor = lineEnd < end ? lineEnd + 1 : end;
+  }
+  return nullptr;
+}
+
+void copyToken(char *dst, size_t dstSize, const char *begin, const char *end) {
+  if (dstSize == 0) {
+    return;
+  }
+  if (!begin || !end || end <= begin) {
+    dst[0] = '\0';
+    return;
+  }
+  size_t len = static_cast<size_t>(end - begin);
+  if (len >= dstSize) {
+    len = dstSize - 1;
+  }
+  memcpy(dst, begin, len);
+  dst[len] = '\0';
+}
+
+void parseRequestBuffer(int slot, ChannelSlot &ch) {
+  if (ch.diagRequestParsed || ch.diagRequestBufferLen == 0) {
+    return;
+  }
+  const char *buffer = ch.diagRequestBuffer;
+  const size_t len = ch.diagRequestBufferLen;
+  const char *headersEnd = nullptr;
+  for (size_t i = 0; i + 3 < len; ++i) {
+    if (buffer[i] == '\r' && buffer[i + 1] == '\n' &&
+        buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
+      headersEnd = buffer + i + 4;
+      break;
+    }
+  }
+  const char *lineEnd =
+      static_cast<const char *>(memchr(buffer, '\n', len));
+  if (!lineEnd) {
+    if (len == sizeof(ch.diagRequestBuffer) - 1) {
+      LOGF_W("SSH", "HTTPDIAG ch=%d ssh_to_local request_parse_truncated", slot);
+      ch.diagRequestParsed = true;
+    }
+    return;
+  }
+  if (!headersEnd) {
+    if (len == sizeof(ch.diagRequestBuffer) - 1) {
+      LOGF_W("SSH", "HTTPDIAG ch=%d ssh_to_local headers_parse_truncated", slot);
+      ch.diagRequestParsed = true;
+    }
+    return;
+  }
+  const char *lineLimit = lineEnd;
+  if (lineLimit > buffer && lineLimit[-1] == '\r') {
+    --lineLimit;
+  }
+  const char *methodEnd =
+      static_cast<const char *>(memchr(buffer, ' ', lineLimit - buffer));
+  if (!methodEnd) {
+    return;
+  }
+  const char *urlStart = methodEnd + 1;
+  const char *urlEnd =
+      static_cast<const char *>(memchr(urlStart, ' ', lineLimit - urlStart));
+  if (!urlEnd) {
+    return;
+  }
+
+  copyToken(ch.diagMethod, sizeof(ch.diagMethod), buffer, methodEnd);
+  copyToken(ch.diagUrl, sizeof(ch.diagUrl), urlStart, urlEnd);
+
+  const char *rid = findHeaderValue(
+      buffer, static_cast<size_t>(headersEnd - buffer), "X-Request-ID");
+  if (rid) {
+    const char *ridEnd = rid;
+    while (ridEnd < headersEnd && *ridEnd != '\r' && *ridEnd != '\n') {
+      ++ridEnd;
+    }
+    copyToken(ch.diagRequestId, sizeof(ch.diagRequestId), rid, ridEnd);
+  }
+
+  ch.diagRequestParsed = true;
+  ch.diagRequestMs = millis();
+  LOGF_I("SSH", "HTTPDIAG ch=%d ssh_to_local request rid=%s method=%s url=%s",
+         slot, httpDiagValue(ch.diagRequestId), httpDiagValue(ch.diagMethod),
+         httpDiagValue(ch.diagUrl));
+}
+
+void observeSshToLocal(int slot, ChannelSlot &ch, const uint8_t *data,
+                       size_t len) {
+  if (ch.diagRequestParsed || len == 0) {
+    return;
+  }
+  const size_t cap = sizeof(ch.diagRequestBuffer) - 1;
+  const size_t room = cap > ch.diagRequestBufferLen
+                          ? cap - ch.diagRequestBufferLen
+                          : 0;
+  const size_t toCopy = len < room ? len : room;
+  if (toCopy > 0) {
+    memcpy(ch.diagRequestBuffer + ch.diagRequestBufferLen, data, toCopy);
+    ch.diagRequestBufferLen += toCopy;
+    ch.diagRequestBuffer[ch.diagRequestBufferLen] = '\0';
+  }
+  parseRequestBuffer(slot, ch);
+}
+
+void logLocalWriteOnce(int slot, ChannelSlot &ch, ssize_t sent,
+                       size_t remaining) {
+  if (ch.diagLocalWriteLogged || sent <= 0) {
+    return;
+  }
+  ch.diagLocalWriteLogged = true;
+  ch.diagLocalWriteMs = millis();
+  LOGF_I("SSH",
+         "HTTPDIAG ch=%d local_write rid=%s method=%s url=%s sent=%ld "
+         "remaining=%zu",
+         slot, httpDiagValue(ch.diagRequestId), httpDiagValue(ch.diagMethod),
+         httpDiagValue(ch.diagUrl), static_cast<long>(sent), remaining);
+}
+
+void logLocalResponseOnce(int slot, ChannelSlot &ch, const uint8_t *data,
+                          size_t len) {
+  if (ch.diagResponseLogged || len == 0) {
+    return;
+  }
+  ch.diagResponseLogged = true;
+  int status = 0;
+  if (len >= 12 && memcmp(data, "HTTP/", 5) == 0) {
+    const char *line = reinterpret_cast<const char *>(data);
+    const char *space =
+        static_cast<const char *>(memchr(line, ' ', len));
+    if (space && static_cast<size_t>((space + 4) - line) <= len &&
+        isdigit(static_cast<unsigned char>(space[1])) &&
+        isdigit(static_cast<unsigned char>(space[2])) &&
+        isdigit(static_cast<unsigned char>(space[3]))) {
+      status = (space[1] - '0') * 100 + (space[2] - '0') * 10 +
+               (space[3] - '0');
+    }
+  }
+  LOGF_I("SSH",
+         "HTTPDIAG ch=%d local_to_ssh response rid=%s method=%s url=%s "
+         "status=%d bytes=%zu",
+         slot, httpDiagValue(ch.diagRequestId), httpDiagValue(ch.diagMethod),
+         httpDiagValue(ch.diagUrl), status, len);
+}
+
+void logChannelsWithoutRequest(ChannelManager *channels) {
+  if (!channels) {
+    return;
+  }
+  const unsigned long now = millis();
+  const int maxSlots = channels->getMaxSlots();
+  for (int i = 0; i < maxSlots; ++i) {
+    ChannelSlot &ch = channels->getSlot(i);
+    if (!ch.active || ch.diagRequestParsed || ch.diagNoRequestLogged ||
+        ch.diagBoundMs == 0) {
+      continue;
+    }
+    const unsigned long age = now - ch.diagBoundMs;
+    if (age < HTTPDIAG_NO_REQUEST_AFTER_MS) {
+      continue;
+    }
+    ch.diagNoRequestLogged = true;
+    LOGF_W("SSH",
+           "HTTPDIAG ch=%d no_request_after_ms=%lu remote=%s:%d local=%s:%d "
+           "remote_eof=%d local_eof=%d toLocal=%zu toRemote=%zu",
+           i, age, ch.endpoint.remoteHost, ch.endpoint.remotePort,
+           ch.endpoint.localHost, ch.endpoint.localPort, ch.remoteEof ? 1 : 0,
+           ch.localEof ? 1 : 0, ch.toLocal ? ch.toLocal->size() : 0,
+           ch.toRemote ? ch.toRemote->size() : 0);
+  }
+
+  for (int i = 0; i < maxSlots; ++i) {
+    ChannelSlot &ch = channels->getSlot(i);
+    if (!ch.active || !ch.diagRequestParsed || ch.diagLocalWriteLogged ||
+        ch.diagNoLocalWriteLogged || ch.diagRequestMs == 0) {
+      continue;
+    }
+    const unsigned long age = now - ch.diagRequestMs;
+    if (age < HTTPDIAG_STAGE_STALL_AFTER_MS) {
+      continue;
+    }
+    ch.diagNoLocalWriteLogged = true;
+    LOGF_W("SSH",
+           "HTTPDIAG ch=%d no_local_write_after_ms=%lu rid=%s method=%s "
+           "url=%s remote_eof=%d local_eof=%d toLocal=%zu toRemote=%zu",
+           i, age, httpDiagValue(ch.diagRequestId),
+           httpDiagValue(ch.diagMethod), httpDiagValue(ch.diagUrl),
+           ch.remoteEof ? 1 : 0, ch.localEof ? 1 : 0,
+           ch.toLocal ? ch.toLocal->size() : 0,
+           ch.toRemote ? ch.toRemote->size() : 0);
+  }
+
+  for (int i = 0; i < maxSlots; ++i) {
+    ChannelSlot &ch = channels->getSlot(i);
+    if (!ch.active || !ch.diagLocalWriteLogged || ch.diagResponseLogged ||
+        ch.diagNoResponseLogged || ch.diagLocalWriteMs == 0) {
+      continue;
+    }
+    const unsigned long age = now - ch.diagLocalWriteMs;
+    if (age < HTTPDIAG_STAGE_STALL_AFTER_MS) {
+      continue;
+    }
+    ch.diagNoResponseLogged = true;
+    LOGF_W("SSH",
+           "HTTPDIAG ch=%d no_local_response_after_ms=%lu rid=%s method=%s "
+           "url=%s remote_eof=%d local_eof=%d toLocal=%zu toRemote=%zu",
+           i, age, httpDiagValue(ch.diagRequestId),
+           httpDiagValue(ch.diagMethod), httpDiagValue(ch.diagUrl),
+           ch.remoteEof ? 1 : 0, ch.localEof ? 1 : 0,
+           ch.toLocal ? ch.toLocal->size() : 0,
+           ch.toRemote ? ch.toRemote->size() : 0);
+  }
+}
+} // namespace
+#endif
 
 TransportPump::TransportPump() {}
 
@@ -56,6 +317,10 @@ bool TransportPump::pumpAll() {
   // Phase 4: transition Open channels to Draining when both EOFs set,
   //          then finalize Draining channels whose rings are empty.
   checkCloses();
+
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  logChannelsWithoutRequest(channels_);
+#endif
 
   return lastBytesMoved_ > 0;
 }
@@ -232,6 +497,9 @@ void TransportPump::pumpSshTransport() {
 #endif
           anyReadDone = true;
           if (rc > 0) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+            observeSshToLocal(i, ch, rxBuf_, rc);
+#endif
             size_t written = ch.toLocal->write(rxBuf_, rc);
             ch.totalBytesReceived += written;
             lastBytesMoved_ += written;
@@ -277,6 +545,9 @@ void TransportPump::pumpSshTransport() {
       anyReadDone = true;
 
       if (rc > 0) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+        observeSshToLocal(i, ch, rxBuf_, rc);
+#endif
         size_t written = ch.toLocal->write(rxBuf_, rc);
         ch.totalBytesReceived += written;
         lastBytesMoved_ += written;
@@ -394,6 +665,11 @@ void TransportPump::drainSshToLocal() {
 
       ssize_t sent = send(ch.localSocket, txBuf_, got, MSG_DONTWAIT);
       if (sent > 0) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+        size_t remaining =
+            static_cast<size_t>(sent) < got ? got - sent : ch.toLocal->size();
+        logLocalWriteOnce(i, ch, sent, remaining);
+#endif
         lastBytesMoved_ += sent;
         ch.lastActivity = millis();
         ch.firstLocalSendEagainMs = 0; // forward progress clears stall timer
@@ -574,6 +850,9 @@ void TransportPump::drainLocalToSsh() {
         size_t readSize = freeSpace < bufSize_ ? freeSpace : bufSize_;
         ssize_t recvd = recv(ch.localSocket, rxBuf_, readSize, MSG_DONTWAIT);
         if (recvd > 0) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+          logLocalResponseOnce(i, ch, rxBuf_, recvd);
+#endif
           ch.toRemote->write(rxBuf_, recvd);
           ch.lastActivity = millis();
           lastBytesMoved_ += recvd;
@@ -774,17 +1053,14 @@ void TransportPump::checkCloses() {
 
   // --- Step 2b: Finalize channels that have completed grace period ---
   if (closeCount > 0) {
-    // Record close events BEFORE finalizeClose resets the slot
-    for (int c = 0; c < closeCount; ++c) {
-      if (pendingCloseCount_ < MAX_CLOSE_EVENTS) {
-        const ChannelSlot &ch = channels_->getSlot(toClose[c]);
-        pendingCloseEvents_[pendingCloseCount_++] = {toClose[c],
-                                                     ch.closeReason};
-      }
-    }
     if (session_->lock(pdMS_TO_TICKS(200))) {
       for (int c = 0; c < closeCount; ++c) {
-        channels_->finalizeClose(toClose[c]);
+        int slot = toClose[c];
+        ChannelCloseReason reason = channels_->getSlot(slot).closeReason;
+        if (channels_->finalizeClose(slot) &&
+            pendingCloseCount_ < MAX_CLOSE_EVENTS) {
+          pendingCloseEvents_[pendingCloseCount_++] = {slot, reason};
+        }
       }
       session_->unlock();
     }

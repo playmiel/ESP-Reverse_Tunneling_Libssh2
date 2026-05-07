@@ -318,6 +318,12 @@ bool SSHTunnel::handleNewConnection() {
   TunnelConfig mapping;
   LIBSSH2_CHANNEL *ch = session_.acceptChannel(mapping);
   if (!ch) {
+    if (session_.hasFatalAcceptFailure()) {
+      LOGF_W("SSH", "Fatal forward_accept error err=%d count=%d, reconnecting",
+             session_.getLastAcceptError(),
+             session_.getConsecutiveFatalAcceptErrors());
+      enterErrorState("forward_accept fatal");
+    }
     return false;
   }
 
@@ -343,10 +349,21 @@ bool SSHTunnel::handleNewConnection() {
     BindResult bindResult = bindAcceptedChannel(session_, channels_, slot, ch,
                                                 mapping, pdMS_TO_TICKS(200));
     if (bindResult == BindResult::Bound) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+      LOGF_I("SSH", "SERVERDIAG bind_ok slot=%d remote=%s:%d local=%s:%d",
+             slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+             mapping.localHost.c_str(), mapping.localPort);
+#endif
       emitChannelOpened(slot);
       return true;
     }
     if (bindResult == BindResult::LockUnavailable) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+      LOGF_W("SSH", "SERVERDIAG bind_lock_unavailable slot=%d remote=%s:%d "
+                    "local=%s:%d",
+             slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+             mapping.localHost.c_str(), mapping.localPort);
+#endif
       LOG_W("SSH", "Session lock unavailable while binding accepted channel");
       if (pendingCount_ < MAX_PENDING) {
         PendingChannel &pending = pendingQueue_[pendingCount_];
@@ -355,6 +372,13 @@ bool SSHTunnel::handleNewConnection() {
         pending.queuedAtMs = millis();
         pending.action = PendingChannel::Action::Bind;
         pendingCount_++;
+#ifdef TUNNEL_DIAG_LOG_ONLY
+        LOGF_W("SSH", "SERVERDIAG queued_lock_contention remote=%s:%d "
+                      "local=%s:%d pending=%d/%d",
+               mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+               mapping.localHost.c_str(), mapping.localPort, pendingCount_,
+               MAX_PENDING);
+#endif
         LOGF_I("SSH",
                "Channel queued for later binding after lock contention "
                "(pending: %d/%d)",
@@ -378,6 +402,11 @@ bool SSHTunnel::handleNewConnection() {
                               "failure")) {
       LOG_W("SSH", "Deferred close queue full, dropping channel");
     }
+#ifdef TUNNEL_DIAG_LOG_ONLY
+    LOGF_W("SSH", "SERVERDIAG bind_failed slot=%d remote=%s:%d local=%s:%d",
+           slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+           mapping.localHost.c_str(), mapping.localPort);
+#endif
     return false;
   }
 
@@ -389,6 +418,13 @@ bool SSHTunnel::handleNewConnection() {
     pending.queuedAtMs = millis();
     pending.action = PendingChannel::Action::Bind;
     pendingCount_++;
+#ifdef TUNNEL_DIAG_LOG_ONLY
+    LOGF_W("SSH", "SERVERDIAG queued_no_slot remote=%s:%d local=%s:%d "
+                  "pending=%d/%d",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+           mapping.localHost.c_str(), mapping.localPort, pendingCount_,
+           MAX_PENDING);
+#endif
     LOGF_I("SSH", "Channel queued for later binding (pending: %d/%d)",
            pendingCount_, MAX_PENDING);
     return false;
@@ -480,12 +516,28 @@ void SSHTunnel::drainPendingQueue() {
           bindAcceptedChannel(session_, channels_, slot, pending.channel,
                               pending.mapping, pdMS_TO_TICKS(200));
       if (bindResult == BindResult::Bound) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+        LOGF_I("SSH", "SERVERDIAG queued_bind_ok slot=%d waited=%lums "
+                      "remote=%s:%d local=%s:%d",
+               slot, millis() - pending.queuedAtMs,
+               pending.mapping.remoteBindHost.c_str(),
+               pending.mapping.remoteBindPort, pending.mapping.localHost.c_str(),
+               pending.mapping.localPort);
+#endif
         LOGF_I("SSH", "Queued channel bound to slot %d (waited %lums)", slot,
                millis() - pending.queuedAtMs);
         emitChannelOpened(slot);
         pending.channel = nullptr; // consumed
       } else {
         if (bindResult == BindResult::LockUnavailable) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+          LOGF_W("SSH", "SERVERDIAG queued_bind_lock_unavailable slot=%d "
+                        "waited=%lums remote=%s:%d local=%s:%d",
+                 slot, millis() - pending.queuedAtMs,
+                 pending.mapping.remoteBindHost.c_str(),
+                 pending.mapping.remoteBindPort,
+                 pending.mapping.localHost.c_str(), pending.mapping.localPort);
+#endif
           if (writeIdx != i) {
             pendingQueue_[writeIdx] = pending;
           }
