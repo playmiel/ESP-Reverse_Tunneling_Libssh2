@@ -405,12 +405,43 @@ bool SSHSession::tcpConnect(const SSHServerConfig &sshConfig) {
   return true;
 }
 
+#ifdef TUNNEL_LIBSSH2_TRACE
+static void libssh2TraceToLogger(LIBSSH2_SESSION * /*session*/,
+                                 void * /*context*/, const char *data,
+                                 size_t length) {
+  if (!data || length == 0) {
+    return;
+  }
+  // libssh2 trace strings aren't NUL-terminated and may contain a trailing
+  // newline; copy into a small static buffer (single-threaded under session
+  // lock) and trim before forwarding.
+  static char buf[256];
+  size_t n = length < sizeof(buf) - 1 ? length : sizeof(buf) - 1;
+  memcpy(buf, data, n);
+  while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+    --n;
+  }
+  buf[n] = '\0';
+  LOGF_D("LIBSSH2", "%s", buf);
+}
+#endif
+
 bool SSHSession::handshake() {
   session_ = libssh2_session_init();
   if (!session_) {
     LOG_E("SSH", "Could not initialize the SSH session");
     return false;
   }
+
+#ifdef TUNNEL_LIBSSH2_TRACE
+  // Wire libssh2 internal trace to the logger so we can see CHANNEL_OPEN
+  // routing, listener queueing, and transport-level events. Requires the
+  // libssh2 library itself to be compiled with -DLIBSSH2DEBUG (otherwise
+  // libssh2_trace*() are no-ops). CONN+TRANS is enough for forward-accept
+  // diagnosis; add KEX/AUTH/SOCKET only if needed — they are very chatty.
+  libssh2_trace_sethandler(session_, this, libssh2TraceToLogger);
+  libssh2_trace(session_, LIBSSH2_TRACE_CONN | LIBSSH2_TRACE_TRANS);
+#endif
 
   // Session stays BLOCKING during setup (handshake, auth, listeners).
   // Non-blocking mode is enabled after connect() completes successfully.
