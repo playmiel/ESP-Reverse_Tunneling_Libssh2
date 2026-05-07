@@ -226,7 +226,7 @@ void SSHTunnel::loop() {
   // sshd has pending forward connections, libssh2_channel_forward_accept
   // never returns them. Cancel and recreate the listener to unblock without
   // tearing down the SSH session or active channels.
-  session_.relistenStuckListeners(now);
+  //session_.relistenStuckListeners(now);
 
   // Pump all data (the core of the new architecture)
   transport_.pumpAll();
