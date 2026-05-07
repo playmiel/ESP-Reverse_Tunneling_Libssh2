@@ -435,12 +435,14 @@ bool SSHSession::handshake() {
 
 #ifdef TUNNEL_LIBSSH2_TRACE
   // Wire libssh2 internal trace to the logger so we can see CHANNEL_OPEN
-  // routing, listener queueing, and transport-level events. Requires the
-  // libssh2 library itself to be compiled with -DLIBSSH2DEBUG (otherwise
-  // libssh2_trace*() are no-ops). CONN+TRANS is enough for forward-accept
-  // diagnosis; add KEX/AUTH/SOCKET only if needed — they are very chatty.
+  // routing and listener queueing. Requires the libssh2 library itself to
+  // be compiled with -DLIBSSH2DEBUG (otherwise libssh2_trace*() are no-ops).
+  // CONN gives us the events relevant to forward-accept diagnosis:
+  // "Remote received connection from..." and "Connection queued: ...".
+  // Add LIBSSH2_TRACE_TRANS if you also need per-packet visibility (very
+  // chatty — thousands of lines/sec on a busy session).
   libssh2_trace_sethandler(session_, this, libssh2TraceToLogger);
-  libssh2_trace(session_, LIBSSH2_TRACE_CONN | LIBSSH2_TRACE_TRANS);
+  libssh2_trace(session_, LIBSSH2_TRACE_CONN);
 #endif
 
   // Session stays BLOCKING during setup (handshake, auth, listeners).
