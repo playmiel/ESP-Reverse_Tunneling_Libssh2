@@ -62,6 +62,19 @@ public:
     return consecutiveFatalAcceptErrors_;
   }
 
+  // Default threshold above which a listener is considered "stuck" and is
+  // cancelled+recreated. Picked well below typical reverse-proxy timeouts
+  // (e.g. nginx 30s) so we react before clients see a 504.
+  static constexpr unsigned long kForwardListenerStuckIdleMsDefault = 15000UL;
+
+  // If accept has been idle longer than thresholdMs while at least one prior
+  // accept has succeeded, cancel each remote-forward listener and recreate it
+  // with the same mapping. Active channels are untouched. Returns true if at
+  // least one listener was recreated. thresholdMs == 0 disables the watchdog.
+  bool relistenStuckListeners(
+      unsigned long nowMs,
+      unsigned long thresholdMs = kForwardListenerStuckIdleMsDefault);
+
   // Lock/unlock the session mutex for external libssh2 calls (e.g.,
   // channel_read/write).
   bool lock(TickType_t ticks = portMAX_DELAY);
@@ -117,6 +130,8 @@ private:
   int keepAliveFailures_ = 0;
   int lastAcceptError_ = 0;
   int consecutiveFatalAcceptErrors_ = 0;
+  unsigned long lastAcceptMs_ = 0;
+  unsigned long totalAccepts_ = 0;
   bool libssh2Initialized_ = false;
 #ifdef TUNNEL_DIAG_LOG_ONLY
   forward_accept_diag::Tracker acceptDiag_;
