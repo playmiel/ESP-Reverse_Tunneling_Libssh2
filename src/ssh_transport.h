@@ -22,11 +22,11 @@ struct InstrChannel {
 };
 struct InstrSession {
   uint64_t lock_wait_us = 0;
-  uint32_t lock_calls = 0;   // successful acquisitions
-  uint32_t lock_failed = 0;  // timed-out acquisitions
-  uint64_t phase1_us = 0;    // total time in pumpSshTransport
+  uint32_t lock_calls = 0;  // successful acquisitions
+  uint32_t lock_failed = 0; // timed-out acquisitions
+  uint64_t phase1_us = 0;   // total time in pumpSshTransport
   uint32_t phase1_cycles = 0;
-  uint64_t phase3_us = 0;    // total time in drainLocalToSsh
+  uint64_t phase3_us = 0; // total time in drainLocalToSsh
   uint32_t phase3_cycles = 0;
 };
 #endif

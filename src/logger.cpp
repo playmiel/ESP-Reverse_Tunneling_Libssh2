@@ -10,7 +10,7 @@ namespace {
 size_t buildLogPrefix(char *out, size_t n) {
   time_t now = time(nullptr);
   if (now >= 1700000000) { // ~2023-11 sanity: time has been set
-    struct tm tm{};
+    struct tm tm {};
     localtime_r(&now, &tm);
     size_t off = 0;
     if (n > 0) {

@@ -275,8 +275,9 @@ LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
     if (!lock(pdMS_TO_TICKS(50))) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
       acceptDiag_.recordLockUnavailable(millis());
-      LOGF_W("SSH", "SERVERDIAG forward_accept_lock_unavailable remote=%s:%d "
-                    "local=%s:%d",
+      LOGF_W("SSH",
+             "SERVERDIAG forward_accept_lock_unavailable remote=%s:%d "
+             "local=%s:%d",
              entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
              entry.mapping.localHost.c_str(), entry.mapping.localPort);
 #endif
@@ -290,10 +291,11 @@ LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
       recordAcceptSuccess();
 #ifdef TUNNEL_DIAG_LOG_ONLY
       forward_accept_diag::Snapshot diag = acceptDiag_.recordAccept(millis());
-      LOGF_I("SSH", "SERVERDIAG forward_accept channel=%p remote=%s:%d "
-                    "local=%s:%d bound=%d idle_ms=%lu polls=%lu eagain=%lu "
-                    "errors=%lu lock_miss=%lu total_polls=%lu "
-                    "total_accepts=%lu last_err=%d",
+      LOGF_I("SSH",
+             "SERVERDIAG forward_accept channel=%p remote=%s:%d "
+             "local=%s:%d bound=%d idle_ms=%lu polls=%lu eagain=%lu "
+             "errors=%lu lock_miss=%lu total_polls=%lu "
+             "total_accepts=%lu last_err=%d",
              ch, entry.mapping.remoteBindHost.c_str(),
              entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
              entry.mapping.localPort, entry.boundPort,
@@ -318,8 +320,9 @@ LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
           consecutiveFatalAcceptErrors_ == kAcceptFatalReconnectThreshold ||
           (consecutiveFatalAcceptErrors_ % 100) == 0;
       if (logNow) {
-        LOGF_W("SSH", "SERVERDIAG forward_accept_error err=%d fatal=%d "
-                      "fatal_count=%d remote=%s:%d local=%s:%d bound=%d",
+        LOGF_W("SSH",
+               "SERVERDIAG forward_accept_error err=%d fatal=%d "
+               "fatal_count=%d remote=%s:%d local=%s:%d bound=%d",
                acceptErr, fatal ? 1 : 0, consecutiveFatalAcceptErrors_,
                entry.mapping.remoteBindHost.c_str(),
                entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
@@ -329,9 +332,10 @@ LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
     unsigned long now = millis();
     if (acceptDiag_.idleSummaryDue(now, ACCEPT_IDLE_LOG_INTERVAL_MS)) {
       forward_accept_diag::Snapshot diag = acceptDiag_.snapshot(now);
-      LOGF_W("SSH", "SERVERDIAG forward_accept_idle idle_ms=%lu polls=%lu "
-                    "eagain=%lu errors=%lu lock_miss=%lu total_polls=%lu "
-                    "total_accepts=%lu last_err=%d listeners=%d",
+      LOGF_W("SSH",
+             "SERVERDIAG forward_accept_idle idle_ms=%lu polls=%lu "
+             "eagain=%lu errors=%lu lock_miss=%lu total_polls=%lu "
+             "total_accepts=%lu last_err=%d listeners=%d",
              static_cast<unsigned long>(diag.idleMs),
              static_cast<unsigned long>(diag.pollsSinceAccept),
              static_cast<unsigned long>(diag.eagainSinceAccept),

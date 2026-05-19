@@ -626,12 +626,14 @@ bool SSHConfiguration::validateTunnelConfig() const {
 }
 
 bool SSHConfiguration::validateConnectionConfig() const {
-  if (!ssh_validators::isValidKeepAlive(connectionConfig.keepAliveIntervalSec)) {
+  if (!ssh_validators::isValidKeepAlive(
+          connectionConfig.keepAliveIntervalSec)) {
     LOG_E("CONFIG", "Keep-alive interval must be positive");
     return false;
   }
 
-  if (!ssh_validators::isValidReconnectDelay(connectionConfig.reconnectDelayMs)) {
+  if (!ssh_validators::isValidReconnectDelay(
+          connectionConfig.reconnectDelayMs)) {
     LOG_E("CONFIG", "Reconnect delay must be positive");
     return false;
   }
