@@ -18,9 +18,8 @@ inline bool isFatal(int err, int eagainCode, int channelUnknownCode,
 }
 
 inline bool shouldReconnectAfterConsecutiveErrors(
-    int consecutiveFatalErrors, int err, int eagainCode,
-    int channelUnknownCode, int channelClosedCode, int socketSendCode,
-    int socketDisconnectCode) {
+    int consecutiveFatalErrors, int err, int eagainCode, int channelUnknownCode,
+    int channelClosedCode, int socketSendCode, int socketDisconnectCode) {
   return consecutiveFatalErrors >= 3 &&
          isFatal(err, eagainCode, channelUnknownCode, channelClosedCode,
                  socketSendCode, socketDisconnectCode);

@@ -93,7 +93,8 @@ public:
   int getActiveListenerCount() const {
     int n = 0;
     for (const auto &e : listeners_) {
-      if (e.listener != nullptr) ++n;
+      if (e.listener != nullptr)
+        ++n;
     }
     return n;
   }

@@ -51,8 +51,7 @@ const char *findHeaderValue(const char *headers, size_t len,
     if (static_cast<size_t>(lineLimit - cursor) > nameLen &&
         cursor[nameLen] == ':' && ciEquals(cursor, headerName, nameLen)) {
       const char *value = cursor + nameLen + 1;
-      while (value < lineLimit &&
-             (*value == ' ' || *value == '\t')) {
+      while (value < lineLimit && (*value == ' ' || *value == '\t')) {
         ++value;
       }
       return value;
@@ -86,24 +85,25 @@ void parseRequestBuffer(int slot, ChannelSlot &ch) {
   const size_t len = ch.diagRequestBufferLen;
   const char *headersEnd = nullptr;
   for (size_t i = 0; i + 3 < len; ++i) {
-    if (buffer[i] == '\r' && buffer[i + 1] == '\n' &&
-        buffer[i + 2] == '\r' && buffer[i + 3] == '\n') {
+    if (buffer[i] == '\r' && buffer[i + 1] == '\n' && buffer[i + 2] == '\r' &&
+        buffer[i + 3] == '\n') {
       headersEnd = buffer + i + 4;
       break;
     }
   }
-  const char *lineEnd =
-      static_cast<const char *>(memchr(buffer, '\n', len));
+  const char *lineEnd = static_cast<const char *>(memchr(buffer, '\n', len));
   if (!lineEnd) {
     if (len == sizeof(ch.diagRequestBuffer) - 1) {
-      LOGF_W("SSH", "HTTPDIAG ch=%d ssh_to_local request_parse_truncated", slot);
+      LOGF_W("SSH", "HTTPDIAG ch=%d ssh_to_local request_parse_truncated",
+             slot);
       ch.diagRequestParsed = true;
     }
     return;
   }
   if (!headersEnd) {
     if (len == sizeof(ch.diagRequestBuffer) - 1) {
-      LOGF_W("SSH", "HTTPDIAG ch=%d ssh_to_local headers_parse_truncated", slot);
+      LOGF_W("SSH", "HTTPDIAG ch=%d ssh_to_local headers_parse_truncated",
+             slot);
       ch.diagRequestParsed = true;
     }
     return;
@@ -150,9 +150,8 @@ void observeSshToLocal(int slot, ChannelSlot &ch, const uint8_t *data,
     return;
   }
   const size_t cap = sizeof(ch.diagRequestBuffer) - 1;
-  const size_t room = cap > ch.diagRequestBufferLen
-                          ? cap - ch.diagRequestBufferLen
-                          : 0;
+  const size_t room =
+      cap > ch.diagRequestBufferLen ? cap - ch.diagRequestBufferLen : 0;
   const size_t toCopy = len < room ? len : room;
   if (toCopy > 0) {
     memcpy(ch.diagRequestBuffer + ch.diagRequestBufferLen, data, toCopy);
@@ -185,14 +184,13 @@ void logLocalResponseOnce(int slot, ChannelSlot &ch, const uint8_t *data,
   int status = 0;
   if (len >= 12 && memcmp(data, "HTTP/", 5) == 0) {
     const char *line = reinterpret_cast<const char *>(data);
-    const char *space =
-        static_cast<const char *>(memchr(line, ' ', len));
+    const char *space = static_cast<const char *>(memchr(line, ' ', len));
     if (space && static_cast<size_t>((space + 4) - line) <= len &&
         isdigit(static_cast<unsigned char>(space[1])) &&
         isdigit(static_cast<unsigned char>(space[2])) &&
         isdigit(static_cast<unsigned char>(space[3]))) {
-      status = (space[1] - '0') * 100 + (space[2] - '0') * 10 +
-               (space[3] - '0');
+      status =
+          (space[1] - '0') * 100 + (space[2] - '0') * 10 + (space[3] - '0');
     }
   }
   LOGF_I("SSH",
@@ -383,7 +381,8 @@ size_t TransportPump::formatInstrumentation(char *out, size_t outSize) const {
   size_t off = 0;
   int n = snprintf(
       out + off, outSize - off,
-      "lock_us=%llu lock_n=%u lock_fail=%u p1_us=%llu p1_n=%u p3_us=%llu p3_n=%u",
+      "lock_us=%llu lock_n=%u lock_fail=%u p1_us=%llu p1_n=%u p3_us=%llu "
+      "p3_n=%u",
       (unsigned long long)instrSess_.lock_wait_us, instrSess_.lock_calls,
       instrSess_.lock_failed, (unsigned long long)instrSess_.phase1_us,
       instrSess_.phase1_cycles, (unsigned long long)instrSess_.phase3_us,
@@ -704,9 +703,8 @@ void TransportPump::drainSshToLocal() {
     if (ch.firstLocalSendEagainMs > 0 && ch.toLocal && !ch.toLocal->empty() &&
         (millis() - ch.firstLocalSendEagainMs) >
             static_cast<unsigned long>(LOCAL_SEND_STALL_TIMEOUT_MS)) {
-      LOGF_W("SSH",
-             "Channel %d: local send stall timeout (%dms, toLocal=%zu)", i,
-             LOCAL_SEND_STALL_TIMEOUT_MS, ch.toLocal->size());
+      LOGF_W("SSH", "Channel %d: local send stall timeout (%dms, toLocal=%zu)",
+             i, LOCAL_SEND_STALL_TIMEOUT_MS, ch.toLocal->size());
       if (ch.state == ChannelSlot::State::Open) {
         channels_->beginClose(i, ChannelCloseReason::Error);
       }

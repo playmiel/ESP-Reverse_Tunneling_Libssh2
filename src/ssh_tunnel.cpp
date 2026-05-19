@@ -226,7 +226,7 @@ void SSHTunnel::loop() {
   // sshd has pending forward connections, libssh2_channel_forward_accept
   // never returns them. Cancel and recreate the listener to unblock without
   // tearing down the SSH session or active channels.
-  //session_.relistenStuckListeners(now);
+  // session_.relistenStuckListeners(now);
 
   // Pump all data (the core of the new architecture)
   transport_.pumpAll();
@@ -340,10 +340,8 @@ bool SSHTunnel::handleNewConnection() {
     LOGF_W("SSH",
            "Mapping %s:%d in circuit-breaker back-off, rejecting channel",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
-    if (!closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(200),
-                              nullptr) &&
-        !enqueueDeferredClose(ch, mapping,
-                              "Circuit breaker: close deferred")) {
+    if (!closeAcceptedChannel(session_, ch, pdMS_TO_TICKS(200), nullptr) &&
+        !enqueueDeferredClose(ch, mapping, "Circuit breaker: close deferred")) {
       LOG_W("SSH", "Circuit breaker rejection: all queues full");
     }
     return false;
@@ -356,8 +354,8 @@ bool SSHTunnel::handleNewConnection() {
                                                 mapping, pdMS_TO_TICKS(200));
     if (bindResult == BindResult::Bound) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
-      LOGF_I("SSH", "SERVERDIAG bind_ok slot=%d remote=%s:%d local=%s:%d",
-             slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+      LOGF_I("SSH", "SERVERDIAG bind_ok slot=%d remote=%s:%d local=%s:%d", slot,
+             mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
              mapping.localHost.c_str(), mapping.localPort);
 #endif
       emitChannelOpened(slot);
@@ -365,8 +363,9 @@ bool SSHTunnel::handleNewConnection() {
     }
     if (bindResult == BindResult::LockUnavailable) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
-      LOGF_W("SSH", "SERVERDIAG bind_lock_unavailable slot=%d remote=%s:%d "
-                    "local=%s:%d",
+      LOGF_W("SSH",
+             "SERVERDIAG bind_lock_unavailable slot=%d remote=%s:%d "
+             "local=%s:%d",
              slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
              mapping.localHost.c_str(), mapping.localPort);
 #endif
@@ -379,8 +378,9 @@ bool SSHTunnel::handleNewConnection() {
         pending.action = PendingChannel::Action::Bind;
         pendingCount_++;
 #ifdef TUNNEL_DIAG_LOG_ONLY
-        LOGF_W("SSH", "SERVERDIAG queued_lock_contention remote=%s:%d "
-                      "local=%s:%d pending=%d/%d",
+        LOGF_W("SSH",
+               "SERVERDIAG queued_lock_contention remote=%s:%d "
+               "local=%s:%d pending=%d/%d",
                mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
                mapping.localHost.c_str(), mapping.localPort, pendingCount_,
                MAX_PENDING);
@@ -425,8 +425,9 @@ bool SSHTunnel::handleNewConnection() {
     pending.action = PendingChannel::Action::Bind;
     pendingCount_++;
 #ifdef TUNNEL_DIAG_LOG_ONLY
-    LOGF_W("SSH", "SERVERDIAG queued_no_slot remote=%s:%d local=%s:%d "
-                  "pending=%d/%d",
+    LOGF_W("SSH",
+           "SERVERDIAG queued_no_slot remote=%s:%d local=%s:%d "
+           "pending=%d/%d",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
            mapping.localHost.c_str(), mapping.localPort, pendingCount_,
            MAX_PENDING);
@@ -523,12 +524,13 @@ void SSHTunnel::drainPendingQueue() {
                               pending.mapping, pdMS_TO_TICKS(200));
       if (bindResult == BindResult::Bound) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
-        LOGF_I("SSH", "SERVERDIAG queued_bind_ok slot=%d waited=%lums "
-                      "remote=%s:%d local=%s:%d",
+        LOGF_I("SSH",
+               "SERVERDIAG queued_bind_ok slot=%d waited=%lums "
+               "remote=%s:%d local=%s:%d",
                slot, millis() - pending.queuedAtMs,
                pending.mapping.remoteBindHost.c_str(),
-               pending.mapping.remoteBindPort, pending.mapping.localHost.c_str(),
-               pending.mapping.localPort);
+               pending.mapping.remoteBindPort,
+               pending.mapping.localHost.c_str(), pending.mapping.localPort);
 #endif
         LOGF_I("SSH", "Queued channel bound to slot %d (waited %lums)", slot,
                millis() - pending.queuedAtMs);
@@ -537,8 +539,9 @@ void SSHTunnel::drainPendingQueue() {
       } else {
         if (bindResult == BindResult::LockUnavailable) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
-          LOGF_W("SSH", "SERVERDIAG queued_bind_lock_unavailable slot=%d "
-                        "waited=%lums remote=%s:%d local=%s:%d",
+          LOGF_W("SSH",
+                 "SERVERDIAG queued_bind_lock_unavailable slot=%d "
+                 "waited=%lums remote=%s:%d local=%s:%d",
                  slot, millis() - pending.queuedAtMs,
                  pending.mapping.remoteBindHost.c_str(),
                  pending.mapping.remoteBindPort,
