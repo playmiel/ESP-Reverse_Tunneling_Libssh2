@@ -2,6 +2,9 @@
 #define SSH_SESSION_H
 
 #include "logger.h"
+#ifdef TUNNEL_DIAG_LOG_ONLY
+#include "forward_accept_diag.h"
+#endif
 #include "ssh_config.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
@@ -53,6 +56,24 @@ public:
   // Returns the LIBSSH2_CHANNEL* and fills outMapping with the corresponding
   // config. Returns nullptr if no channel is pending.
   LIBSSH2_CHANNEL *acceptChannel(TunnelConfig &outMapping);
+  bool hasFatalAcceptFailure() const;
+  int getLastAcceptError() const { return lastAcceptError_; }
+  int getConsecutiveFatalAcceptErrors() const {
+    return consecutiveFatalAcceptErrors_;
+  }
+
+  // Default threshold above which a listener is considered "stuck" and is
+  // cancelled+recreated. Picked well below typical reverse-proxy timeouts
+  // (e.g. nginx 30s) so we react before clients see a 504.
+  static constexpr unsigned long kForwardListenerStuckIdleMsDefault = 15000UL;
+
+  // If accept has been idle longer than thresholdMs while at least one prior
+  // accept has succeeded, cancel each remote-forward listener and recreate it
+  // with the same mapping. Active channels are untouched. Returns true if at
+  // least one listener was recreated. thresholdMs == 0 disables the watchdog.
+  bool relistenStuckListeners(
+      unsigned long nowMs,
+      unsigned long thresholdMs = kForwardListenerStuckIdleMsDefault);
 
   // Lock/unlock the session mutex for external libssh2 calls (e.g.,
   // channel_read/write).
@@ -66,6 +87,17 @@ public:
   // Listener access
   int getBoundPort() const { return boundPort_; }
   const std::vector<ListenerEntry> &getListeners() const { return listeners_; }
+
+  // Number of listeners that are currently bound on the remote side.
+  // Test/diagnostic only; cheap to call.
+  int getActiveListenerCount() const {
+    int n = 0;
+    for (const auto &e : listeners_) {
+      if (e.listener != nullptr)
+        ++n;
+    }
+    return n;
+  }
 
 private:
   // Connection steps
@@ -84,6 +116,10 @@ private:
 
   // Cleanup
   void cleanupSession();
+  void resetAcceptState();
+  void recordAcceptSuccess();
+  void recordAcceptNoChannel(int err);
+  bool isFatalAcceptError(int err) const;
 
   // Members
   LIBSSH2_SESSION *session_ = nullptr;
@@ -93,7 +129,14 @@ private:
   std::vector<ListenerEntry> listeners_;
   int boundPort_ = -1;
   int keepAliveFailures_ = 0;
+  int lastAcceptError_ = 0;
+  int consecutiveFatalAcceptErrors_ = 0;
+  unsigned long lastAcceptMs_ = 0;
+  unsigned long totalAccepts_ = 0;
   bool libssh2Initialized_ = false;
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  forward_accept_diag::Tracker acceptDiag_;
+#endif
 };
 
 // Fingerprint encoding helpers (used by verifyHostKey)

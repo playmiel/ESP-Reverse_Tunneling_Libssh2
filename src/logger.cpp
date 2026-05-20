@@ -1,6 +1,51 @@
 #include "logger.h"
 #include "ssh_config.h"
 #include <stdarg.h>
+#include <string.h>
+#include <time.h>
+
+namespace {
+// "[YYYY-MM-DD HH:MM:SS] " when system time is valid (NTP synced or restored
+// from RTC by the host firmware), otherwise "[up+12345ms] ".
+size_t buildLogPrefix(char *out, size_t n) {
+  time_t now = time(nullptr);
+  if (now >= 1700000000) { // ~2023-11 sanity: time has been set
+    struct tm tm {};
+    localtime_r(&now, &tm);
+    size_t off = 0;
+    if (n > 0) {
+      out[off++] = '[';
+    }
+    size_t w = strftime(out + off, n - off, "%Y-%m-%d %H:%M:%S", &tm);
+    if (w == 0) {
+      return (size_t)snprintf(out, n, "[up+%lums] ",
+                              static_cast<unsigned long>(millis()));
+    }
+    off += w;
+    int rem = snprintf(out + off, n - off, "] ");
+    if (rem > 0) {
+      off += (size_t)rem;
+    }
+    return off;
+  }
+  return (size_t)snprintf(out, n, "[up+%lums] ",
+                          static_cast<unsigned long>(millis()));
+}
+
+bool tunnelDiagLogTagAllowed(const char *tag) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  if (!tag) {
+    return false;
+  }
+  return strcmp(tag, "SSH") == 0 || strcmp(tag, "CONFIG") == 0 ||
+         strcmp(tag, "MAIN") == 0 || strcmp(tag, "MEM") == 0 ||
+         strcmp(tag, "RING") == 0;
+#else
+  (void)tag;
+  return true;
+#endif
+}
+} // namespace
 
 void Logger::init() {
   Serial.begin(globalSSHConfig.getDebugConfig().serialBaudRate);
@@ -15,10 +60,13 @@ void Logger::log(LogLevel level, const char *tag, const char *message) {
   if (level > debugConfig.minLogLevel) {
     return;
   }
+  if (!tunnelDiagLogTagAllowed(tag)) {
+    return;
+  }
 
-  unsigned long timestamp = millis();
-  Serial.printf("[%lu] %s [%s] %s\n", timestamp, getLevelString(level), tag,
-                message);
+  char prefix[40];
+  buildLogPrefix(prefix, sizeof(prefix));
+  Serial.printf("%s%s [%s] %s\n", prefix, getLevelString(level), tag, message);
 }
 
 void Logger::logf(LogLevel level, const char *tag, const char *format, ...) {

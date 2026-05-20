@@ -1,4 +1,5 @@
 #include "ssh_session.h"
+#include "forward_accept_error.h"
 #include "network_optimizations.h"
 #include <arpa/inet.h>
 #include <lwip/netdb.h>
@@ -73,6 +74,8 @@ static bool isValidHexFingerprint(const String &value) {
   return true;
 }
 
+static constexpr int kAcceptFatalReconnectThreshold = 3;
+
 // ---------------------------------------------------------------------------
 // SSHSession
 // ---------------------------------------------------------------------------
@@ -107,6 +110,7 @@ bool SSHSession::init() {
 
 bool SSHSession::connect(SSHConfiguration *config) {
   config_ = config;
+  resetAcceptState();
 
   if (session_) {
     LOG_W("SSH", "connect: leftover session, cleaning up");
@@ -211,24 +215,138 @@ bool SSHSession::checkConnection() const {
   return true;
 }
 
+void SSHSession::resetAcceptState() {
+  lastAcceptError_ = 0;
+  consecutiveFatalAcceptErrors_ = 0;
+  lastAcceptMs_ = 0;
+  totalAccepts_ = 0;
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  acceptDiag_.reset();
+#endif
+}
+
+void SSHSession::recordAcceptSuccess() {
+  lastAcceptError_ = 0;
+  consecutiveFatalAcceptErrors_ = 0;
+  lastAcceptMs_ = millis();
+  ++totalAccepts_;
+}
+
+void SSHSession::recordAcceptNoChannel(int err) {
+  lastAcceptError_ = err;
+  if (isFatalAcceptError(err)) {
+    ++consecutiveFatalAcceptErrors_;
+    return;
+  }
+  consecutiveFatalAcceptErrors_ = 0;
+}
+
+bool SSHSession::isFatalAcceptError(int err) const {
+  return forward_accept_error::isFatal(
+      err, LIBSSH2_ERROR_EAGAIN, LIBSSH2_ERROR_CHANNEL_UNKNOWN,
+      LIBSSH2_ERROR_CHANNEL_CLOSED, LIBSSH2_ERROR_SOCKET_SEND,
+      LIBSSH2_ERROR_SOCKET_DISCONNECT);
+}
+
+bool SSHSession::hasFatalAcceptFailure() const {
+  return forward_accept_error::shouldReconnectAfterConsecutiveErrors(
+      consecutiveFatalAcceptErrors_, lastAcceptError_, LIBSSH2_ERROR_EAGAIN,
+      LIBSSH2_ERROR_CHANNEL_UNKNOWN, LIBSSH2_ERROR_CHANNEL_CLOSED,
+      LIBSSH2_ERROR_SOCKET_SEND, LIBSSH2_ERROR_SOCKET_DISCONNECT);
+}
+
 LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
   if (!session_ || listeners_.empty()) {
     return nullptr;
   }
 
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  static constexpr unsigned long ACCEPT_IDLE_LOG_INTERVAL_MS = 1000;
+#endif
+
   for (auto &entry : listeners_) {
     if (!entry.listener) {
       continue;
     }
+#ifdef TUNNEL_DIAG_LOG_ONLY
+    unsigned long pollNow = millis();
+    acceptDiag_.recordPoll(pollNow);
+#endif
     if (!lock(pdMS_TO_TICKS(50))) {
+#ifdef TUNNEL_DIAG_LOG_ONLY
+      acceptDiag_.recordLockUnavailable(millis());
+      LOGF_W("SSH",
+             "SERVERDIAG forward_accept_lock_unavailable remote=%s:%d "
+             "local=%s:%d",
+             entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
+             entry.mapping.localHost.c_str(), entry.mapping.localPort);
+#endif
       continue;
     }
     LIBSSH2_CHANNEL *ch = libssh2_channel_forward_accept(entry.listener);
+    int acceptErr = ch ? 0 : libssh2_session_last_errno(session_);
     unlock();
     if (ch) {
       outMapping = entry.mapping;
+      recordAcceptSuccess();
+#ifdef TUNNEL_DIAG_LOG_ONLY
+      forward_accept_diag::Snapshot diag = acceptDiag_.recordAccept(millis());
+      LOGF_I("SSH",
+             "SERVERDIAG forward_accept channel=%p remote=%s:%d "
+             "local=%s:%d bound=%d idle_ms=%lu polls=%lu eagain=%lu "
+             "errors=%lu lock_miss=%lu total_polls=%lu "
+             "total_accepts=%lu last_err=%d",
+             ch, entry.mapping.remoteBindHost.c_str(),
+             entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+             entry.mapping.localPort, entry.boundPort,
+             static_cast<unsigned long>(diag.idleMs),
+             static_cast<unsigned long>(diag.pollsSinceAccept),
+             static_cast<unsigned long>(diag.eagainSinceAccept),
+             static_cast<unsigned long>(diag.errorsSinceAccept),
+             static_cast<unsigned long>(diag.lockMissesSinceAccept),
+             static_cast<unsigned long>(diag.totalPolls),
+             static_cast<unsigned long>(diag.totalAccepts), diag.lastErr);
+#endif
       return ch;
     }
+    recordAcceptNoChannel(acceptErr);
+#ifdef TUNNEL_DIAG_LOG_ONLY
+    acceptDiag_.recordNoChannel(millis(), acceptErr,
+                                acceptErr == LIBSSH2_ERROR_EAGAIN);
+    if (acceptErr != 0 && acceptErr != LIBSSH2_ERROR_EAGAIN) {
+      const bool fatal = isFatalAcceptError(acceptErr);
+      const bool logNow =
+          !fatal || consecutiveFatalAcceptErrors_ == 1 ||
+          consecutiveFatalAcceptErrors_ == kAcceptFatalReconnectThreshold ||
+          (consecutiveFatalAcceptErrors_ % 100) == 0;
+      if (logNow) {
+        LOGF_W("SSH",
+               "SERVERDIAG forward_accept_error err=%d fatal=%d "
+               "fatal_count=%d remote=%s:%d local=%s:%d bound=%d",
+               acceptErr, fatal ? 1 : 0, consecutiveFatalAcceptErrors_,
+               entry.mapping.remoteBindHost.c_str(),
+               entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+               entry.mapping.localPort, entry.boundPort);
+      }
+    }
+    unsigned long now = millis();
+    if (acceptDiag_.idleSummaryDue(now, ACCEPT_IDLE_LOG_INTERVAL_MS)) {
+      forward_accept_diag::Snapshot diag = acceptDiag_.snapshot(now);
+      LOGF_W("SSH",
+             "SERVERDIAG forward_accept_idle idle_ms=%lu polls=%lu "
+             "eagain=%lu errors=%lu lock_miss=%lu total_polls=%lu "
+             "total_accepts=%lu last_err=%d listeners=%d",
+             static_cast<unsigned long>(diag.idleMs),
+             static_cast<unsigned long>(diag.pollsSinceAccept),
+             static_cast<unsigned long>(diag.eagainSinceAccept),
+             static_cast<unsigned long>(diag.errorsSinceAccept),
+             static_cast<unsigned long>(diag.lockMissesSinceAccept),
+             static_cast<unsigned long>(diag.totalPolls),
+             static_cast<unsigned long>(diag.totalAccepts), diag.lastErr,
+             getActiveListenerCount());
+      acceptDiag_.markIdleSummary(now);
+    }
+#endif
   }
   return nullptr;
 }
@@ -291,12 +409,45 @@ bool SSHSession::tcpConnect(const SSHServerConfig &sshConfig) {
   return true;
 }
 
+#ifdef TUNNEL_LIBSSH2_TRACE
+static void libssh2TraceToLogger(LIBSSH2_SESSION * /*session*/,
+                                 void * /*context*/, const char *data,
+                                 size_t length) {
+  if (!data || length == 0) {
+    return;
+  }
+  // libssh2 trace strings aren't NUL-terminated and may contain a trailing
+  // newline; copy into a small static buffer (single-threaded under session
+  // lock) and trim before forwarding.
+  static char buf[256];
+  size_t n = length < sizeof(buf) - 1 ? length : sizeof(buf) - 1;
+  memcpy(buf, data, n);
+  while (n > 0 && (buf[n - 1] == '\n' || buf[n - 1] == '\r')) {
+    --n;
+  }
+  buf[n] = '\0';
+  LOGF_D("LIBSSH2", "%s", buf);
+}
+#endif
+
 bool SSHSession::handshake() {
   session_ = libssh2_session_init();
   if (!session_) {
     LOG_E("SSH", "Could not initialize the SSH session");
     return false;
   }
+
+#ifdef TUNNEL_LIBSSH2_TRACE
+  // Wire libssh2 internal trace to the logger so we can see CHANNEL_OPEN
+  // routing and listener queueing. Requires the libssh2 library itself to
+  // be compiled with -DLIBSSH2DEBUG (otherwise libssh2_trace*() are no-ops).
+  // CONN gives us the events relevant to forward-accept diagnosis:
+  // "Remote received connection from..." and "Connection queued: ...".
+  // Add LIBSSH2_TRACE_TRANS if you also need per-packet visibility (very
+  // chatty — thousands of lines/sec on a busy session).
+  libssh2_trace_sethandler(session_, this, libssh2TraceToLogger);
+  libssh2_trace(session_, LIBSSH2_TRACE_CONN);
+#endif
 
   // Session stays BLOCKING during setup (handshake, auth, listeners).
   // Non-blocking mode is enabled after connect() completes successfully.
@@ -714,18 +865,45 @@ bool SSHSession::createListenerForMapping(const TunnelConfig &mapping,
   }
 
   if (!handle) {
-    LOGF_E("SSH", "Unable to create reverse listener for %s:%d -> %s:%d",
+    // Fetch libssh2's last error string for diagnostics. If sshd refused
+    // the bind because a previous listener is still bound (Bug #2 in the
+    // 2026-04-28 baseline report), the message will be along the lines
+    // of "channel_setup_fwd_listener_tcpip: cannot listen to port: <N>".
+    String errDetail;
+    if (lock(pdMS_TO_TICKS(100))) {
+      char *errmsg = nullptr;
+      int errlen = 0;
+      libssh2_session_last_error(session_, &errmsg, &errlen, 0);
+      if (errmsg) {
+        errDetail = errmsg;
+      }
+      unlock();
+    }
+    LOGF_E("SSH",
+           "Unable to create reverse listener for %s:%d -> %s:%d "
+           "(libssh2: %s) — possible stale listener on sshd; check "
+           "ClientAliveInterval / ClientAliveCountMax.",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
-           mapping.localHost.c_str(), mapping.localPort);
+           mapping.localHost.c_str(), mapping.localPort,
+           errDetail.length() ? errDetail.c_str() : "no detail");
     return false;
   }
 
   entry.listener = handle;
   entry.mapping = mapping;
   entry.boundPort = boundPortResult;
+  if (boundPortResult != bindPort && bindPort != 0) {
+    LOGF_W("SSH",
+           "Listener bound on port %d but %d was requested — sshd may have "
+           "fallen back to a random port",
+           boundPortResult, bindPort);
+  }
   LOGF_I("SSH", "Reverse listener ready %s:%d (bound %d) -> %s:%d",
          mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
          boundPortResult, mapping.localHost.c_str(), mapping.localPort);
+  if (lastAcceptMs_ == 0) {
+    lastAcceptMs_ = millis();
+  }
   return true;
 }
 
@@ -746,6 +924,52 @@ void SSHSession::cancelAllListeners() {
   }
   listeners_.clear();
   boundPort_ = -1;
+}
+
+bool SSHSession::relistenStuckListeners(unsigned long nowMs,
+                                        unsigned long thresholdMs) {
+  if (!session_ || socketfd_ < 0 || listeners_.empty()) {
+    return false;
+  }
+  // Require at least one prior accept on this listener: that proves it has
+  // worked, so the current idle is suspicious rather than just "no traffic".
+  if (thresholdMs == 0 || lastAcceptMs_ == 0 || totalAccepts_ == 0) {
+    return false;
+  }
+  unsigned long idleMs = nowMs - lastAcceptMs_;
+  if (idleMs < thresholdMs) {
+    return false;
+  }
+
+  bool anyRecreated = false;
+  for (auto &entry : listeners_) {
+    if (!entry.listener) {
+      continue;
+    }
+    TunnelConfig mapping = entry.mapping;
+    LOGF_W("SSH",
+           "SERVERDIAG forward_listener_stuck_relisten remote=%s:%d "
+           "idle_ms=%lu total_accepts=%lu threshold_ms=%lu",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort, idleMs,
+           totalAccepts_, thresholdMs);
+    cancelListener(entry);
+    if (createListenerForMapping(mapping, entry)) {
+      anyRecreated = true;
+    } else {
+      LOGF_E("SSH",
+             "Failed to recreate stuck listener for %s:%d — slot left empty",
+             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+    }
+  }
+  // Reset idle baseline so we don't immediately re-fire if recreation succeeded
+  // but new traffic has not yet been accepted.
+  lastAcceptMs_ = nowMs;
+  lastAcceptError_ = 0;
+  consecutiveFatalAcceptErrors_ = 0;
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  acceptDiag_.reset();
+#endif
+  return anyRecreated;
 }
 
 // ---------------------------------------------------------------------------
@@ -775,4 +999,5 @@ void SSHSession::cleanupSession() {
   }
 
   keepAliveFailures_ = 0;
+  resetAcceptState();
 }

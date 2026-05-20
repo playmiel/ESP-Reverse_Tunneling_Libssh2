@@ -1,0 +1,25 @@
+services:
+  sshd:
+    build: ./sshd
+    container_name: tunnel_test_sshd
+    ports:
+      - "2222:22"
+      - "22080:22080"
+      - "22081:22081"
+      - "22082:22082"
+    restart: unless-stopped
+
+  echo:
+    image: alpine:3.19
+    container_name: tunnel_test_echo
+    command: sh -c "apk add --no-cache socat && socat -d TCP-LISTEN:9000,reuseaddr,fork EXEC:cat"
+    ports:
+      - "9000:9000"
+    restart: unless-stopped
+
+  slow_echo:
+    build: ./slow_echo
+    container_name: tunnel_test_slow_echo
+    ports:
+      - "9001:9001"
+    restart: unless-stopped

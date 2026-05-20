@@ -1,6 +1,8 @@
 #ifndef SSH_CHANNEL_H
 #define SSH_CHANNEL_H
 
+#include "channel_close_progress.h"
+#include "circuit_breaker.h"
 #include "ring_buffer.h"
 #include "ssh_config.h"
 #include <libssh2_esp.h>
@@ -41,9 +43,12 @@ struct ChannelSlot {
   enum class State { Open, Draining, Closed } state = State::Closed;
   bool localEof = false;  // Local socket sent EOF / closed
   bool remoteEof = false; // SSH channel sent EOF
+  bool localShutdownSent =
+      false; // shutdown(SHUT_WR) issued on local socket after remote EOF
   unsigned long closeStartMs = 0;
   unsigned long eofSentMs = 0; // When SSH EOF was sent (0 = not yet sent)
   ChannelCloseReason closeReason = ChannelCloseReason::Unknown;
+  channel_close_progress::Progress sshCloseProgress;
 
   // Backpressure flags
   bool localReadPaused =
@@ -60,7 +65,33 @@ struct ChannelSlot {
   // Error tracking
   int consecutiveErrors = 0;
   int eagainCount = 0;
-  unsigned long firstEagainMs = 0;
+  unsigned long firstEagainMs = 0;          // SSH write EAGAIN stall start
+  unsigned long firstLocalSendEagainMs = 0; // local send EAGAIN stall start
+
+#ifdef TUNNEL_DIAG_LOG_ONLY
+  bool diagRequestParsed = false;
+  bool diagLocalWriteLogged = false;
+  bool diagResponseLogged = false;
+  bool diagNoRequestLogged = false;
+  bool diagNoLocalWriteLogged = false;
+  bool diagNoResponseLogged = false;
+  unsigned long diagBoundMs = 0;
+  unsigned long diagRequestMs = 0;
+  unsigned long diagLocalWriteMs = 0;
+  char diagMethod[8] = {};
+  char diagUrl[160] = {};
+  char diagRequestId[40] = {};
+  char diagRequestBuffer[2048] = {};
+  size_t diagRequestBufferLen = 0;
+#endif
+
+  // millis() at the most recent finalizeClose; 0 if never finalized.
+  // Used by allocateSlot (channel_alloc::findFreeSlot) to enforce a short
+  // cooldown after teardown so libssh2's channel free can settle before
+  // the slot is re-bound (Bug #1 in 2026-04-28 baseline report).
+  // Intentionally NOT reset by resetSlot — the cooldown must survive
+  // a slot's transient lifecycle.
+  unsigned long lastFinalizeMs = 0;
 };
 
 // Manages a fixed-size array of ChannelSlots.
@@ -92,7 +123,8 @@ public:
   // Finalize close: free SSH channel, close local socket, reset slot.
   // The caller must hold the session lock when calling this (for
   // libssh2_channel_free).
-  void finalizeClose(int slotIndex);
+  // Returns false if non-blocking libssh2 close/free needs another retry.
+  bool finalizeClose(int slotIndex);
 
   // Force-reset a slot when the SSH session is already unusable and the
   // caller cannot safely run libssh2 channel cleanup.
@@ -120,6 +152,14 @@ public:
   size_t getTotalBytesReceived() const;
   size_t getTotalBytesSent() const;
 
+  // Circuit breaker: returns true if the mapping identified by remoteBindPort
+  // is currently in back-off due to recent local-endpoint failures.
+  bool isMappingBackedOff(int remoteBindPort, unsigned long now) const {
+    return breaker_.isBackedOff(remoteBindPort, now);
+  }
+  // Total number of CLOSED -> OPEN transitions since construction.
+  unsigned long getBreakerTrips() const { return breaker_.totalTrips(); }
+
 private:
   int connectToLocalEndpoint(const TunnelConfig &mapping);
   void snapshotEndpoint(ChannelSlot &slot, const TunnelConfig &mapping);
@@ -129,6 +169,8 @@ private:
   int maxSlots_ = 0;
   int activeCount_ = 0;
   size_t ringBufferSize_ = 32 * 1024; // Per ring buffer (default 32KB)
+
+  CircuitBreaker breaker_;
 };
 
 #endif // SSH_CHANNEL_H

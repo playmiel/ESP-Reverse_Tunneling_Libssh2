@@ -68,6 +68,15 @@ public:
   unsigned long getBytesSent();
   unsigned long getBytesDropped();
   int getActiveChannels();
+  // Number of reverse-tunnel listeners currently bound on the remote side.
+  // Test/diagnostic helper; surfaces SSHSession::getActiveListenerCount().
+  int getActiveListenerCount() const {
+    return session_.getActiveListenerCount();
+  }
+  // Total CLOSED -> OPEN transitions of any per-mapping circuit breaker
+  // since boot. Surfaced so integration tests can structurally detect
+  // breaker engagement without parsing log text.
+  unsigned long getBreakerTrips();
   int getKeepAliveFailures() const { return session_.getKeepAliveFailures(); }
   int getSocketHealthFailures() const { return socketHealthFailures_; }
 
@@ -80,6 +89,14 @@ public:
 
   // Backpressure query for adaptive delay in caller loop
   bool hasAnyBackpressure() const;
+
+#ifdef TUNNEL_INSTRUMENT
+  // Test-only: dump cumulative TransportPump instrumentation (lock waits,
+  // phase timings, per-channel libssh2 read/write counters) into out.
+  size_t dumpTransportInstrumentation(char *out, size_t outSize) const {
+    return transport_.formatInstrumentation(out, outSize);
+  }
+#endif
 
 private:
   // Accept pending SSH channel and bind to a local socket
