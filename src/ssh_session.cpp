@@ -909,15 +909,31 @@ bool SSHSession::createListeners(SSHConfiguration *config) {
     return false;
   }
 
+  int failedSecondary = 0;
   for (int i = 0; i < desired; ++i) {
     ListenerEntry entry;
     entry.mapping = mappings[i];
     if (!createListenerForMapping(entry.mapping, entry)) {
-      LOGF_E("SSH", "Failed to create listener for %s:%d -> %s:%d",
+      if (i == 0) {
+        // Primary mapping is mandatory: without it the tunnel serves no
+        // purpose, so the whole session must fail and reconnect.
+        LOGF_E("SSH", "Failed to create primary listener for %s:%d -> %s:%d",
+               entry.mapping.remoteBindHost.c_str(),
+               entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+               entry.mapping.localPort);
+        cancelAllListeners();
+        return false;
+      }
+      // Secondary mappings (e.g. Modbus) are best-effort: keep the session and
+      // the primary tunnel alive even when an extra remote port cannot bind
+      // (stale listener still held by sshd, port not permitted, etc.).
+      ++failedSecondary;
+      LOGF_W("SSH",
+             "Secondary listener skipped %s:%d -> %s:%d (bind failed); primary "
+             "tunnel stays up",
              entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
              entry.mapping.localHost.c_str(), entry.mapping.localPort);
-      cancelAllListeners();
-      return false;
+      continue;
     }
     listeners_.push_back(entry);
     if (boundPort_ < 0) {
@@ -928,6 +944,11 @@ bool SSHSession::createListeners(SSHConfiguration *config) {
   if (static_cast<int>(mappings.size()) > desired) {
     LOGF_W("SSH", "Only %d/%zu listeners created due to limit", desired,
            mappings.size());
+  }
+
+  if (failedSecondary > 0) {
+    LOGF_W("SSH", "%d/%d secondary listener(s) unavailable this session",
+           failedSecondary, desired - 1);
   }
 
   return !listeners_.empty();
