@@ -7,6 +7,9 @@ on:
     branches: [ "**" ]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -15,6 +18,7 @@ jobs:
       matrix:
         environment:
           - arduino-3
+          - lolin_s2_mini
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -39,14 +43,23 @@ jobs:
           pip install platformio
 
       - name: Install dependencies
+        run: pio pkg install -e ${{ matrix.environment }}
+
+      - name: Install PlatformIO example dependencies
+        if: matrix.environment == 'arduino-3'
+        run: pio pkg install -d examples
+
+      - name: Prepare safe example configuration
         run: |
-          pio pkg install
-          pio pkg install -d examples
+          cp examples/src/secrets.example.h examples/src/secrets.h
+          git check-ignore --quiet examples/src/secrets.h
+          test -z "$(git status --porcelain --untracked-files=all)"
 
       - name: Build ${{ matrix.environment }}
         run: pio run -e ${{ matrix.environment }}
 
       - name: Build PlatformIO example
+        if: matrix.environment == 'arduino-3'
         run: pio run -e esp32dev -d examples
 
   lint:
