@@ -16,6 +16,14 @@ void test_port_boundaries(void) {
     TEST_ASSERT_FALSE(isValidPort(-1));
 }
 
+void test_remote_bind_port_allows_ephemeral_zero(void) {
+    TEST_ASSERT_FALSE(isValidRemoteBindPort(-1));
+    TEST_ASSERT_TRUE(isValidRemoteBindPort(0));
+    TEST_ASSERT_TRUE(isValidRemoteBindPort(1));
+    TEST_ASSERT_TRUE(isValidRemoteBindPort(65535));
+    TEST_ASSERT_FALSE(isValidRemoteBindPort(65536));
+}
+
 void test_hostname_basic(void) {
     TEST_ASSERT_TRUE(isValidHostname("example.com"));
     TEST_ASSERT_TRUE(isValidHostname("192.168.1.1"));
@@ -65,6 +73,13 @@ void test_connection_timeout(void) {
     TEST_ASSERT_TRUE(isValidConnectionTimeout(30));
 }
 
+void test_channel_timeout(void) {
+    TEST_ASSERT_FALSE(isValidChannelTimeout(0));
+    TEST_ASSERT_FALSE(isValidChannelTimeout(-1));
+    TEST_ASSERT_TRUE(isValidChannelTimeout(1));
+    TEST_ASSERT_TRUE(isValidChannelTimeout(1800000));
+}
+
 void test_max_reconnect_attempts(void) {
     TEST_ASSERT_FALSE(isValidMaxReconnectAttempts(0));
     TEST_ASSERT_FALSE(isValidMaxReconnectAttempts(-1));
@@ -75,6 +90,7 @@ void test_max_reconnect_attempts(void) {
 int main(int, char **) {
     UNITY_BEGIN();
     RUN_TEST(test_port_boundaries);
+    RUN_TEST(test_remote_bind_port_allows_ephemeral_zero);
     RUN_TEST(test_hostname_basic);
     RUN_TEST(test_hostname_empty_rejected);
     RUN_TEST(test_keepalive);
@@ -82,6 +98,7 @@ int main(int, char **) {
     RUN_TEST(test_reconnect_delay);
     RUN_TEST(test_max_channels);
     RUN_TEST(test_connection_timeout);
+    RUN_TEST(test_channel_timeout);
     RUN_TEST(test_max_reconnect_attempts);
     return UNITY_END();
 }

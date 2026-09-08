@@ -49,8 +49,8 @@ void setup() {
   globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, DOCKER_HOST_IP, 65500);
 
   globalSSHConfig.setConnectionConfig(30, 5000, 100, 30);
-  // Default 64KB ring buffers — BOARD_HAS_PSRAM is set in platformio.ini
-  // so the storage lives in PSRAM, not internal heap.
+  // Two 64 KiB directional rings per active channel. BOARD_HAS_PSRAM is set
+  // in platformio.ini so the storage lives in PSRAM, not internal heap.
   globalSSHConfig.setBufferConfig(8192, 5, 1800000, 64 * 1024);
   globalSSHConfig.setDebugConfig(true, 115200);
 

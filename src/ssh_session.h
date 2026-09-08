@@ -62,6 +62,12 @@ public:
     return consecutiveFatalAcceptErrors_;
   }
 
+  // Add or cancel one reverse listener without reconnecting the SSH session.
+  // Cancelling a listener stops new accepts; already-open channels continue.
+  bool addReverseListener(const TunnelConfig &mapping);
+  bool removeReverseListener(const String &remoteHost, int remotePort);
+  bool hasReverseListener(const String &remoteHost, int remotePort) const;
+
   // Default threshold above which a listener is considered "stuck" and is
   // cancelled+recreated. Picked well below typical reverse-proxy timeouts
   // (e.g. nginx 30s) so we react before clients see a 504.
@@ -111,7 +117,7 @@ private:
   // Listener helpers
   bool createListenerForMapping(const TunnelConfig &mapping,
                                 ListenerEntry &entry);
-  void cancelListener(ListenerEntry &entry);
+  bool cancelListener(ListenerEntry &entry);
   void cancelAllListeners();
 
   // Cleanup

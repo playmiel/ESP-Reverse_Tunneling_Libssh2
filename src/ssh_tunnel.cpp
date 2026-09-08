@@ -1,4 +1,5 @@
 #include "ssh_tunnel.h"
+#include "ssh_config_validators.h"
 #include <unistd.h>
 
 namespace {
@@ -83,6 +84,11 @@ bool SSHTunnel::init() {
     LOG_E("SSH", "Failed to initialize channel manager");
     return false;
   }
+  const unsigned long channelTimeoutMs =
+      connConfig.channelTimeoutMs > 0
+          ? static_cast<unsigned long>(connConfig.channelTimeoutMs)
+          : 1800000UL;
+  channels_.setChannelTimeout(channelTimeoutMs);
 
   // Initialize transport pump
   size_t bufSize = connConfig.bufferSize > 0 ? connConfig.bufferSize : 4096;
@@ -90,6 +96,7 @@ bool SSHTunnel::init() {
     LOG_E("SSH", "Failed to initialize transport pump");
     return false;
   }
+  transport_.setChannelTimeout(channelTimeoutMs);
   transport_.attach(&session_, &channels_);
 
   state_ = TUNNEL_DISCONNECTED;
@@ -303,17 +310,65 @@ void SSHTunnel::setEventHandlers(const SSHTunnelEvents &handlers) {
 }
 
 bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
-  config_->addTunnelMapping(mapping);
+  if (!ssh_validators::isValidHostname(mapping.remoteBindHost.c_str()) ||
+      !ssh_validators::isValidRemoteBindPort(mapping.remoteBindPort) ||
+      !ssh_validators::isValidHostname(mapping.localHost.c_str()) ||
+      !ssh_validators::isValidPort(mapping.localPort)) {
+    LOG_E("SSH", "Cannot add reverse tunnel: invalid mapping");
+    return false;
+  }
+  if (!config_) {
+    config_ = &globalSSHConfig;
+  }
+
+  bool alreadyConfigured = false;
+  const auto &mappings = config_->getTunnelMappings();
+  for (const auto &configured : mappings) {
+    if (configured.remoteBindHost == mapping.remoteBindHost &&
+        configured.remoteBindPort == mapping.remoteBindPort &&
+        configured.localHost == mapping.localHost &&
+        configured.localPort == mapping.localPort) {
+      alreadyConfigured = true;
+      break;
+    }
+  }
+
+  if (isConnected()) {
+    if (session_.hasReverseListener(mapping.remoteBindHost,
+                                    mapping.remoteBindPort)) {
+      LOGF_W("SSH", "Reverse tunnel already active for %s:%d",
+             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+      return false;
+    }
+    if (!session_.addReverseListener(mapping)) {
+      return false;
+    }
+  } else if (alreadyConfigured) {
+    LOGF_W("SSH", "Reverse tunnel already configured for %s:%d",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+    return false;
+  }
+
+  if (!alreadyConfigured) {
+    config_->addTunnelMapping(mapping);
+  }
   return true;
 }
 
 bool SSHTunnel::removeReverseTunnel(const String &remoteHost, int remotePort) {
+  if (!config_) {
+    config_ = &globalSSHConfig;
+  }
   const auto &mappings = config_->getTunnelMappings();
   for (size_t i = 0; i < mappings.size(); ++i) {
     if (mappings[i].remoteBindHost == remoteHost &&
         mappings[i].remoteBindPort == remotePort) {
-      config_->removeTunnelMapping(i);
-      return true;
+      if (isConnected() &&
+          session_.hasReverseListener(remoteHost, remotePort) &&
+          !session_.removeReverseListener(remoteHost, remotePort)) {
+        return false;
+      }
+      return config_->removeTunnelMapping(i);
     }
   }
   return false;

@@ -100,12 +100,16 @@ void test_millis_wrap(void) {
     TEST_ASSERT_FALSE(cb.isBackedOff(22080, CircuitBreaker::BACKOFF_BASE_MS));
 }
 
-void test_sentinel_port_zero_is_noop(void) {
+void test_ephemeral_port_zero_is_tracked(void) {
     CircuitBreaker cb;
+    cb.recordFailure(0, 100);
+    cb.recordFailure(0, 100);
     bool tripped = cb.recordFailure(0, 100);
-    TEST_ASSERT_FALSE(tripped);
-    cb.recordSuccess(0);  // must not crash
-    TEST_ASSERT_NULL(cb.peek(0));
+    TEST_ASSERT_TRUE(tripped);
+    TEST_ASSERT_TRUE(cb.isBackedOff(0, 100));
+    TEST_ASSERT_NOT_NULL(cb.peek(0));
+    cb.recordSuccess(0);
+    TEST_ASSERT_FALSE(cb.isBackedOff(0, 100));
 }
 
 void test_re_arm_after_recovery(void) {
@@ -131,7 +135,7 @@ int main(int, char **) {
     RUN_TEST(test_multi_port_isolation);
     RUN_TEST(test_table_saturation_silent);
     RUN_TEST(test_millis_wrap);
-    RUN_TEST(test_sentinel_port_zero_is_noop);
+    RUN_TEST(test_ephemeral_port_zero_is_tracked);
     RUN_TEST(test_re_arm_after_recovery);
     return UNITY_END();
 }

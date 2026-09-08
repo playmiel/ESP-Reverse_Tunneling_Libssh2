@@ -83,7 +83,8 @@ public:
   // Event handlers
   void setEventHandlers(const SSHTunnelEvents &handlers);
 
-  // Dynamic tunnel management (add/remove listeners at runtime)
+  // Dynamic tunnel management. When connected, these methods update the live
+  // listener set immediately as well as the configuration used on reconnect.
   bool addReverseTunnel(const TunnelConfig &mapping);
   bool removeReverseTunnel(const String &remoteHost, int remotePort);
 

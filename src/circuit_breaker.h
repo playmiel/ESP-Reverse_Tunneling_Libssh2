@@ -15,7 +15,8 @@ public:
   static constexpr unsigned long BACKOFF_CAP_MS = 60000;
 
   struct MappingHealth {
-    int remoteBindPort = 0; // 0 = entry unused
+    // -1 = entry unused; port 0 requests an ephemeral port.
+    int remoteBindPort = -1;
     uint16_t consecutiveFails = 0;
     unsigned long backoffUntilMs = 0;
   };
@@ -53,7 +54,7 @@ inline bool CircuitBreaker::isBackedOff(int port, unsigned long now) const {
 }
 
 inline bool CircuitBreaker::recordFailure(int port, unsigned long now) {
-  if (port == 0) {
+  if (port < 0) {
     return false;
   }
   MappingHealth *h = findOrAlloc(port);
@@ -83,7 +84,7 @@ inline bool CircuitBreaker::recordFailure(int port, unsigned long now) {
 }
 
 inline void CircuitBreaker::recordSuccess(int port) {
-  if (port == 0) {
+  if (port < 0) {
     return;
   }
   MappingHealth *h = findOrAlloc(port);
@@ -100,13 +101,16 @@ CircuitBreaker::peek(int port) const {
 }
 
 inline CircuitBreaker::MappingHealth *CircuitBreaker::findOrAlloc(int port) {
+  if (port < 0) {
+    return nullptr;
+  }
   for (int i = 0; i < MAX_MAPPING_HEALTH; ++i) {
     if (health_[i].remoteBindPort == port) {
       return &health_[i];
     }
   }
   for (int i = 0; i < MAX_MAPPING_HEALTH; ++i) {
-    if (health_[i].remoteBindPort == 0) {
+    if (health_[i].remoteBindPort < 0) {
       health_[i].remoteBindPort = port;
       health_[i].consecutiveFails = 0;
       health_[i].backoffUntilMs = 0;
@@ -118,8 +122,8 @@ inline CircuitBreaker::MappingHealth *CircuitBreaker::findOrAlloc(int port) {
 
 inline const CircuitBreaker::MappingHealth *
 CircuitBreaker::find(int port) const {
-  if (port == 0) {
-    return nullptr; // 0 is the "unused slot" sentinel, never a real port
+  if (port < 0) {
+    return nullptr;
   }
   for (int i = 0; i < MAX_MAPPING_HEALTH; ++i) {
     if (health_[i].remoteBindPort == port) {

@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `addReverseTunnel()` and `removeReverseTunnel()` now update listeners on an
+  active SSH session instead of requiring a reconnect.
+- Reverse listeners now accept port `0`, allowing sshd to select an ephemeral
+  port as documented.
+- The `channelTimeout` argument of `setBufferConfig()` once again controls the
+  open-channel inactivity timeout; its default is 30 minutes.
+- Buffer documentation now consistently describes the configured size as the
+  capacity of each of the two directional rings allocated per active channel.
+
 ## [2.2.0] — 2026-04-30 — Stabilization
 
 ### Fixes
@@ -76,4 +89,3 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-

@@ -1,4 +1,5 @@
 #include "ssh_channel.h"
+#include "channel_inactivity.h"
 #include "channel_slot_alloc.h"
 #include "memory_fixes.h"
 #include "network_optimizations.h"
@@ -40,7 +41,7 @@ bool ChannelManager::init(int maxChannels, size_t ringBufferSize) {
     new (&slots_[i]) ChannelSlot();
   }
 
-  LOGF_I("SSH", "ChannelManager initialized: %d slots, %zuKB ring buffers",
+  LOGF_I("SSH", "ChannelManager initialized: %d slots, 2 x %zuKB per channel",
          maxSlots_, ringBufferSize_ / 1024);
   return true;
 }
@@ -87,9 +88,12 @@ int ChannelManager::allocateSlot() {
     return idx;
   }
 
-  // Second pass: recycle stale slot (30s inactivity)
+  // Second pass: mark an inactive channel for recycling. The same configured
+  // timeout is also enforced on every pump cycle by TransportPump.
   for (int i = 0; i < maxSlots_; ++i) {
-    if (slots_[i].active && (now - slots_[i].lastActivity) > 30000) {
+    if (slots_[i].active &&
+        channel_inactivity::hasExpired(now, slots_[i].lastActivity,
+                                       channelTimeoutMs_)) {
       LOGF_I("SSH", "Recycling stale channel %d", i);
       beginClose(i, ChannelCloseReason::Timeout);
       return -1; // Don't reuse immediately; let drain complete first

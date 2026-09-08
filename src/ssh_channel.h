@@ -105,6 +105,12 @@ public:
   // Allocate slot array. Call once after configuration is known.
   bool init(int maxChannels, size_t ringBufferSize);
 
+  // Set the maximum inactivity period for open channels. Configuration
+  // validation guarantees a positive value before normal use.
+  void setChannelTimeout(unsigned long timeoutMs) {
+    channelTimeoutMs_ = timeoutMs;
+  }
+
   // Release all slots and free memory.
   void destroy();
 
@@ -169,6 +175,7 @@ private:
   int maxSlots_ = 0;
   int activeCount_ = 0;
   size_t ringBufferSize_ = 32 * 1024; // Per ring buffer (default 32KB)
+  unsigned long channelTimeoutMs_ = 1800000UL;
 
   CircuitBreaker breaker_;
 };

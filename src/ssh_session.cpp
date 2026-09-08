@@ -1,6 +1,7 @@
 #include "ssh_session.h"
 #include "forward_accept_error.h"
 #include "network_optimizations.h"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <lwip/netdb.h>
 #include <netinet/in.h>
@@ -447,6 +448,69 @@ LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
 #endif
   }
   return nullptr;
+}
+
+bool SSHSession::hasReverseListener(const String &remoteHost,
+                                    int remotePort) const {
+  for (const auto &entry : listeners_) {
+    if (entry.listener && entry.mapping.remoteBindHost == remoteHost &&
+        entry.mapping.remoteBindPort == remotePort) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SSHSession::addReverseListener(const TunnelConfig &mapping) {
+  if (!session_ || socketfd_ < 0 || !config_) {
+    LOG_E("SSH", "Cannot add reverse listener: SSH session is not connected");
+    return false;
+  }
+  if (hasReverseListener(mapping.remoteBindHost, mapping.remoteBindPort)) {
+    LOGF_W("SSH", "Reverse listener already active for %s:%d",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+    return false;
+  }
+
+  const int listenerLimit = config_->getConnectionConfig().maxReverseListeners;
+  if (getActiveListenerCount() >= listenerLimit) {
+    LOGF_W("SSH",
+           "Cannot add reverse listener: active listener limit %d reached",
+           listenerLimit);
+    return false;
+  }
+
+  ListenerEntry entry;
+  entry.mapping = mapping;
+  if (!createListenerForMapping(mapping, entry)) {
+    return false;
+  }
+  listeners_.push_back(entry);
+  if (boundPort_ < 0) {
+    boundPort_ = entry.boundPort;
+  }
+  return true;
+}
+
+bool SSHSession::removeReverseListener(const String &remoteHost,
+                                       int remotePort) {
+  for (auto it = listeners_.begin(); it != listeners_.end(); ++it) {
+    if (it->mapping.remoteBindHost != remoteHost ||
+        it->mapping.remoteBindPort != remotePort) {
+      continue;
+    }
+    if (!cancelListener(*it)) {
+      LOGF_E("SSH", "Unable to cancel reverse listener %s:%d",
+             remoteHost.c_str(), remotePort);
+      return false;
+    }
+    listeners_.erase(it);
+    boundPort_ = listeners_.empty() ? -1 : listeners_.front().boundPort;
+    LOGF_I("SSH", "Reverse listener removed %s:%d", remoteHost.c_str(),
+           remotePort);
+    return true;
+  }
+  return false;
 }
 
 bool SSHSession::lock(TickType_t ticks) {
@@ -1026,20 +1090,49 @@ bool SSHSession::createListenerForMapping(const TunnelConfig &mapping,
   return true;
 }
 
-void SSHSession::cancelListener(ListenerEntry &entry) {
+bool SSHSession::cancelListener(ListenerEntry &entry) {
   if (!entry.listener) {
-    return;
+    return true;
   }
-  if (lock(pdMS_TO_TICKS(500))) {
-    libssh2_channel_forward_cancel(entry.listener);
+
+  static constexpr int kMaxCancelAttempts = 20;
+  for (int attempt = 0; attempt < kMaxCancelAttempts; ++attempt) {
+    if (!lock(pdMS_TO_TICKS(50))) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    int rc = libssh2_channel_forward_cancel(entry.listener);
     unlock();
+    if (rc == 0) {
+      entry.listener = nullptr;
+      return true;
+    }
+    if (rc != LIBSSH2_ERROR_EAGAIN) {
+      LOGF_W("SSH", "Reverse listener cancel failed with libssh2 error %d", rc);
+      if (rc == LIBSSH2_ERROR_ALLOC) {
+        // libssh2 returns before consuming the listener on allocation failure,
+        // so the caller may safely retry later.
+        return false;
+      }
+      // For other terminal errors libssh2 has consumed the listener object,
+      // even when the cancellation packet could not reach the SSH server.
+      entry.listener = nullptr;
+      return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-  entry.listener = nullptr;
+  LOG_W("SSH", "Reverse listener cancel timed out");
+  return false;
 }
 
 void SSHSession::cancelAllListeners() {
   for (auto &entry : listeners_) {
-    cancelListener(entry);
+    if (!cancelListener(entry)) {
+      // This helper is used while tearing down the owning SSH session (or on a
+      // fresh session whose list is empty), so session cleanup reclaims a
+      // listener that could not be cancelled cleanly.
+      entry.listener = nullptr;
+    }
   }
   listeners_.clear();
   boundPort_ = -1;
@@ -1071,7 +1164,11 @@ bool SSHSession::relistenStuckListeners(unsigned long nowMs,
            "idle_ms=%lu total_accepts=%lu threshold_ms=%lu",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort, idleMs,
            totalAccepts_, thresholdMs);
-    cancelListener(entry);
+    if (!cancelListener(entry)) {
+      LOGF_E("SSH", "Unable to cancel stuck listener for %s:%d",
+             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+      continue;
+    }
     if (createListenerForMapping(mapping, entry)) {
       anyRecreated = true;
     } else {
