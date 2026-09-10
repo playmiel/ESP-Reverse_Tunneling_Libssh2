@@ -11,6 +11,10 @@
 #include <sys/socket.h>
 #include <unistd.h>
 
+namespace {
+constexpr long LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS = 2000;
+}
+
 // ---------------------------------------------------------------------------
 // ChannelManager
 // ---------------------------------------------------------------------------
@@ -444,9 +448,11 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
     FD_ZERO(&writefds);
     FD_SET(localSocket, &writefds);
     struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec =
-        200000; // 200ms max wait — session lock is held during this call
+    tv.tv_sec = LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS / 1000;
+    tv.tv_usec = (LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS % 1000) * 1000;
+    // The session lock is held during this call, so keep the deadline bounded.
+    // Two seconds covers a normal TCP retransmission on a Wi-Fi/LAN target;
+    // 200 ms can reject an otherwise healthy endpoint after one lost SYN.
     int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
     if (sel < 0) {
       LOGF_E("SSH", "select() error connecting to %s:%d (errno=%d)",

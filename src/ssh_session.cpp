@@ -281,8 +281,6 @@ bool SSHSession::checkConnection() const {
 void SSHSession::resetAcceptState() {
   lastAcceptError_ = 0;
   consecutiveFatalAcceptErrors_ = 0;
-  lastAcceptMs_ = 0;
-  totalAccepts_ = 0;
 #ifdef TUNNEL_DIAG_LOG_ONLY
   acceptDiag_.reset();
 #endif
@@ -291,8 +289,6 @@ void SSHSession::resetAcceptState() {
 void SSHSession::recordAcceptSuccess() {
   lastAcceptError_ = 0;
   consecutiveFatalAcceptErrors_ = 0;
-  lastAcceptMs_ = millis();
-  ++totalAccepts_;
 }
 
 void SSHSession::recordAcceptNoChannel(int err) {
@@ -1084,9 +1080,6 @@ bool SSHSession::createListenerForMapping(const TunnelConfig &mapping,
   LOGF_I("SSH", "Reverse listener ready %s:%d (bound %d) -> %s:%d",
          mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
          boundPortResult, mapping.localHost.c_str(), mapping.localPort);
-  if (lastAcceptMs_ == 0) {
-    lastAcceptMs_ = millis();
-  }
   return true;
 }
 
@@ -1136,56 +1129,6 @@ void SSHSession::cancelAllListeners() {
   }
   listeners_.clear();
   boundPort_ = -1;
-}
-
-bool SSHSession::relistenStuckListeners(unsigned long nowMs,
-                                        unsigned long thresholdMs) {
-  if (!session_ || socketfd_ < 0 || listeners_.empty()) {
-    return false;
-  }
-  // Require at least one prior accept on this listener: that proves it has
-  // worked, so the current idle is suspicious rather than just "no traffic".
-  if (thresholdMs == 0 || lastAcceptMs_ == 0 || totalAccepts_ == 0) {
-    return false;
-  }
-  unsigned long idleMs = nowMs - lastAcceptMs_;
-  if (idleMs < thresholdMs) {
-    return false;
-  }
-
-  bool anyRecreated = false;
-  for (auto &entry : listeners_) {
-    if (!entry.listener) {
-      continue;
-    }
-    TunnelConfig mapping = entry.mapping;
-    LOGF_W("SSH",
-           "SERVERDIAG forward_listener_stuck_relisten remote=%s:%d "
-           "idle_ms=%lu total_accepts=%lu threshold_ms=%lu",
-           mapping.remoteBindHost.c_str(), mapping.remoteBindPort, idleMs,
-           totalAccepts_, thresholdMs);
-    if (!cancelListener(entry)) {
-      LOGF_E("SSH", "Unable to cancel stuck listener for %s:%d",
-             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
-      continue;
-    }
-    if (createListenerForMapping(mapping, entry)) {
-      anyRecreated = true;
-    } else {
-      LOGF_E("SSH",
-             "Failed to recreate stuck listener for %s:%d — slot left empty",
-             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
-    }
-  }
-  // Reset idle baseline so we don't immediately re-fire if recreation succeeded
-  // but new traffic has not yet been accepted.
-  lastAcceptMs_ = nowMs;
-  lastAcceptError_ = 0;
-  consecutiveFatalAcceptErrors_ = 0;
-#ifdef TUNNEL_DIAG_LOG_ONLY
-  acceptDiag_.reset();
-#endif
-  return anyRecreated;
 }
 
 // ---------------------------------------------------------------------------

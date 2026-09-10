@@ -97,8 +97,8 @@ def test_reconnect_after_sshd_kill(wait_tunnel_ready, tunnel_socket,
 
     # Wait for a NEW "Reconnection successful" log line. Plain
     # state==Connected isn't enough: it can still reflect the dying
-    # session that ESP32 has not yet detected as broken (keepalive
-    # cascade is 30 s × 3 strikes ≈ 90 s before reconnect fires).
+    # session that ESP32 has not yet detected as broken; socket-health and
+    # keepalive detection can lag behind the container restart.
     deadline = time.monotonic() + TH.F_RECONNECT_TIMEOUT_S
     while time.monotonic() < deadline:
         if _count_reconnects(serial_monitor) > base_reconnects:

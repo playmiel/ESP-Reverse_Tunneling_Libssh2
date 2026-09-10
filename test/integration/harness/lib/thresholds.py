@@ -3,15 +3,18 @@
 Tune these instead of touching test bodies.
 """
 
+import os
+
 A_TRANSFER_SIZES = [1 * 1024 * 1024, 10 * 1024 * 1024]
-# Default chunks: 8K and 64K — both pass reliably. Smaller chunks
-# (256, 1024) intermittently lose bytes or fail with BrokenPipe — that's
-# a real bug worth investigating in the lib (not a test infra issue),
-# but it makes the suite flaky as a regression gate. Add 256/1024 back
-# to A_CHUNK_SIZES_EXTRA when debugging that path explicitly.
+# The main transfer-size matrix covers 8K and 64K chunks. Dedicated repeat
+# tests below exercise 256-byte and 1K chunks over rapid channel reopen cycles.
 A_CHUNK_SIZES = [8 * 1024, 64 * 1024]
 A_CHUNK_SIZES_EXTRA = [256, 1024]
 A_PRNG_SEED = 0xC0FFEE
+# Modlink carries rate-limited HTTP requests. The Docker echo path crosses the
+# ESP32 Wi-Fi link four times per round trip, so use a controlled load instead
+# of measuring saturation of that test-only topology.
+CONTROLLED_ECHO_RATE_BPS = 128 * 1024
 
 B_DURATION_S = 300
 B_SAMPLE_HZ = 1
@@ -28,7 +31,7 @@ D_MAX_HEAP_DRIFT_BYTES = 5 * 1024
 F_TRANSFER_BYTES = 10 * 1024 * 1024
 F_KILL_AT_FRACTION = 0.5
 F_DOWN_S = 5.0
-F_RECONNECT_TIMEOUT_S = 120.0  # keep-alive cascade is 30 s × 3 strikes
+F_RECONNECT_TIMEOUT_S = 120.0  # upper bound for loss detection + reconnect
 
 G1_DEAD_PORT_MAPPING = 22082
 G1_ATTEMPTS = 10
@@ -45,7 +48,7 @@ G2_LIVE_MIN_BYTES = 4096
 G2_LIVE_THROUGHPUT_TOLERANCE = 0.30  # kept for legacy reference, unused
 
 TUNNEL_READY_TIMEOUT_S = 30.0
-SERIAL_PORT = "/dev/ttyUSB1"
+SERIAL_PORT = os.environ.get("TEST_SERIAL_PORT", "/dev/ttyUSB1")
 SERIAL_BAUD = 115200
 DOCKER_HOST_FOR_CLIENT = "127.0.0.1"
 # Number of reverse-tunnel listeners the test firmware should bind:

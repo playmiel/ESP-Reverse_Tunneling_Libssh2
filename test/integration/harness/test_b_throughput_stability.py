@@ -17,10 +17,15 @@ from lib import thresholds as TH
 
 def _continuous_send(sock, stop_event, sent_counter):
     chunk = b"\x55" * 4096
+    started = time.monotonic()
     while not stop_event.is_set():
         try:
             sock.sendall(chunk)
             sent_counter[0] += len(chunk)
+            due = started + sent_counter[0] / TH.CONTROLLED_ECHO_RATE_BPS
+            delay = due - time.monotonic()
+            if delay > 0:
+                time.sleep(delay)
         except OSError:
             break
 

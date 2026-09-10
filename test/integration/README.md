@@ -6,10 +6,8 @@ tunnels exposed by a local Docker stack (sshd + echo + slow_echo).
 ## Prerequisites
 
 - Docker Compose v2
-- ESP32 attached via USB, accessible from WSL as `/dev/ttyUSB0`
-  (use `usbipd-win` on Windows to attach: `usbipd attach --wsl --busid X-Y`)
-- WSL2 with mirrored networking enabled, OR a `netsh interface portproxy`
-  setup forwarding 2222/9000/9001 to the WSL host (see Fallback below)
+- ESP32 attached via USB, accessible directly as a Windows COM port or from
+  Linux/WSL as `/dev/ttyUSB*`
 - Python 3.11+
 - Environment variables exported (see Setup)
 
@@ -19,7 +17,18 @@ tunnels exposed by a local Docker stack (sshd + echo + slow_echo).
 export TEST_WIFI_SSID="your-wifi"
 export TEST_WIFI_PASS="your-wifi-password"
 export TEST_DOCKER_HOST_IP="192.168.1.42"   # IP of WSL host on your LAN
+export TEST_SERIAL_PORT="/dev/ttyUSB1"
 make flash-test                              # one-time, or after firmware change
+```
+
+On Windows PowerShell, credentials may be omitted when the ESP32 already has
+working Wi-Fi credentials stored in NVS:
+
+```powershell
+$env:TEST_DOCKER_HOST_IP = "192.168.1.42"
+$env:TEST_SERIAL_PORT = "COM5"
+pio run -e test_integration -t upload --upload-port COM5
+uv run --project test/integration/harness pytest test/integration/harness
 ```
 
 ## Run
@@ -43,6 +52,13 @@ The test firmware maps:
 - `22080 → DOCKER_HOST_IP:9000` (live target)
 - `22081 → DOCKER_HOST_IP:9001` (slow consumer)
 - `22082 → DOCKER_HOST_IP:65500` (dead port, triggers circuit breaker)
+
+Tests A and B pace the synthetic echo stream at 128 KiB/s. Unlike the Modlink
+production path, this Docker echo topology crosses the ESP32 Wi-Fi link four
+times per round trip; the controlled rate tests tunnel stability without
+turning Wi-Fi saturation into the pass/fail criterion. The Docker sshd uses
+the same 30 s × 6 client-alive tolerance observed on Modlink. `GatewayPorts`
+remains enabled only so Windows can reach the published Docker listener ports.
 
 SSH credentials in the test environment: `testuser` / `testpass` (hardcoded
 in the sshd Dockerfile — never use this stack outside isolated dev networks).

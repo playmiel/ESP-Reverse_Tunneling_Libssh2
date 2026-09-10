@@ -38,23 +38,18 @@ void setup() {
   // SSH server: testuser@DOCKER_HOST_IP:2222 (password testpass)
   globalSSHConfig.setSSHServer(DOCKER_HOST_IP, 2222, "testuser", "testpass");
 
-  // Three tunnel mappings (must match harness expectations):
-  //   22080 -> DOCKER_HOST_IP:9000  (echo, used by tests A/B/D/F)
-  //   22081 -> DOCKER_HOST_IP:9001  (slow_echo, used by test G2)
-  //   22082 -> DOCKER_HOST_IP:65500 (dead port, used by test G1)
-  globalSSHConfig.clearTunnelMappings();
-  globalSSHConfig.setMaxReverseListeners(3);
-  globalSSHConfig.addTunnelMapping("127.0.0.1", 22080, DOCKER_HOST_IP, 9000);
-  globalSSHConfig.addTunnelMapping("127.0.0.1", 22081, DOCKER_HOST_IP, 9001);
-  globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, DOCKER_HOST_IP, 65500);
-
   globalSSHConfig.setConnectionConfig(30, 5000, 100, 30);
   // Two 64 KiB directional rings per active channel. BOARD_HAS_PSRAM is set
   // in platformio.ini so the storage lives in PSRAM, not internal heap.
   globalSSHConfig.setBufferConfig(8192, 5, 1800000, 64 * 1024);
   globalSSHConfig.setDebugConfig(true, 115200);
 
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  if (WIFI_SSID[0] != '\0') {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+  } else {
+    Serial.println("WIFI_USING_STORED_CREDENTIALS");
+    WiFi.begin();
+  }
   int attempts = 0;
   while (WiFi.status() != WL_CONNECTED && attempts < 30) {
     vTaskDelay(pdMS_TO_TICKS(1000));
@@ -68,6 +63,16 @@ void setup() {
   }
   Serial.printf("WIFI_OK ip=%s rssi=%d\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
+
+  // Three tunnel mappings (must match harness expectations):
+  //   22080 -> DOCKER_HOST_IP:9000  (echo, used by tests A/B/D/F)
+  //   22081 -> DOCKER_HOST_IP:9001  (slow_echo, used by test G2)
+  //   22082 -> DOCKER_HOST_IP:65500 (dead port, used by test G1)
+  globalSSHConfig.clearTunnelMappings();
+  globalSSHConfig.setMaxReverseListeners(3);
+  globalSSHConfig.addTunnelMapping("127.0.0.1", 22080, DOCKER_HOST_IP, 9000);
+  globalSSHConfig.addTunnelMapping("127.0.0.1", 22081, DOCKER_HOST_IP, 9001);
+  globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, DOCKER_HOST_IP, 65500);
 
   if (!tunnel.init() || !tunnel.connectSSH()) {
     Serial.println("TUNNEL_INIT_FAIL");

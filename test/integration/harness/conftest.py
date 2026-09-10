@@ -10,6 +10,23 @@ from lib import docker_ctl, thresholds as TH
 from lib.serial_stats import StatsMonitor
 
 
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    """Attach ESP32 telemetry to any failed hardware test report."""
+    outcome = yield
+    report = outcome.get_result()
+    monitor = item.funcargs.get("serial_monitor")
+    if report.failed and monitor is not None:
+        # Keep the serial reader alive briefly so asynchronous ESP32/libssh2
+        # close diagnostics emitted just after a socket failure are captured.
+        time.sleep(3.0)
+        recent_log = "\n".join(monitor.raw_log()[-100:])
+        report.sections.append((
+            "ESP32 telemetry",
+            f"latest={monitor.latest()}\nrecent serial output:\n{recent_log}",
+        ))
+
+
 @pytest.fixture(scope="session", autouse=True)
 def _docker_stack():
     """Ensure docker stack is up at session start.
