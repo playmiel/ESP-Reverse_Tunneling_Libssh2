@@ -172,7 +172,7 @@ void configureSSHTunnel() {
   // Buffer configuration
   globalSSHConfig.setBufferConfig(8192,   // Buffer size
                                   5,      // Max number of channels
-                                  1800000 // Channel timeout (ms) - 30 minutes
+                                  1800000 // Inactivity timeout - 30 minutes
   );
 
   // Debug configuration

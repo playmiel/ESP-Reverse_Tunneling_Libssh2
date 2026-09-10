@@ -1,4 +1,5 @@
 #include "ssh_transport.h"
+#include "channel_inactivity.h"
 #include "memory_fixes.h"
 #include <ctype.h>
 #include <errno.h>
@@ -950,8 +951,9 @@ void TransportPump::checkCloses() {
       }
     }
 
-    // Full inactivity timeout (30 seconds with no data movement)
-    if (ch.lastActivity > 0 && (now - ch.lastActivity) > 30000) {
+    // Full inactivity timeout (configured through setBufferConfig).
+    if (channel_inactivity::hasExpired(now, ch.lastActivity,
+                                       channelTimeoutMs_)) {
       LOGF_W("SSH", "Channel %d: inactivity timeout (%lums)", i,
              now - ch.lastActivity);
       channels_->beginClose(i, ChannelCloseReason::Timeout);

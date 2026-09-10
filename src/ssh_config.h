@@ -59,8 +59,11 @@ struct ConnectionConfig {
   int connectionTimeoutSec;
   int bufferSize;
   int maxChannels;
+  int channelTimeoutMs;
   bool libssh2KeepAliveEnabled;
   int libssh2KeepAliveIntervalSec;
+  // Capacity of each directional ring buffer. Two rings are allocated per
+  // active channel (SSH -> local and local -> SSH).
   size_t tunnelRingBufferSize;
   int maxReverseListeners;
 
@@ -68,9 +71,9 @@ struct ConnectionConfig {
   ConnectionConfig()
       : keepAliveIntervalSec(10), reconnectDelayMs(5000),
         maxReconnectAttempts(5), connectionTimeoutSec(30), bufferSize(8192),
-        maxChannels(10), libssh2KeepAliveEnabled(true),
-        libssh2KeepAliveIntervalSec(30), tunnelRingBufferSize(64 * 1024),
-        maxReverseListeners(1) {}
+        maxChannels(10), channelTimeoutMs(1800000),
+        libssh2KeepAliveEnabled(true), libssh2KeepAliveIntervalSec(30),
+        tunnelRingBufferSize(64 * 1024), maxReverseListeners(1) {}
 };
 
 // Structure for debug configuration
@@ -209,6 +212,8 @@ extern SSHConfiguration globalSSHConfig;
   globalSSHConfig.getConnectionConfig().connectionTimeoutSec
 #define BUFFER_SIZE globalSSHConfig.getConnectionConfig().bufferSize
 #define MAX_CHANNELS globalSSHConfig.getConnectionConfig().maxChannels
+#define CHANNEL_TIMEOUT_MS                                                     \
+  globalSSHConfig.getConnectionConfig().channelTimeoutMs
 
 #define DEBUG_ENABLED globalSSHConfig.getDebugConfig().debugEnabled
 #define SERIAL_BAUD_RATE globalSSHConfig.getDebugConfig().serialBaudRate

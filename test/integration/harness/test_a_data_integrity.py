@@ -34,10 +34,15 @@ def _send_recv_echo(sock, payload: bytes, chunk: int) -> bytes:
     def _send():
         try:
             i = 0
+            started = time.monotonic()
             while i < target:
                 end = min(i + chunk, target)
                 sock.sendall(payload[i:end])
                 i = end
+                due = started + i / TH.CONTROLLED_ECHO_RATE_BPS
+                delay = due - time.monotonic()
+                if delay > 0:
+                    time.sleep(delay)
             try:
                 sock.shutdown(1)  # half-close: we're done sending
             except OSError:
@@ -86,7 +91,8 @@ def test_echo_data_integrity(size, chunk, wait_tunnel_ready, tunnel_socket,
     sock.close()
 
     assert len(received) == size, (
-        f"expected {size} bytes, got {len(received)}")
+        f"expected {size} bytes, got {len(received)}; "
+        f"ESP32 stats={serial_monitor.latest()}")
 
     mismatches, first_off = verify_stream(TH.A_PRNG_SEED, received)
     assert mismatches == 0, (

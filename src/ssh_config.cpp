@@ -416,12 +416,15 @@ void SSHConfiguration::setBufferConfig(int bufferSize, int maxChannels,
   if (lockConfig()) {
     connectionConfig.bufferSize = bufferSize;
     connectionConfig.maxChannels = maxChannels;
+    connectionConfig.channelTimeoutMs = channelTimeout;
     connectionConfig.tunnelRingBufferSize = tunnelRingBufferSize;
     unlockConfig();
 
     LOGF_I("CONFIG",
-           "Buffer config: size=%d, max_channels=%d, ring_buffer=%u bytes",
-           bufferSize, maxChannels, (unsigned)tunnelRingBufferSize);
+           "Buffer config: size=%d, max_channels=%d, channel_timeout=%dms, "
+           "ring_buffer_per_direction=%u bytes",
+           bufferSize, maxChannels, channelTimeout,
+           (unsigned)tunnelRingBufferSize);
   }
 }
 
@@ -523,7 +526,9 @@ void SSHConfiguration::printConfiguration() const {
            connectionConfig.connectionTimeoutSec);
     LOGF_I("CONFIG", "Buffer size: %d bytes", connectionConfig.bufferSize);
     LOGF_I("CONFIG", "Max channels: %d", connectionConfig.maxChannels);
-    LOGF_I("CONFIG", "Tunnel ring buffer: %u bytes",
+    LOGF_I("CONFIG", "Channel inactivity timeout: %dms",
+           connectionConfig.channelTimeoutMs);
+    LOGF_I("CONFIG", "Tunnel ring buffer per direction: %u bytes",
            (unsigned)connectionConfig.tunnelRingBufferSize);
     LOGF_I("CONFIG", "Max reverse listeners: %d",
            connectionConfig.maxReverseListeners);
@@ -604,9 +609,9 @@ bool SSHConfiguration::validateTunnelConfig() const {
              (unsigned)i);
       return false;
     }
-    if (!ssh_validators::isValidPort(mapping.remoteBindPort)) {
+    if (!ssh_validators::isValidRemoteBindPort(mapping.remoteBindPort)) {
       LOGF_E("CONFIG",
-             "Mapping #%u: Remote bind port must be between 1 and "
+             "Mapping #%u: Remote bind port must be between 0 and "
              "65535",
              (unsigned)i);
       return false;
@@ -657,6 +662,12 @@ bool SSHConfiguration::validateConnectionConfig() const {
 
   if (!ssh_validators::isValidMaxChannels(connectionConfig.maxChannels)) {
     LOG_E("CONFIG", "Max channels must be positive");
+    return false;
+  }
+
+  if (!ssh_validators::isValidChannelTimeout(
+          connectionConfig.channelTimeoutMs)) {
+    LOG_E("CONFIG", "Channel inactivity timeout must be positive");
     return false;
   }
 

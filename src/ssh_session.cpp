@@ -1,6 +1,7 @@
 #include "ssh_session.h"
 #include "forward_accept_error.h"
 #include "network_optimizations.h"
+#include <algorithm>
 #include <arpa/inet.h>
 #include <lwip/netdb.h>
 #include <netinet/in.h>
@@ -280,8 +281,6 @@ bool SSHSession::checkConnection() const {
 void SSHSession::resetAcceptState() {
   lastAcceptError_ = 0;
   consecutiveFatalAcceptErrors_ = 0;
-  lastAcceptMs_ = 0;
-  totalAccepts_ = 0;
 #ifdef TUNNEL_DIAG_LOG_ONLY
   acceptDiag_.reset();
 #endif
@@ -290,8 +289,6 @@ void SSHSession::resetAcceptState() {
 void SSHSession::recordAcceptSuccess() {
   lastAcceptError_ = 0;
   consecutiveFatalAcceptErrors_ = 0;
-  lastAcceptMs_ = millis();
-  ++totalAccepts_;
 }
 
 void SSHSession::recordAcceptNoChannel(int err) {
@@ -447,6 +444,69 @@ LIBSSH2_CHANNEL *SSHSession::acceptChannel(TunnelConfig &outMapping) {
 #endif
   }
   return nullptr;
+}
+
+bool SSHSession::hasReverseListener(const String &remoteHost,
+                                    int remotePort) const {
+  for (const auto &entry : listeners_) {
+    if (entry.listener && entry.mapping.remoteBindHost == remoteHost &&
+        entry.mapping.remoteBindPort == remotePort) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool SSHSession::addReverseListener(const TunnelConfig &mapping) {
+  if (!session_ || socketfd_ < 0 || !config_) {
+    LOG_E("SSH", "Cannot add reverse listener: SSH session is not connected");
+    return false;
+  }
+  if (hasReverseListener(mapping.remoteBindHost, mapping.remoteBindPort)) {
+    LOGF_W("SSH", "Reverse listener already active for %s:%d",
+           mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+    return false;
+  }
+
+  const int listenerLimit = config_->getConnectionConfig().maxReverseListeners;
+  if (getActiveListenerCount() >= listenerLimit) {
+    LOGF_W("SSH",
+           "Cannot add reverse listener: active listener limit %d reached",
+           listenerLimit);
+    return false;
+  }
+
+  ListenerEntry entry;
+  entry.mapping = mapping;
+  if (!createListenerForMapping(mapping, entry)) {
+    return false;
+  }
+  listeners_.push_back(entry);
+  if (boundPort_ < 0) {
+    boundPort_ = entry.boundPort;
+  }
+  return true;
+}
+
+bool SSHSession::removeReverseListener(const String &remoteHost,
+                                       int remotePort) {
+  for (auto it = listeners_.begin(); it != listeners_.end(); ++it) {
+    if (it->mapping.remoteBindHost != remoteHost ||
+        it->mapping.remoteBindPort != remotePort) {
+      continue;
+    }
+    if (!cancelListener(*it)) {
+      LOGF_E("SSH", "Unable to cancel reverse listener %s:%d",
+             remoteHost.c_str(), remotePort);
+      return false;
+    }
+    listeners_.erase(it);
+    boundPort_ = listeners_.empty() ? -1 : listeners_.front().boundPort;
+    LOGF_I("SSH", "Reverse listener removed %s:%d", remoteHost.c_str(),
+           remotePort);
+    return true;
+  }
+  return false;
 }
 
 bool SSHSession::lock(TickType_t ticks) {
@@ -909,15 +969,31 @@ bool SSHSession::createListeners(SSHConfiguration *config) {
     return false;
   }
 
+  int failedSecondary = 0;
   for (int i = 0; i < desired; ++i) {
     ListenerEntry entry;
     entry.mapping = mappings[i];
     if (!createListenerForMapping(entry.mapping, entry)) {
-      LOGF_E("SSH", "Failed to create listener for %s:%d -> %s:%d",
+      if (i == 0) {
+        // Primary mapping is mandatory: without it the tunnel serves no
+        // purpose, so the whole session must fail and reconnect.
+        LOGF_E("SSH", "Failed to create primary listener for %s:%d -> %s:%d",
+               entry.mapping.remoteBindHost.c_str(),
+               entry.mapping.remoteBindPort, entry.mapping.localHost.c_str(),
+               entry.mapping.localPort);
+        cancelAllListeners();
+        return false;
+      }
+      // Secondary mappings (e.g. Modbus) are best-effort: keep the session and
+      // the primary tunnel alive even when an extra remote port cannot bind
+      // (stale listener still held by sshd, port not permitted, etc.).
+      ++failedSecondary;
+      LOGF_W("SSH",
+             "Secondary listener skipped %s:%d -> %s:%d (bind failed); primary "
+             "tunnel stays up",
              entry.mapping.remoteBindHost.c_str(), entry.mapping.remoteBindPort,
              entry.mapping.localHost.c_str(), entry.mapping.localPort);
-      cancelAllListeners();
-      return false;
+      continue;
     }
     listeners_.push_back(entry);
     if (boundPort_ < 0) {
@@ -928,6 +1004,11 @@ bool SSHSession::createListeners(SSHConfiguration *config) {
   if (static_cast<int>(mappings.size()) > desired) {
     LOGF_W("SSH", "Only %d/%zu listeners created due to limit", desired,
            mappings.size());
+  }
+
+  if (failedSecondary > 0) {
+    LOGF_W("SSH", "%d/%d secondary listener(s) unavailable this session",
+           failedSecondary, desired - 1);
   }
 
   return !listeners_.empty();
@@ -999,75 +1080,55 @@ bool SSHSession::createListenerForMapping(const TunnelConfig &mapping,
   LOGF_I("SSH", "Reverse listener ready %s:%d (bound %d) -> %s:%d",
          mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
          boundPortResult, mapping.localHost.c_str(), mapping.localPort);
-  if (lastAcceptMs_ == 0) {
-    lastAcceptMs_ = millis();
-  }
   return true;
 }
 
-void SSHSession::cancelListener(ListenerEntry &entry) {
+bool SSHSession::cancelListener(ListenerEntry &entry) {
   if (!entry.listener) {
-    return;
+    return true;
   }
-  if (lock(pdMS_TO_TICKS(500))) {
-    libssh2_channel_forward_cancel(entry.listener);
+
+  static constexpr int kMaxCancelAttempts = 20;
+  for (int attempt = 0; attempt < kMaxCancelAttempts; ++attempt) {
+    if (!lock(pdMS_TO_TICKS(50))) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    int rc = libssh2_channel_forward_cancel(entry.listener);
     unlock();
+    if (rc == 0) {
+      entry.listener = nullptr;
+      return true;
+    }
+    if (rc != LIBSSH2_ERROR_EAGAIN) {
+      LOGF_W("SSH", "Reverse listener cancel failed with libssh2 error %d", rc);
+      if (rc == LIBSSH2_ERROR_ALLOC) {
+        // libssh2 returns before consuming the listener on allocation failure,
+        // so the caller may safely retry later.
+        return false;
+      }
+      // For other terminal errors libssh2 has consumed the listener object,
+      // even when the cancellation packet could not reach the SSH server.
+      entry.listener = nullptr;
+      return true;
+    }
+    vTaskDelay(pdMS_TO_TICKS(10));
   }
-  entry.listener = nullptr;
+  LOG_W("SSH", "Reverse listener cancel timed out");
+  return false;
 }
 
 void SSHSession::cancelAllListeners() {
   for (auto &entry : listeners_) {
-    cancelListener(entry);
+    if (!cancelListener(entry)) {
+      // This helper is used while tearing down the owning SSH session (or on a
+      // fresh session whose list is empty), so session cleanup reclaims a
+      // listener that could not be cancelled cleanly.
+      entry.listener = nullptr;
+    }
   }
   listeners_.clear();
   boundPort_ = -1;
-}
-
-bool SSHSession::relistenStuckListeners(unsigned long nowMs,
-                                        unsigned long thresholdMs) {
-  if (!session_ || socketfd_ < 0 || listeners_.empty()) {
-    return false;
-  }
-  // Require at least one prior accept on this listener: that proves it has
-  // worked, so the current idle is suspicious rather than just "no traffic".
-  if (thresholdMs == 0 || lastAcceptMs_ == 0 || totalAccepts_ == 0) {
-    return false;
-  }
-  unsigned long idleMs = nowMs - lastAcceptMs_;
-  if (idleMs < thresholdMs) {
-    return false;
-  }
-
-  bool anyRecreated = false;
-  for (auto &entry : listeners_) {
-    if (!entry.listener) {
-      continue;
-    }
-    TunnelConfig mapping = entry.mapping;
-    LOGF_W("SSH",
-           "SERVERDIAG forward_listener_stuck_relisten remote=%s:%d "
-           "idle_ms=%lu total_accepts=%lu threshold_ms=%lu",
-           mapping.remoteBindHost.c_str(), mapping.remoteBindPort, idleMs,
-           totalAccepts_, thresholdMs);
-    cancelListener(entry);
-    if (createListenerForMapping(mapping, entry)) {
-      anyRecreated = true;
-    } else {
-      LOGF_E("SSH",
-             "Failed to recreate stuck listener for %s:%d — slot left empty",
-             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
-    }
-  }
-  // Reset idle baseline so we don't immediately re-fire if recreation succeeded
-  // but new traffic has not yet been accepted.
-  lastAcceptMs_ = nowMs;
-  lastAcceptError_ = 0;
-  consecutiveFatalAcceptErrors_ = 0;
-#ifdef TUNNEL_DIAG_LOG_ONLY
-  acceptDiag_.reset();
-#endif
-  return anyRecreated;
 }
 
 // ---------------------------------------------------------------------------

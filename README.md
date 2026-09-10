@@ -137,8 +137,10 @@ globalSSHConfig.setKeepAliveOptions(true, 30); // want-reply=1, 30s
 // Adjust logging without toggling the debugEnabled flag
 globalSSHConfig.setLogLevel(LOG_INFO);
 
-// Advanced data-path tuning
-// 4th argument = ring buffer size per channel ( per direction, default 64KB total)
+// Advanced data-path tuning:
+// - 3rd argument: channel inactivity timeout (5 minutes here)
+// - 4th argument: capacity per direction. Two 64 KiB rings are allocated
+//   per active channel (about 128 KiB of configured ring storage per channel).
 globalSSHConfig.setBufferConfig(8192, 10, 300000, 64 * 1024);
 ```
 
@@ -151,3 +153,22 @@ if (tunnel.connectSSH()) {
     LOGF_I("SSH", "Remote listener bound on %d", tunnel.getBoundPort());
 }
 ```
+
+Listeners can also be added or removed without reconnecting. Increase the
+listener limit before connecting if more than one listener will be active:
+
+```cpp
+globalSSHConfig.setMaxReverseListeners(2);
+tunnel.connectSSH();
+
+TunnelConfig extra;
+extra.remoteBindHost = "127.0.0.1";
+extra.remoteBindPort = 22081;
+extra.localHost = "192.168.1.150";
+extra.localPort = 502;
+
+tunnel.addReverseTunnel(extra);                  // active immediately
+tunnel.removeReverseTunnel("127.0.0.1", 22081); // stops new connections
+```
+
+Removing a listener does not interrupt channels that are already open.

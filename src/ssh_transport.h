@@ -52,6 +52,11 @@ public:
   // Set references to session and channel manager.
   void attach(SSHSession *session, ChannelManager *channels);
 
+  // Set the maximum inactivity period for an open channel.
+  void setChannelTimeout(unsigned long timeoutMs) {
+    channelTimeoutMs_ = timeoutMs;
+  }
+
   // Execute one full pump cycle. Returns true if any data was moved.
   bool pumpAll();
 
@@ -130,6 +135,7 @@ private:
 
   unsigned int roundRobinOffset_ = 0;
   size_t lastBytesMoved_ = 0;
+  unsigned long channelTimeoutMs_ = 1800000UL;
 
   // Pending close events (filled by checkCloses, drained by consumeCloseEvents)
   CloseEvent pendingCloseEvents_[MAX_CLOSE_EVENTS];

@@ -6,14 +6,13 @@ PermitRootLogin no
 PasswordAuthentication yes
 PermitEmptyPasswords no
 ChallengeResponseAuthentication no
-UsePAM no
 AllowTcpForwarding yes
 GatewayPorts yes
 AllowAgentForwarding no
 PermitTunnel no
 X11Forwarding no
-ClientAliveInterval 15
-ClientAliveCountMax 2
+ClientAliveInterval 30
+ClientAliveCountMax 6
 MaxSessions 10
 MaxStartups 10:30:60
 LogLevel INFO

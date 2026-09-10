@@ -1,4 +1,5 @@
 #include "ssh_channel.h"
+#include "channel_inactivity.h"
 #include "channel_slot_alloc.h"
 #include "memory_fixes.h"
 #include "network_optimizations.h"
@@ -9,6 +10,10 @@
 #include <sys/select.h>
 #include <sys/socket.h>
 #include <unistd.h>
+
+namespace {
+constexpr long LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS = 2000;
+}
 
 // ---------------------------------------------------------------------------
 // ChannelManager
@@ -40,7 +45,7 @@ bool ChannelManager::init(int maxChannels, size_t ringBufferSize) {
     new (&slots_[i]) ChannelSlot();
   }
 
-  LOGF_I("SSH", "ChannelManager initialized: %d slots, %zuKB ring buffers",
+  LOGF_I("SSH", "ChannelManager initialized: %d slots, 2 x %zuKB per channel",
          maxSlots_, ringBufferSize_ / 1024);
   return true;
 }
@@ -87,9 +92,12 @@ int ChannelManager::allocateSlot() {
     return idx;
   }
 
-  // Second pass: recycle stale slot (30s inactivity)
+  // Second pass: mark an inactive channel for recycling. The same configured
+  // timeout is also enforced on every pump cycle by TransportPump.
   for (int i = 0; i < maxSlots_; ++i) {
-    if (slots_[i].active && (now - slots_[i].lastActivity) > 30000) {
+    if (slots_[i].active &&
+        channel_inactivity::hasExpired(now, slots_[i].lastActivity,
+                                       channelTimeoutMs_)) {
       LOGF_I("SSH", "Recycling stale channel %d", i);
       beginClose(i, ChannelCloseReason::Timeout);
       return -1; // Don't reuse immediately; let drain complete first
@@ -440,9 +448,11 @@ int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
     FD_ZERO(&writefds);
     FD_SET(localSocket, &writefds);
     struct timeval tv;
-    tv.tv_sec = 0;
-    tv.tv_usec =
-        200000; // 200ms max wait — session lock is held during this call
+    tv.tv_sec = LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS / 1000;
+    tv.tv_usec = (LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS % 1000) * 1000;
+    // The session lock is held during this call, so keep the deadline bounded.
+    // Two seconds covers a normal TCP retransmission on a Wi-Fi/LAN target;
+    // 200 ms can reject an otherwise healthy endpoint after one lost SYN.
     int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
     if (sel < 0) {
       LOGF_E("SSH", "select() error connecting to %s:%d (errno=%d)",

@@ -201,10 +201,14 @@ globalSSHConfig.setConnectionConfig(
 globalSSHConfig.setBufferConfig(
     8192,       // Buffer size: 8KB
     5,          // Max channels: 5
-    300000,     // (unused in v2, must be >0)
-    64 * 1024   // Ring buffer size per channel (per direction, default 64KB total)
+    300000,     // Channel inactivity timeout: 5 minutes
+    64 * 1024   // 64 KiB per direction; two rings per active channel
 );
 ```
+
+The fourth argument is the capacity of each directional ring buffer, not a
+total shared by both directions. The configuration above therefore reserves
+about 128 KiB of ring storage per active channel, plus implementation overhead.
 
 ### Multi-tunnel / multiple listeners
 
@@ -220,8 +224,15 @@ globalSSHConfig.addTunnelMapping("127.0.0.1", 22081, "192.168.1.150", 502);
 globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, "192.168.1.200", 22);
 ```
 
-> **Note:** Listeners are created at `connectSSH()` time. Adding mappings
-> while a session is active requires a reconnect to take effect.
+Mappings configured with `addTunnelMapping()` are created by `connectSSH()`.
+To change a running session, use `SSHTunnel::addReverseTunnel()` and
+`SSHTunnel::removeReverseTunnel()` instead. These methods update both the live
+listener and the stored configuration, so the change survives reconnection.
+Removing a listener only prevents new connections; existing channels continue
+until they close normally.
+
+Set `remoteBindPort` to `0` to let sshd choose an ephemeral port. For the first
+listener, retrieve the selected port with `SSHTunnel::getBoundPort()`.
 
 ## 📞 Support
 
