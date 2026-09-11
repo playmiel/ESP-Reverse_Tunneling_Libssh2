@@ -460,6 +460,11 @@ void TransportPump::pumpSshTransport() {
     if (!ch.active || !ch.sshChannel) {
       continue;
     }
+    // A destination failure moves a pre-open channel directly to Draining.
+    // Do not refill its input ring: there is no local socket to consume it.
+    if (ch.state == ChannelSlot::State::Draining && !ch.reachedOpen) {
+      continue;
+    }
 
     // Channels with remoteEof: still need ONE read to pump SSH transport
     // (processes WINDOW_ADJUST for OTHER channels' writes).
@@ -645,7 +650,8 @@ void TransportPump::drainSshToLocal() {
   for (int n = 0; n < maxSlots; ++n) {
     int i = (n + roundRobinOffset_) % maxSlots;
     ChannelSlot &ch = channels_->getSlot(i);
-    if (!ch.active || ch.localSocket < 0 || !ch.toLocal) {
+    if (!ch.active || !channel_lifecycle::canUseLocalSocket(ch.state) ||
+        ch.localSocket < 0 || !ch.toLocal) {
       continue;
     }
 
@@ -837,8 +843,9 @@ void TransportPump::drainLocalToSsh() {
 
     // --- Step B: Read from local socket -> toRemote ring (no lock needed) ---
     // Loop up to 3 reads per cycle to match Phase 1's SSH read throughput.
-    if (!ch.localEof && !ch.localReadPaused && ch.localSocket >= 0 &&
-        ch.toRemote && ch.eofSentMs == 0) {
+    if (channel_lifecycle::canUseLocalSocket(ch.state) && !ch.localEof &&
+        !ch.localReadPaused && ch.localSocket >= 0 && ch.toRemote &&
+        ch.eofSentMs == 0) {
       for (int attempt = 0; attempt < 3 && !ch.localEof && !ch.localReadPaused;
            ++attempt) {
         size_t freeSpace = ch.toRemote->available();
@@ -994,6 +1001,7 @@ void TransportPump::checkCloses() {
     // session is degraded if it can't drain a single channel for 30 s.
     if ((now - ch.closeStartMs) > HARD_ABANDON_TIMEOUT_MS) {
       ChannelCloseReason reason = ch.closeReason;
+      bool wasOpen = ch.reachedOpen;
       LOGF_W("SSH",
              "Channel %d: hard abandon (stuck draining %lums, toLocal=%zu, "
              "toRemote=%zu) — session degraded",
@@ -1002,7 +1010,7 @@ void TransportPump::checkCloses() {
       channels_->abandonSlot(i, reason);
       sessionDegraded_ = true;
       if (pendingCloseCount_ < MAX_CLOSE_EVENTS) {
-        pendingCloseEvents_[pendingCloseCount_++] = {i, reason};
+        pendingCloseEvents_[pendingCloseCount_++] = {i, reason, wasOpen};
       }
       continue;
     }
@@ -1058,7 +1066,7 @@ void TransportPump::checkCloses() {
       for (int p = 0; p < 4; p++) {
         int pr = libssh2_channel_read(ch.sshChannel, (char *)pumpBuf,
                                       sizeof(pumpBuf));
-        if (pr > 0 && ch.toLocal) {
+        if (pr > 0 && ch.toLocal && ch.reachedOpen) {
           ch.toLocal->write(reinterpret_cast<uint8_t *>(pumpBuf), pr);
         }
         if (pr == LIBSSH2_ERROR_EAGAIN || pr <= 0) {
@@ -1077,10 +1085,12 @@ void TransportPump::checkCloses() {
     if (session_->lock(pdMS_TO_TICKS(200))) {
       for (int c = 0; c < closeCount; ++c) {
         int slot = toClose[c];
-        ChannelCloseReason reason = channels_->getSlot(slot).closeReason;
+        ChannelSlot &channel = channels_->getSlot(slot);
+        ChannelCloseReason reason = channel.closeReason;
+        bool wasOpen = channel.reachedOpen;
         if (channels_->finalizeClose(slot) &&
             pendingCloseCount_ < MAX_CLOSE_EVENTS) {
-          pendingCloseEvents_[pendingCloseCount_++] = {slot, reason};
+          pendingCloseEvents_[pendingCloseCount_++] = {slot, reason, wasOpen};
         }
       }
       session_->unlock();

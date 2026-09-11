@@ -27,12 +27,12 @@ struct SSHTunnelEvents {
 
 // A forwarded channel waiting for a free slot.
 struct PendingChannel {
-  enum class Action { Bind, Close };
+  enum class Action { Attach, Close };
 
   LIBSSH2_CHANNEL *channel = nullptr;
   TunnelConfig mapping;
   unsigned long queuedAtMs = 0;
-  Action action = Action::Bind;
+  Action action = Action::Attach;
 };
 
 // SSHTunnel: public facade with the same API as before.
@@ -100,8 +100,11 @@ public:
 #endif
 
 private:
-  // Accept pending SSH channel and bind to a local socket
+  // Accept a pending SSH channel and attach it to a slot.
   bool handleNewConnection();
+
+  // Advance Resolving/Connecting channels without holding the session lock.
+  void progressChannelConnections();
 
   // Drain queued connections into newly freed slots
   void drainPendingQueue();

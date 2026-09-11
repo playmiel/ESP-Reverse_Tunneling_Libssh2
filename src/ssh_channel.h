@@ -2,6 +2,7 @@
 #define SSH_CHANNEL_H
 
 #include "channel_close_progress.h"
+#include "channel_lifecycle.h"
 #include "circuit_breaker.h"
 #include "ring_buffer.h"
 #include "ssh_config.h"
@@ -17,12 +18,15 @@ enum class ChannelCloseReason {
   Manual
 };
 
-static constexpr size_t SSH_TUNNEL_ENDPOINT_HOST_MAX = 64;
+static constexpr size_t SSH_TUNNEL_REMOTE_HOST_MAX = 64;
+// SOCKS5 domain names are length-prefixed with one byte, so reserve the full
+// 255-byte payload plus the terminator now rather than changing slots later.
+static constexpr size_t SSH_TUNNEL_DESTINATION_HOST_MAX = 256;
 
 struct ChannelEndpointInfo {
-  char remoteHost[SSH_TUNNEL_ENDPOINT_HOST_MAX];
+  char remoteHost[SSH_TUNNEL_REMOTE_HOST_MAX];
   int remotePort;
-  char localHost[SSH_TUNNEL_ENDPOINT_HOST_MAX];
+  char localHost[SSH_TUNNEL_DESTINATION_HOST_MAX];
   int localPort;
 };
 
@@ -39,8 +43,13 @@ struct ChannelSlot {
   DataRingBuffer *toLocal = nullptr;  // SSH -> Local
   DataRingBuffer *toRemote = nullptr; // Local -> SSH
 
-  // Channel state machine
-  enum class State { Open, Draining, Closed } state = State::Closed;
+  // Channel state machine. Fixed tunnels start at Resolving; future SOCKS5
+  // tunnels start at Negotiating and choose a destination later.
+  using State = channel_lifecycle::State;
+  State state = State::Closed;
+  unsigned long stateStartedMs = 0;
+  uint32_t resolvedIpv4 = 0; // network byte order, populated by Resolving
+  bool reachedOpen = false; // preserves callback pairing on pre-open failures
   bool localEof = false;  // Local socket sent EOF / closed
   bool remoteEof = false; // SSH channel sent EOF
   bool localShutdownSent =
@@ -95,8 +104,8 @@ struct ChannelSlot {
 };
 
 // Manages a fixed-size array of ChannelSlots.
-// Handles allocation, binding (connect local socket + init ring buffers),
-// close state transitions, and iteration.
+// Handles attachment, destination resolution/connection, close state
+// transitions, and iteration.
 class ChannelManager {
 public:
   ChannelManager();
@@ -117,11 +126,19 @@ public:
   // Find a free slot. Returns index or -1 if none available.
   int allocateSlot();
 
-  // Bind an accepted SSH channel to a slot: connect to local endpoint,
-  // create ring buffers, mark active.
-  // Returns true on success.
-  bool bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
-                   const TunnelConfig &mapping);
+  // Attach an accepted SSH channel and allocate its buffers without resolving
+  // or connecting to the destination. Fixed tunnels enter Resolving; a future
+  // SOCKS5 listener can defer destination selection and enter Negotiating.
+  bool attachChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
+                     const TunnelConfig &mapping,
+                     bool deferDestination = false);
+
+  // Supply the destination selected during negotiation, then start the
+  // Resolving -> Connecting -> Open sequence on subsequent loop iterations.
+  bool beginDestinationConnection(int slotIndex, const char *host, int port);
+
+  // Advance one pre-open channel without taking the libssh2 session lock.
+  channel_lifecycle::ConnectProgress progressConnection(int slotIndex);
 
   // Begin graceful close: state -> Draining.
   void beginClose(int slotIndex, ChannelCloseReason reason);
@@ -167,7 +184,11 @@ public:
   unsigned long getBreakerTrips() const { return breaker_.totalTrips(); }
 
 private:
-  int connectToLocalEndpoint(const TunnelConfig &mapping);
+  channel_lifecycle::ConnectProgress failConnection(int slotIndex,
+                                                     const char *detail,
+                                                     int errorCode,
+                                                     bool recordFailure = true);
+  channel_lifecycle::ConnectProgress markConnectionOpen(int slotIndex);
   void snapshotEndpoint(ChannelSlot &slot, const TunnelConfig &mapping);
   void resetSlot(int index);
 

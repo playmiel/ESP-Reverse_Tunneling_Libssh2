@@ -4,8 +4,10 @@
 #include "memory_fixes.h"
 #include "network_optimizations.h"
 #include <arpa/inet.h>
+#include <errno.h>
 #include <esp_heap_caps.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -107,42 +109,18 @@ int ChannelManager::allocateSlot() {
   return -1;
 }
 
-bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
-                                 const TunnelConfig &mapping) {
+bool ChannelManager::attachChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
+                                   const TunnelConfig &mapping,
+                                   bool deferDestination) {
   if (slotIndex < 0 || slotIndex >= maxSlots_) {
     return false;
   }
 
   ChannelSlot &slot = slots_[slotIndex];
   if (slot.active) {
-    LOGF_W("SSH", "bindChannel: slot %d already active", slotIndex);
+    LOGF_W("SSH", "attachChannel: slot %d already active", slotIndex);
     return false;
   }
-
-  // Connect to local endpoint
-  int localSocket = connectToLocalEndpoint(mapping);
-  if (localSocket < 0) {
-    unsigned long now = millis();
-    if (breaker_.recordFailure(mapping.remoteBindPort, now)) {
-      const auto *h = breaker_.peek(mapping.remoteBindPort);
-      if (h) {
-        unsigned long delay = h->backoffUntilMs - now;
-        LOGF_W("SSH",
-               "Mapping port %d: %u consecutive local-connect failures, "
-               "back-off %lums",
-               mapping.remoteBindPort, h->consecutiveFails, delay);
-      }
-    }
-    return false;
-  }
-  {
-    const auto *h = breaker_.peek(mapping.remoteBindPort);
-    if (h && (h->consecutiveFails > 0 || h->backoffUntilMs > 0)) {
-      LOGF_I("SSH", "Mapping port %d: recovered after %u failures",
-             mapping.remoteBindPort, h->consecutiveFails);
-    }
-  }
-  breaker_.recordSuccess(mapping.remoteBindPort);
 
   // Use static tag strings so the DataRingBuffer destructor can safely log.
   // DataRingBuffer stores a const char* — stack strings become dangling.
@@ -186,7 +164,6 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
         LOGF_E("SSH",
                "Not enough PSRAM for channel %d: need %zu, largest free %zu",
                slotIndex, required, freePsram);
-        close(localSocket);
         return false;
       }
     } else {
@@ -196,7 +173,6 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
         LOGF_E("SSH",
                "Not enough heap for channel %d: need %zu, largest free %zu",
                slotIndex, required, freeInternal);
-        close(localSocket);
         return false;
       }
     }
@@ -210,31 +186,123 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
     LOG_E("SSH", "Failed to allocate ring buffers for channel");
     delete toLocal;
     delete toRemote;
-    close(localSocket);
     return false;
   }
 
   // Initialize slot
   resetSlot(slotIndex);
   slot.sshChannel = sshChannel;
-  slot.localSocket = localSocket;
   slot.active = true;
-  slot.state = ChannelSlot::State::Open;
+  slot.state = deferDestination ? ChannelSlot::State::Negotiating
+                                : ChannelSlot::State::Resolving;
   slot.toLocal = toLocal;
   slot.toRemote = toRemote;
   slot.lastActivity = millis();
+  slot.stateStartedMs = slot.lastActivity;
   slot.lastSuccessfulWrite = slot.lastActivity;
   slot.lastSuccessfulRead = slot.lastActivity;
   snapshotEndpoint(slot, mapping);
-
-  // Set SSH channel to non-blocking
-  libssh2_channel_set_blocking(sshChannel, 0);
+  if (deferDestination) {
+    slot.endpoint.localHost[0] = '\0';
+    slot.endpoint.localPort = 0;
+  }
 
   activeCount_++;
-  LOGF_I("SSH", "Channel %d bound: %s:%d -> %s:%d (active: %d/%d)", slotIndex,
+  LOGF_I("SSH", "Channel %d attached: remote=%s:%d state=%d (active: %d/%d)",
+         slotIndex, slot.endpoint.remoteHost, slot.endpoint.remotePort,
+         static_cast<int>(slot.state), activeCount_, maxSlots_);
+  return true;
+}
+
+bool ChannelManager::beginDestinationConnection(int slotIndex,
+                                                const char *host, int port) {
+  if (slotIndex < 0 || slotIndex >= maxSlots_ || !host || host[0] == '\0' ||
+      port < 1 || port > 65535) {
+    return false;
+  }
+
+  ChannelSlot &slot = slots_[slotIndex];
+  if (!slot.active || slot.state != ChannelSlot::State::Negotiating ||
+      slot.localSocket >= 0) {
+    return false;
+  }
+
+  size_t hostLen = strnlen(host, SSH_TUNNEL_DESTINATION_HOST_MAX);
+  if (hostLen == 0 || hostLen >= SSH_TUNNEL_DESTINATION_HOST_MAX) {
+    return false;
+  }
+  memcpy(slot.endpoint.localHost, host, hostLen);
+  slot.endpoint.localHost[hostLen] = '\0';
+  slot.endpoint.localPort = port;
+  slot.resolvedIpv4 = 0;
+  slot.state = ChannelSlot::State::Resolving;
+  slot.stateStartedMs = millis();
+  slot.lastActivity = slot.stateStartedMs;
+  return true;
+}
+
+channel_lifecycle::ConnectProgress
+ChannelManager::failConnection(int slotIndex, const char *detail,
+                               int errorCode, bool recordFailure) {
+  ChannelSlot &slot = slots_[slotIndex];
+  if (slot.localSocket >= 0) {
+    close(slot.localSocket);
+    slot.localSocket = -1;
+  }
+
+  LOGF_E("SSH", "Channel %d: destination %s:%d failed during %s (err=%d)",
+         slotIndex, slot.endpoint.localHost, slot.endpoint.localPort,
+         detail ? detail : "connection", errorCode);
+
+  if (recordFailure) {
+    unsigned long now = millis();
+    if (breaker_.recordFailure(slot.endpoint.remotePort, now)) {
+      const auto *health = breaker_.peek(slot.endpoint.remotePort);
+      if (health) {
+        unsigned long delay = health->backoffUntilMs - now;
+        LOGF_W("SSH",
+               "Mapping port %d: %u consecutive destination failures, "
+               "back-off %lums",
+               slot.endpoint.remotePort, health->consecutiveFails, delay);
+      }
+    }
+  }
+
+  // No destination exists to drain these bytes into. Discard them so the
+  // channel can complete its SSH close instead of waiting for drain timeout.
+  if (slot.toLocal) {
+    slot.toLocal->clear();
+  }
+  if (slot.toRemote) {
+    slot.toRemote->clear();
+  }
+  beginClose(slotIndex, ChannelCloseReason::Error);
+  return channel_lifecycle::ConnectProgress::Failed;
+}
+
+channel_lifecycle::ConnectProgress
+ChannelManager::markConnectionOpen(int slotIndex) {
+  ChannelSlot &slot = slots_[slotIndex];
+  if (!NetworkOptimizer::optimizeSocket(slot.localSocket)) {
+    LOG_W("SSH", "Failed to optimize destination socket");
+  }
+
+  const auto *health = breaker_.peek(slot.endpoint.remotePort);
+  if (health && (health->consecutiveFails > 0 || health->backoffUntilMs > 0)) {
+    LOGF_I("SSH", "Mapping port %d: recovered after %u failures",
+           slot.endpoint.remotePort, health->consecutiveFails);
+  }
+  breaker_.recordSuccess(slot.endpoint.remotePort);
+
+  slot.state = ChannelSlot::State::Open;
+  slot.reachedOpen = true;
+  slot.stateStartedMs = millis();
+  slot.lastActivity = slot.stateStartedMs;
+  slot.lastSuccessfulWrite = slot.lastActivity;
+  slot.lastSuccessfulRead = slot.lastActivity;
+  LOGF_I("SSH", "Channel %d open: %s:%d -> %s:%d", slotIndex,
          slot.endpoint.remoteHost, slot.endpoint.remotePort,
-         slot.endpoint.localHost, slot.endpoint.localPort, activeCount_,
-         maxSlots_);
+         slot.endpoint.localHost, slot.endpoint.localPort);
 #ifdef TUNNEL_DIAG_LOG_ONLY
   slot.diagBoundMs = slot.lastActivity;
   LOGF_I("SSH", "HTTPDIAG ch=%d bound remote=%s:%d local=%s:%d active=%d/%d",
@@ -242,7 +310,106 @@ bool ChannelManager::bindChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
          slot.endpoint.localHost, slot.endpoint.localPort, activeCount_,
          maxSlots_);
 #endif
-  return true;
+  return channel_lifecycle::ConnectProgress::Opened;
+}
+
+channel_lifecycle::ConnectProgress
+ChannelManager::progressConnection(int slotIndex) {
+  if (slotIndex < 0 || slotIndex >= maxSlots_) {
+    return channel_lifecycle::ConnectProgress::None;
+  }
+  ChannelSlot &slot = slots_[slotIndex];
+  if (!slot.active || (slot.state != ChannelSlot::State::Resolving &&
+                       slot.state != ChannelSlot::State::Connecting)) {
+    return channel_lifecycle::ConnectProgress::None;
+  }
+  if (slot.state == ChannelSlot::State::Resolving) {
+    struct in_addr ipv4;
+    memset(&ipv4, 0, sizeof(ipv4));
+    if (inet_pton(AF_INET, slot.endpoint.localHost, &ipv4) != 1) {
+      // getaddrinfo may block while DNS is in flight, but it deliberately runs
+      // outside the libssh2 session lock. A later SOCKS5 resolver can replace
+      // this step with an asynchronous worker without changing channel states.
+      struct addrinfo hints;
+      memset(&hints, 0, sizeof(hints));
+      hints.ai_family = AF_INET;
+      hints.ai_socktype = SOCK_STREAM;
+      struct addrinfo *result = nullptr;
+      int dnsResult = getaddrinfo(slot.endpoint.localHost, nullptr, &hints,
+                                  &result);
+      if (dnsResult != 0 || !result || !result->ai_addr) {
+        if (result) {
+          freeaddrinfo(result);
+        }
+        return failConnection(slotIndex, "DNS resolution", dnsResult);
+      }
+      ipv4 = reinterpret_cast<struct sockaddr_in *>(result->ai_addr)->sin_addr;
+      freeaddrinfo(result);
+    }
+    slot.resolvedIpv4 = ipv4.s_addr;
+    slot.state = ChannelSlot::State::Connecting;
+    slot.stateStartedMs = millis();
+  }
+
+  if (slot.localSocket < 0) {
+    slot.localSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (slot.localSocket < 0) {
+      return failConnection(slotIndex, "socket creation", errno);
+    }
+    int flags = fcntl(slot.localSocket, F_GETFL, 0);
+    if (flags < 0 ||
+        fcntl(slot.localSocket, F_SETFL, flags | O_NONBLOCK) < 0) {
+      return failConnection(slotIndex, "non-blocking setup", errno);
+    }
+
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_port = htons(slot.endpoint.localPort);
+    address.sin_addr.s_addr = slot.resolvedIpv4;
+    int rc = ::connect(slot.localSocket,
+                       reinterpret_cast<struct sockaddr *>(&address),
+                       sizeof(address));
+    if (rc == 0 || (rc < 0 && errno == EISCONN)) {
+      return markConnectionOpen(slotIndex);
+    }
+    if (errno != EINPROGRESS && errno != EALREADY && errno != EWOULDBLOCK) {
+      return failConnection(slotIndex, "connect", errno);
+    }
+  }
+
+  fd_set writeFds;
+  fd_set errorFds;
+  FD_ZERO(&writeFds);
+  FD_ZERO(&errorFds);
+  FD_SET(slot.localSocket, &writeFds);
+  FD_SET(slot.localSocket, &errorFds);
+  struct timeval noWait = {0, 0};
+  int selected = select(slot.localSocket + 1, nullptr, &writeFds, &errorFds,
+                        &noWait);
+  if (selected < 0) {
+    return failConnection(slotIndex, "connect poll", errno);
+  }
+  if (selected > 0 && (FD_ISSET(slot.localSocket, &writeFds) ||
+                       FD_ISSET(slot.localSocket, &errorFds))) {
+    int socketError = 0;
+    socklen_t errorLength = sizeof(socketError);
+    if (getsockopt(slot.localSocket, SOL_SOCKET, SO_ERROR, &socketError,
+                   &errorLength) != 0) {
+      return failConnection(slotIndex, "connect status", errno);
+    }
+    if (socketError != 0) {
+      return failConnection(slotIndex, "connect", socketError);
+    }
+    return markConnectionOpen(slotIndex);
+  }
+
+  unsigned long now = millis();
+  if (channel_lifecycle::connectTimedOut(
+          now, slot.stateStartedMs, LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS)) {
+    return failConnection(slotIndex, "connect timeout", ETIMEDOUT);
+  }
+  return channel_lifecycle::ConnectProgress::Pending;
 }
 
 void ChannelManager::beginClose(int slotIndex, ChannelCloseReason reason) {
@@ -403,99 +570,12 @@ size_t ChannelManager::getTotalBytesSent() const {
 // Private helpers
 // ---------------------------------------------------------------------------
 
-int ChannelManager::connectToLocalEndpoint(const TunnelConfig &mapping) {
-  int localSocket = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-  if (localSocket < 0) {
-    LOG_E("SSH", "Failed to create local socket");
-    return -1;
-  }
-
-  struct sockaddr_in addr;
-  memset(&addr, 0, sizeof(addr));
-  addr.sin_family = AF_INET;
-  addr.sin_port = htons(mapping.localPort);
-  if (inet_pton(AF_INET, mapping.localHost.c_str(), &addr.sin_addr) != 1) {
-    LOGF_E("SSH", "Invalid local host address %s", mapping.localHost.c_str());
-    close(localSocket);
-    return -1;
-  }
-
-  // Set non-blocking BEFORE connect to avoid stalling the entire loop()
-  int flags = fcntl(localSocket, F_GETFL, 0);
-  if (flags < 0) {
-    LOGF_E("SSH", "fcntl F_GETFL failed for local socket (errno=%d)", errno);
-    close(localSocket);
-    return -1;
-  }
-  if (fcntl(localSocket, F_SETFL, flags | O_NONBLOCK) < 0) {
-    LOGF_E("SSH", "fcntl F_SETFL failed for local socket (errno=%d)", errno);
-    close(localSocket);
-    return -1;
-  }
-
-  int connectResult =
-      ::connect(localSocket, (struct sockaddr *)&addr, sizeof(addr));
-  if (connectResult < 0 && errno != EINPROGRESS) {
-    LOGF_E("SSH", "Failed to connect to local endpoint %s:%d (errno=%d)",
-           mapping.localHost.c_str(), mapping.localPort, errno);
-    close(localSocket);
-    return -1;
-  }
-
-  if (connectResult != 0) {
-    // Non-blocking connect in progress — wait with a short timeout
-    fd_set writefds;
-    FD_ZERO(&writefds);
-    FD_SET(localSocket, &writefds);
-    struct timeval tv;
-    tv.tv_sec = LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS / 1000;
-    tv.tv_usec = (LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS % 1000) * 1000;
-    // The session lock is held during this call, so keep the deadline bounded.
-    // Two seconds covers a normal TCP retransmission on a Wi-Fi/LAN target;
-    // 200 ms can reject an otherwise healthy endpoint after one lost SYN.
-    int sel = select(localSocket + 1, nullptr, &writefds, nullptr, &tv);
-    if (sel < 0) {
-      LOGF_E("SSH", "select() error connecting to %s:%d (errno=%d)",
-             mapping.localHost.c_str(), mapping.localPort, errno);
-      close(localSocket);
-      return -1;
-    }
-    if (sel == 0 || !FD_ISSET(localSocket, &writefds)) {
-      LOGF_E("SSH", "Timeout connecting to local endpoint %s:%d",
-             mapping.localHost.c_str(), mapping.localPort);
-      close(localSocket);
-      return -1;
-    }
-    // Check if connect actually succeeded
-    int sockErr = 0;
-    socklen_t errLen = sizeof(sockErr);
-    if (getsockopt(localSocket, SOL_SOCKET, SO_ERROR, &sockErr, &errLen) != 0) {
-      LOGF_E("SSH", "getsockopt SO_ERROR failed for %s:%d (errno=%d)",
-             mapping.localHost.c_str(), mapping.localPort, errno);
-      close(localSocket);
-      return -1;
-    }
-    if (sockErr != 0) {
-      LOGF_E("SSH", "Failed to connect to local endpoint %s:%d (err=%d)",
-             mapping.localHost.c_str(), mapping.localPort, sockErr);
-      close(localSocket);
-      return -1;
-    }
-  }
-
-  if (!NetworkOptimizer::optimizeSocket(localSocket)) {
-    LOG_W("SSH", "Failed to optimize local socket");
-  }
-
-  return localSocket;
-}
-
 void ChannelManager::snapshotEndpoint(ChannelSlot &slot,
                                       const TunnelConfig &mapping) {
-  snprintf(slot.endpoint.localHost, SSH_TUNNEL_ENDPOINT_HOST_MAX, "%s",
+  snprintf(slot.endpoint.localHost, SSH_TUNNEL_DESTINATION_HOST_MAX, "%s",
            mapping.localHost.c_str());
   slot.endpoint.localPort = mapping.localPort;
-  snprintf(slot.endpoint.remoteHost, SSH_TUNNEL_ENDPOINT_HOST_MAX, "%s",
+  snprintf(slot.endpoint.remoteHost, SSH_TUNNEL_REMOTE_HOST_MAX, "%s",
            mapping.remoteBindHost.c_str());
   slot.endpoint.remotePort = mapping.remoteBindPort;
 }
@@ -509,6 +589,9 @@ void ChannelManager::resetSlot(int index) {
   slot.localSocket = -1;
   slot.active = false;
   slot.state = ChannelSlot::State::Closed;
+  slot.stateStartedMs = 0;
+  slot.resolvedIpv4 = 0;
+  slot.reachedOpen = false;
   slot.localEof = false;
   slot.remoteEof = false;
   slot.localShutdownSent = false;

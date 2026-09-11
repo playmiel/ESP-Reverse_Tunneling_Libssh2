@@ -172,3 +172,13 @@ tunnel.removeReverseTunnel("127.0.0.1", 22081); // stops new connections
 ```
 
 Removing a listener does not interrupt channels that are already open.
+
+### Channel lifecycle
+
+Accepted SSH channels are attached before their destination is opened. Fixed
+reverse tunnels then advance through `Resolving -> Connecting -> Open`; close
+processing uses `Draining -> Closed`. `Negotiating` is reserved for protocols
+such as SOCKS5 that select a destination after the SSH channel is accepted.
+DNS runs outside the libssh2 session lock, and destination connections are
+polled cooperatively without a blocking wait, so a slow TCP connect cannot
+hold the SSH transport lock.

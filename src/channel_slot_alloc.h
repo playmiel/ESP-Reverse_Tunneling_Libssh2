@@ -12,7 +12,7 @@ namespace channel_alloc {
 // be releasing the underlying channel for a brief moment. Reusing the
 // slot inside that window can race with in-flight bytes from the
 // previous channel and cause small-chunk byte loss / "Rejecting accepted
-// channel after bind failure" (Bug #1 in 2026-04-28 baseline report).
+// channel after attachment failure" (Bug #1 in 2026-04-28 baseline report).
 // 50ms is a deliberately small guard: long enough to let the libssh2
 // teardown settle, short enough to be invisible under normal traffic.
 constexpr unsigned long FINALIZE_COOLDOWN_MS = 50;

@@ -71,6 +71,7 @@ public:
   struct CloseEvent {
     int slot;
     ChannelCloseReason reason;
+    bool wasOpen;
   };
   static constexpr int MAX_CLOSE_EVENTS = 32;
   int consumeCloseEvents(CloseEvent *out, int maxEvents);
