@@ -84,14 +84,15 @@ def test_channel_no_leak_over_cycles(wait_tunnel_ready, tunnel_socket,
 
         try:
             serial_monitor.wait_for(lambda s: s.get("ch", 99) == 0,
-                                    timeout_s=3.0)
+                                    timeout_s=TH.D_CHANNEL_SETTLE_TIMEOUT_S)
             settled += 1
         except TimeoutError:
             if leaked_cycle < 0:
                 leaked_cycle = i
             snap = serial_monitor.latest()
             raise AssertionError(
-                f"cycle {i}: ch did not return to 0 within 3s "
+                f"cycle {i}: ch did not return to 0 within "
+                f"{TH.D_CHANNEL_SETTLE_TIMEOUT_S}s "
                 f"(last snap: {snap})")
 
     final = serial_monitor.latest()
