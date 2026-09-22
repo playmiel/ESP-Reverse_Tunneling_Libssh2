@@ -28,6 +28,17 @@ inline bool canUseLocalSocket(State state) {
   return state == State::Open || state == State::Draining;
 }
 
+// Propagate the remote half-close only after all bytes received from SSH have
+// reached the local socket. Closing its write side while sshToLocalEmpty is
+// false truncates the request still waiting in the transport FIFO.
+inline bool shouldShutdownLocalWrite(bool remoteEof, bool localEof,
+                                     bool localShutdownSent,
+                                     bool hasLocalSocket,
+                                     bool sshToLocalEmpty) {
+  return remoteEof && !localEof && !localShutdownSent && hasLocalSocket &&
+         sshToLocalEmpty;
+}
+
 inline bool connectTimedOut(uint32_t nowMs, uint32_t startedMs,
                             uint32_t timeoutMs) {
   return timeoutMs > 0 && (nowMs - startedMs) >= timeoutMs;

@@ -25,6 +25,22 @@ void test_local_socket_is_used_only_after_connect(void) {
   TEST_ASSERT_FALSE(channel_lifecycle::canUseLocalSocket(State::Closed));
 }
 
+void test_local_half_close_waits_for_ssh_to_local_drain(void) {
+  TEST_ASSERT_FALSE(channel_lifecycle::shouldShutdownLocalWrite(
+      true, false, false, true, false));
+  TEST_ASSERT_TRUE(channel_lifecycle::shouldShutdownLocalWrite(
+      true, false, false, true, true));
+
+  TEST_ASSERT_FALSE(channel_lifecycle::shouldShutdownLocalWrite(
+      false, false, false, true, true));
+  TEST_ASSERT_FALSE(channel_lifecycle::shouldShutdownLocalWrite(
+      true, true, false, true, true));
+  TEST_ASSERT_FALSE(channel_lifecycle::shouldShutdownLocalWrite(
+      true, false, true, true, true));
+  TEST_ASSERT_FALSE(channel_lifecycle::shouldShutdownLocalWrite(
+      true, false, false, false, true));
+}
+
 void test_connect_timeout_boundary(void) {
   TEST_ASSERT_FALSE(channel_lifecycle::connectTimedOut(2999U, 1000U, 2000U));
   TEST_ASSERT_TRUE(channel_lifecycle::connectTimedOut(3000U, 1000U, 2000U));
@@ -41,6 +57,7 @@ int main(int, char **) {
   UNITY_BEGIN();
   RUN_TEST(test_pre_open_states_are_explicit);
   RUN_TEST(test_local_socket_is_used_only_after_connect);
+  RUN_TEST(test_local_half_close_waits_for_ssh_to_local_drain);
   RUN_TEST(test_connect_timeout_boundary);
   RUN_TEST(test_connect_timeout_handles_millis_wrap);
   return UNITY_END();

@@ -1,8 +1,9 @@
 """Test D — Channel slot leaks across open/close cycles.
 
 Open a TCP connection through the tunnel, transfer D_CHUNK_BYTES via echo,
-close it. Repeat D_CYCLES times. After each cycle, verify the ESP32
-returns to ch=0. After the full run, verify heap has not drifted.
+close it. Repeat D_CYCLES times. Each payload must be returned byte-for-byte
+and the ESP32 must return to ch=0. After the full run, verify heap stability
+and that the transport reported no dropped bytes.
 """
 from __future__ import annotations
 
@@ -19,6 +20,8 @@ def _round_trip(sock, payload: bytes) -> bytes:
     """
     target = len(payload)
     received = bytearray()
+    send_errors: list[Exception] = []
+    recv_errors: list[Exception] = []
 
     def _send():
         try:
@@ -27,8 +30,8 @@ def _round_trip(sock, payload: bytes) -> bytes:
                 sock.shutdown(1)
             except OSError:
                 pass
-        except OSError:
-            pass
+        except Exception as exc:
+            send_errors.append(exc)
 
     def _recv():
         sock.settimeout(30.0)
@@ -38,8 +41,8 @@ def _round_trip(sock, payload: bytes) -> bytes:
                 if not buf:
                     break
                 received.extend(buf)
-        except (TimeoutError, OSError):
-            pass
+        except Exception as exc:
+            recv_errors.append(exc)
 
     ts = threading.Thread(target=_send, daemon=True)
     tr = threading.Thread(target=_recv, daemon=True)
@@ -47,6 +50,15 @@ def _round_trip(sock, payload: bytes) -> bytes:
     tr.start()
     ts.join(60.0)
     tr.join(60.0)
+
+    if ts.is_alive() or tr.is_alive():
+        raise TimeoutError(
+            f"round trip threads did not finish: send_alive={ts.is_alive()} "
+            f"recv_alive={tr.is_alive()}")
+    if send_errors:
+        raise send_errors[0]
+    if recv_errors:
+        raise recv_errors[0]
     return bytes(received)
 
 
@@ -64,12 +76,9 @@ def test_channel_no_leak_over_cycles(wait_tunnel_ready, tunnel_socket,
         received = _round_trip(sock, payload)
         sock.close()
 
-        # Quick sanity check on transfer size; allow some tolerance for the
-        # known intermittent byte-loss bug surfaced by Test A. We're testing
-        # leaks here, not integrity.
-        if abs(len(received) - len(payload)) > len(payload) * 0.01:
-            print(f"[D] cycle {i}: only {len(received)}/{len(payload)} bytes — "
-                  f"continuing leak check anyway")
+        assert len(received) == len(payload), (
+            f"cycle {i}: expected {len(payload)} bytes, got {len(received)}")
+        assert received == payload, f"cycle {i}: echoed payload differs"
 
         time.sleep(TH.D_INTER_CYCLE_DELAY_S)
 
@@ -85,10 +94,16 @@ def test_channel_no_leak_over_cycles(wait_tunnel_ready, tunnel_socket,
                 f"cycle {i}: ch did not return to 0 within 3s "
                 f"(last snap: {snap})")
 
-    final_heap = serial_monitor.latest().get("heap", 0)
+    final = serial_monitor.latest()
+    final_heap = final.get("heap", 0)
     heap_drift = initial_heap - final_heap if initial_heap and final_heap else 0
-    print(f"[D] settled={settled}/{TH.D_CYCLES} heap_drift={heap_drift} bytes")
+    dropped_delta = final.get("dropped", 0) - baseline.get("dropped", 0)
+    print(
+        f"[D] settled={settled}/{TH.D_CYCLES} "
+        f"heap_drift={heap_drift} bytes dropped={dropped_delta}")
 
     assert settled == TH.D_CYCLES
+    assert dropped_delta == 0, (
+        f"ESP32 reports {dropped_delta} bytes dropped during endurance run")
     assert heap_drift <= TH.D_MAX_HEAP_DRIFT_BYTES, (
         f"heap drifted down {heap_drift} > {TH.D_MAX_HEAP_DRIFT_BYTES}")

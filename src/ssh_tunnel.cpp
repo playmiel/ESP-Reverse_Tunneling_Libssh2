@@ -305,7 +305,7 @@ unsigned long SSHTunnel::getBytesReceived() { return bytesReceived_; }
 unsigned long SSHTunnel::getBytesSent() { return bytesSent_; }
 
 unsigned long SSHTunnel::getBytesDropped() {
-  return 0; // No deferred/drop mechanism in v2
+  return transport_.bytesDropped();
 }
 
 int SSHTunnel::getActiveChannels() { return channels_.getActiveCount(); }

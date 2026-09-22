@@ -66,6 +66,10 @@ public:
   // Per-pump stats (reset each pumpAll call)
   size_t lastBytesMoved() const { return lastBytesMoved_; }
 
+  // Cumulative count of bytes read from one side but not retained for the
+  // other side. A non-zero value indicates a real transport data loss.
+  unsigned long bytesDropped() const { return bytesDropped_; }
+
   // Close events recorded during pumpAll() for the caller to emit callbacks.
   // Filled by checkCloses(), consumed by the caller after pumpAll() returns.
   struct CloseEvent {
@@ -104,6 +108,15 @@ private:
   // Phase 4: Check channels in Draining state for completion.
   void checkCloses();
 
+  // Restore bytes removed from a FIFO after a partial/non-blocking send.
+  // Prefer the prepend area to retain ordering, then fall back to the ring.
+  size_t requeueToFront(DataRingBuffer *buffer, const uint8_t *data,
+                        size_t len, int slot, const char *path);
+
+  // Account and report data that was already read but could not be buffered.
+  void recordDropped(size_t expected, size_t stored, int slot,
+                     const char *path);
+
   // Backpressure thresholds (fraction of ring buffer capacity)
   static constexpr int BACKPRESSURE_HIGH_PCT = 75; // Pause reads above 75%
   static constexpr int BACKPRESSURE_LOW_PCT = 25;  // Resume reads below 25%
@@ -136,6 +149,7 @@ private:
 
   unsigned int roundRobinOffset_ = 0;
   size_t lastBytesMoved_ = 0;
+  unsigned long bytesDropped_ = 0;
   unsigned long channelTimeoutMs_ = 1800000UL;
 
   // Pending close events (filled by checkCloses, drained by consumeCloseEvents)
