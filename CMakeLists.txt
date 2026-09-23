@@ -9,7 +9,7 @@ idf_component_register(
         src/ssh_transport.cpp
         src/ssh_tunnel.cpp
     INCLUDE_DIRS src
-    REQUIRES libssh2_esp freertos esp_timer esp_system heap
+    REQUIRES libssh2_esp freertos esp_ringbuf esp_timer esp_system heap
     PRIV_REQUIRES esp_netif lwip)
 
 target_compile_features(${COMPONENT_LIB} PUBLIC cxx_std_17)
