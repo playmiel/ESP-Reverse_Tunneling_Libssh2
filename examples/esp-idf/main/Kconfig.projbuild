@@ -1,0 +1,20 @@
+menu "Reverse tunnel example"
+    config EXAMPLE_WIFI_SSID
+        string "Wi-Fi SSID"
+        default ""
+    config EXAMPLE_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default ""
+    config EXAMPLE_SSH_HOST
+        string "SSH host"
+        default ""
+    config EXAMPLE_SSH_USER
+        string "SSH username"
+        default ""
+    config EXAMPLE_SSH_PASSWORD
+        string "SSH password"
+        default ""
+    config EXAMPLE_SSH_HOSTKEY_SHA256
+        string "SSH host key SHA256 fingerprint"
+        default ""
+endmenu

@@ -2,7 +2,7 @@
 #define SSH_CONFIG_H
 
 #include "logger.h"
-#include <Arduino.h>
+#include "platform_compat.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/semphr.h>
 #include <vector>

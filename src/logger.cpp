@@ -1,6 +1,7 @@
 #include "logger.h"
 #include "ssh_config.h"
 #include <stdarg.h>
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -48,11 +49,15 @@ bool tunnelDiagLogTagAllowed(const char *tag) {
 } // namespace
 
 void Logger::init() {
+#ifdef TUNNEL_NATIVE_IDF
+  // ESP-IDF owns the UART and log output.
+#else
   Serial.begin(globalSSHConfig.getDebugConfig().serialBaudRate);
   while (!Serial && millis() < 5000) {
     delay(10);
   }
   Serial.println("Logger initialized");
+#endif
 }
 
 void Logger::log(LogLevel level, const char *tag, const char *message) {
@@ -66,7 +71,11 @@ void Logger::log(LogLevel level, const char *tag, const char *message) {
 
   char prefix[40];
   buildLogPrefix(prefix, sizeof(prefix));
+#ifdef TUNNEL_NATIVE_IDF
+  printf("%s%s [%s] %s\n", prefix, getLevelString(level), tag, message);
+#else
   Serial.printf("%s%s [%s] %s\n", prefix, getLevelString(level), tag, message);
+#endif
 }
 
 void Logger::logf(LogLevel level, const char *tag, const char *format, ...) {

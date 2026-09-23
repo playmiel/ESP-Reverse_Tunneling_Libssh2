@@ -1,0 +1,4 @@
+[submodule "components/libssh2_esp"]
+	path = components/libssh2_esp
+	url = https://github.com/playmiel/libssh2_esp32.git
+	branch = codex/esp-idf-component

@@ -1,5 +1,10 @@
 #include "ssh_config.h"
+#ifdef TUNNEL_NATIVE_IDF
+#include <fstream>
+#include <iterator>
+#else
 #include "LittleFS.h"
+#endif
 #include "logger.h"
 #include "ssh_config_validators.h"
 
@@ -83,6 +88,9 @@ void SSHConfiguration::setSSHKeyAuthFromMemory(const String &host, int port,
 }
 
 bool SSHConfiguration::loadSSHKeysFromLittleFS(const String &privateKeyPath) {
+#ifdef TUNNEL_NATIVE_IDF
+  return loadSSHKeysFromFile(privateKeyPath);
+#else
   // Load private key
   File privateKeyFile = LittleFS.open(privateKeyPath, "r");
   if (!privateKeyFile) {
@@ -120,12 +128,27 @@ bool SSHConfiguration::loadSSHKeysFromLittleFS(const String &privateKeyPath) {
          sshConfig.privateKeyData.length(), sshConfig.publicKeyData.length());
 
   return true;
+#endif
 }
 
 bool SSHConfiguration::loadSSHKeysFromFile(const String &privateKeyPath) {
+#ifdef TUNNEL_NATIVE_IDF
+  std::ifstream privateKeyFile(privateKeyPath.c_str(), std::ios::binary);
+  std::ifstream publicKeyFile((privateKeyPath + ".pub").c_str(), std::ios::binary);
+  if (!privateKeyFile || !publicKeyFile) {
+    LOGF_E("CONFIG", "Cannot open SSH key files: %s", privateKeyPath.c_str());
+    return false;
+  }
+  sshConfig.privateKeyData.assign(std::istreambuf_iterator<char>(privateKeyFile),
+                                  std::istreambuf_iterator<char>());
+  sshConfig.publicKeyData.assign(std::istreambuf_iterator<char>(publicKeyFile),
+                                 std::istreambuf_iterator<char>());
+  return !sshConfig.privateKeyData.empty() && !sshConfig.publicKeyData.empty();
+#else
   // This method can be used for other file systems
   // For now, we use LittleFS
   return loadSSHKeysFromLittleFS(privateKeyPath);
+#endif
 }
 
 void SSHConfiguration::setSSHKeysInMemory(const String &privateKeyData,

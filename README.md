@@ -1,6 +1,38 @@
 # ESP-Reverse_Tunneling_Libssh2
 
-Library for ESP32 Arduino enabling creation of reverse SSH tunnels using libssh2.
+Library for ESP32 Arduino and native ESP-IDF enabling reverse SSH tunnels using libssh2. This branch includes the 3.0 SOCKS5 reverse proxy changes.
+
+### Native ESP-IDF
+
+Clone this repository with `--recurse-submodules`. The submodule at
+`components/libssh2_esp` tracks [playmiel/libssh2_esp32](https://github.com/playmiel/libssh2_esp32),
+which contains the ESP-IDF backend. Arduino/PlatformIO continues to use
+[playmiel/libssh2_esp](https://github.com/playmiel/libssh2_esp) through
+`platformio.ini`.
+
+In an ESP-IDF project's top-level `CMakeLists.txt`, before including
+`project.cmake`, add both components:
+
+```cmake
+set(EXTRA_COMPONENT_DIRS
+    "${CMAKE_CURRENT_LIST_DIR}/components/ESP-Reverse_Tunneling_Libssh2"
+    "${CMAKE_CURRENT_LIST_DIR}/components/ESP-Reverse_Tunneling_Libssh2/components/libssh2_esp")
+include($ENV{IDF_PATH}/tools/cmake/project.cmake)
+project(my_project)
+```
+
+Initialize the submodule after cloning or updating:
+
+```bash
+git submodule update --init --recursive
+```
+
+The [ESP-IDF example](examples/esp-idf) uses Wi-Fi station mode. Set Wi-Fi,
+SSH server credentials and the server's SHA256 host-key fingerprint with
+`idf.py menuconfig`, then run `idf.py build flash monitor` from that directory.
+For key authentication, `setSSHKeyAuthFromMemory` needs no filesystem; the
+native `setSSHKeyAuth` path reads the private key and `.pub` file from an
+already mounted ESP-IDF VFS.
 
 ### 1. Adding the Library
 

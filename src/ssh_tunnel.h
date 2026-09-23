@@ -5,7 +5,7 @@
 #include "ssh_config.h"
 #include "ssh_session.h"
 #include "ssh_transport.h"
-#include <Arduino.h>
+#include "platform_compat.h"
 
 // TunnelState and event types - kept identical for API compatibility
 enum TunnelState {
