@@ -4,11 +4,11 @@ Library for ESP32 Arduino and native ESP-IDF enabling reverse SSH tunnels using 
 
 ### Native ESP-IDF
 
-Clone this repository with `--recurse-submodules`. The submodule at
-`components/libssh2_esp` tracks [playmiel/libssh2_esp32](https://github.com/playmiel/libssh2_esp32),
-which contains the ESP-IDF backend. Arduino/PlatformIO continues to use
-[playmiel/libssh2_esp](https://github.com/playmiel/libssh2_esp) through
-`platformio.ini`.
+Clone this repository with `--recurse-submodules`. Arduino/PlatformIO and
+ESP-IDF both use [playmiel/libssh2_esp32](https://github.com/playmiel/libssh2_esp32).
+PlatformIO fetches its `codex/esp-idf-component` branch through `lib_deps`;
+ESP-IDF builds the same fork from the pinned `components/libssh2_esp`
+submodule, with the native CMake adaptation.
 
 In an ESP-IDF project's top-level `CMakeLists.txt`, before including
 `project.cmake`, add both components:
@@ -41,7 +41,7 @@ already mounted ESP-IDF VFS.
 # Add to your platformio.ini
 lib_deps = 
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
-    https://github.com/playmiel/libssh2_esp  # libssh2 backend for ESP32
+    https://github.com/playmiel/libssh2_esp32.git#codex/esp-idf-component
 ```
 
 **Option B: Arduino IDE**
