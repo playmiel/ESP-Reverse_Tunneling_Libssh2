@@ -86,6 +86,7 @@ public:
   // Dynamic tunnel management. When connected, these methods update the live
   // listener set immediately as well as the configuration used on reconnect.
   bool addReverseTunnel(const TunnelConfig &mapping);
+  bool addSocks5Tunnel(const String &remoteHost, int remotePort);
   bool removeReverseTunnel(const String &remoteHost, int remotePort);
 
   // Backpressure query for adaptive delay in caller loop
@@ -105,6 +106,9 @@ private:
 
   // Advance Resolving/Connecting channels without holding the session lock.
   void progressChannelConnections();
+
+  // Consume incremental SOCKS5 handshakes for deferred-destination channels.
+  void progressSocks5Negotiations();
 
   // Drain queued connections into newly freed slots
   void drainPendingQueue();
@@ -163,6 +167,7 @@ private:
   static constexpr int MAX_DEFERRED_CLOSE = 4;
   static constexpr unsigned long PENDING_TIMEOUT_MS = 5000;
   static constexpr unsigned long CLOSE_RETRY_TIMEOUT_MS = 5000;
+  static constexpr unsigned long SOCKS5_NEGOTIATION_TIMEOUT_MS = 5000;
   PendingChannel pendingQueue_[MAX_PENDING];
   int pendingCount_ = 0;
   PendingChannel deferredCloseQueue_[MAX_DEFERRED_CLOSE];

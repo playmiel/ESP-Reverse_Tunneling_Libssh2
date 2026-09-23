@@ -44,7 +44,7 @@ make test-integration-down    # tear stack down
 
 | Service | Container | Port (host) | Purpose |
 |---|---|---|---|
-| `sshd` | `tunnel_test_sshd` | 2222→22 (SSH), 22080-22082 (reverse listeners) | ESP32 connects here; remote ports forwarded back through the tunnel |
+| `sshd` | `tunnel_test_sshd` | 2222→22 (SSH), 22080-22083 (reverse listeners) | ESP32 connects here; remote ports forwarded back through the tunnel |
 | `echo` | `tunnel_test_echo` | 9000 | TCP echo (socat) — used by tests A, B, D, F |
 | `slow_echo` | `tunnel_test_slow_echo` | 9001 | TCP echo throttled to 1 KB/s (Python) — used by test G2 |
 
@@ -52,6 +52,7 @@ The test firmware maps:
 - `22080 → DOCKER_HOST_IP:9000` (live target)
 - `22081 → DOCKER_HOST_IP:9001` (slow consumer)
 - `22082 → DOCKER_HOST_IP:65500` (dead port, triggers circuit breaker)
+- `22083 → SOCKS5` (`NO AUTH`, `CONNECT`; IPv4/domain destinations)
 
 Tests A and B pace the synthetic echo stream at 128 KiB/s. Unlike the Modlink
 production path, this Docker echo topology crosses the ESP32 Wi-Fi link four

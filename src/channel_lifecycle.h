@@ -6,7 +6,7 @@
 namespace channel_lifecycle {
 
 // Negotiating and Resolving are intentionally part of the core lifecycle even
-// though fixed reverse tunnels enter at Resolving. SOCKS5 channels will enter
+// though fixed reverse tunnels enter at Resolving. SOCKS5 channels enter
 // at Negotiating and select their destination before resolution starts.
 enum class State : uint8_t {
   Negotiating,

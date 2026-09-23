@@ -173,12 +173,39 @@ tunnel.removeReverseTunnel("127.0.0.1", 22081); // stops new connections
 
 Removing a listener does not interrupt channels that are already open.
 
+### SOCKS5 reverse proxy
+
+SOCKS5 listeners select their destination per connection instead of using a
+fixed local target:
+
+```cpp
+globalSSHConfig.setMaxReverseListeners(2);
+globalSSHConfig.addTunnelMapping("127.0.0.1", 22080,
+                                 "192.168.1.150", 80);
+globalSSHConfig.addSocks5TunnelMapping("127.0.0.1", 22083);
+```
+
+The current SOCKS5 subset supports `NO AUTH`, `CONNECT`, IPv4 addresses and
+domain names. DNS resolution runs on the ESP32. IPv6, `BIND`, `UDP ASSOCIATE`
+and username/password authentication are rejected. Negotiation times out after
+5 seconds.
+
+Keep the remote listener bound to `127.0.0.1` and expose it only through an
+authenticated/private path. Binding a `NO AUTH` SOCKS listener publicly (for
+example on `0.0.0.0`) creates an open proxy.
+
+When the SSH session is already connected, the equivalent dynamic call is:
+
+```cpp
+tunnel.addSocks5Tunnel("127.0.0.1", 22083);
+```
+
 ### Channel lifecycle
 
 Accepted SSH channels are attached before their destination is opened. Fixed
 reverse tunnels then advance through `Resolving -> Connecting -> Open`; close
-processing uses `Draining -> Closed`. `Negotiating` is reserved for protocols
-such as SOCKS5 that select a destination after the SSH channel is accepted.
+processing uses `Draining -> Closed`. SOCKS5 uses `Negotiating` to select its
+destination after the SSH channel is accepted.
 DNS runs outside the libssh2 session lock, and destination connections are
 polled cooperatively without a blocking wait, so a slow TCP connect cannot
 hold the SSH transport lock.

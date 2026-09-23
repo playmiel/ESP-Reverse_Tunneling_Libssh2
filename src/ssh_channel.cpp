@@ -202,6 +202,7 @@ bool ChannelManager::attachChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
   slot.lastSuccessfulWrite = slot.lastActivity;
   slot.lastSuccessfulRead = slot.lastActivity;
   snapshotEndpoint(slot, mapping);
+  slot.isSocks5 = mapping.isSocks5();
   if (deferDestination) {
     slot.endpoint.localHost[0] = '\0';
     slot.endpoint.localPort = 0;
@@ -243,8 +244,11 @@ bool ChannelManager::beginDestinationConnection(int slotIndex,
 
 channel_lifecycle::ConnectProgress
 ChannelManager::failConnection(int slotIndex, const char *detail,
-                               int errorCode, bool recordFailure) {
+                               int errorCode, bool recordFailure,
+                               bool dnsFailure) {
   ChannelSlot &slot = slots_[slotIndex];
+  slot.destinationError = errorCode;
+  slot.destinationDnsFailure = dnsFailure;
   if (slot.localSocket >= 0) {
     close(slot.localSocket);
     slot.localSocket = -1;
@@ -254,7 +258,7 @@ ChannelManager::failConnection(int slotIndex, const char *detail,
          slotIndex, slot.endpoint.localHost, slot.endpoint.localPort,
          detail ? detail : "connection", errorCode);
 
-  if (recordFailure) {
+  if (recordFailure && !slot.isSocks5) {
     unsigned long now = millis();
     if (breaker_.recordFailure(slot.endpoint.remotePort, now)) {
       const auto *health = breaker_.peek(slot.endpoint.remotePort);
@@ -273,7 +277,7 @@ ChannelManager::failConnection(int slotIndex, const char *detail,
   if (slot.toLocal) {
     slot.toLocal->clear();
   }
-  if (slot.toRemote) {
+  if (slot.toRemote && !slot.isSocks5) {
     slot.toRemote->clear();
   }
   beginClose(slotIndex, ChannelCloseReason::Error);
@@ -287,12 +291,15 @@ ChannelManager::markConnectionOpen(int slotIndex) {
     LOG_W("SSH", "Failed to optimize destination socket");
   }
 
-  const auto *health = breaker_.peek(slot.endpoint.remotePort);
-  if (health && (health->consecutiveFails > 0 || health->backoffUntilMs > 0)) {
-    LOGF_I("SSH", "Mapping port %d: recovered after %u failures",
-           slot.endpoint.remotePort, health->consecutiveFails);
+  if (!slot.isSocks5) {
+    const auto *health = breaker_.peek(slot.endpoint.remotePort);
+    if (health &&
+        (health->consecutiveFails > 0 || health->backoffUntilMs > 0)) {
+      LOGF_I("SSH", "Mapping port %d: recovered after %u failures",
+             slot.endpoint.remotePort, health->consecutiveFails);
+    }
+    breaker_.recordSuccess(slot.endpoint.remotePort);
   }
-  breaker_.recordSuccess(slot.endpoint.remotePort);
 
   slot.state = ChannelSlot::State::Open;
   slot.reachedOpen = true;
@@ -341,7 +348,8 @@ ChannelManager::progressConnection(int slotIndex) {
         if (result) {
           freeaddrinfo(result);
         }
-        return failConnection(slotIndex, "DNS resolution", dnsResult);
+        return failConnection(slotIndex, "DNS resolution", dnsResult, true,
+                              true);
       }
       ipv4 = reinterpret_cast<struct sockaddr_in *>(result->ai_addr)->sin_addr;
       freeaddrinfo(result);
@@ -591,6 +599,10 @@ void ChannelManager::resetSlot(int index) {
   slot.state = ChannelSlot::State::Closed;
   slot.stateStartedMs = 0;
   slot.resolvedIpv4 = 0;
+  slot.isSocks5 = false;
+  slot.socks5Negotiator.reset();
+  slot.destinationError = 0;
+  slot.destinationDnsFailure = false;
   slot.reachedOpen = false;
   slot.localEof = false;
   slot.remoteEof = false;

@@ -1,5 +1,6 @@
 #include "ssh_tunnel.h"
 #include "ssh_config_validators.h"
+#include <errno.h>
 #include <unistd.h>
 
 namespace {
@@ -40,8 +41,42 @@ AttachResult attachAcceptedChannel(SSHSession &session,
   libssh2_channel_set_blocking(channel, 0);
   session.unlock();
 
-  bool attached = channels.attachChannel(slot, channel, mapping);
+  bool attached =
+      channels.attachChannel(slot, channel, mapping, mapping.isSocks5());
   return attached ? AttachResult::Attached : AttachResult::Failed;
+}
+
+socks5::Reply replyForDestinationError(const ChannelSlot &slot) {
+  if (slot.destinationDnsFailure) {
+    return socks5::Reply::HostUnreachable;
+  }
+  switch (slot.destinationError) {
+  case ECONNREFUSED:
+  case ECONNRESET: // lwIP may report a closed loopback port as reset
+    return socks5::Reply::ConnectionRefused;
+  case ENETUNREACH:
+    return socks5::Reply::NetworkUnreachable;
+  case EHOSTUNREACH:
+    return socks5::Reply::HostUnreachable;
+  case ETIMEDOUT:
+    return socks5::Reply::TtlExpired;
+  default:
+    return socks5::Reply::GeneralFailure;
+  }
+}
+
+bool queueMethodSelection(ChannelSlot &slot, bool accepted) {
+  uint8_t response[2];
+  const size_t length =
+      socks5::writeMethodSelection(accepted, response, sizeof(response));
+  return slot.toRemote && slot.toRemote->write(response, length) == length;
+}
+
+bool queueConnectReply(ChannelSlot &slot, socks5::Reply reply) {
+  uint8_t response[10];
+  const size_t length =
+      socks5::writeConnectReply(reply, response, sizeof(response));
+  return slot.toRemote && slot.toRemote->write(response, length) == length;
 }
 
 } // namespace
@@ -240,6 +275,7 @@ void SSHTunnel::loop() {
 
   // DNS and destination connects progress independently from channel
   // acceptance and never hold the libssh2 session lock.
+  progressSocks5Negotiations();
   progressChannelConnections();
 
   // Pump all data (the core of the new architecture)
@@ -321,8 +357,9 @@ void SSHTunnel::setEventHandlers(const SSHTunnelEvents &handlers) {
 bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
   if (!ssh_validators::isValidHostname(mapping.remoteBindHost.c_str()) ||
       !ssh_validators::isValidRemoteBindPort(mapping.remoteBindPort) ||
-      !ssh_validators::isValidHostname(mapping.localHost.c_str()) ||
-      !ssh_validators::isValidPort(mapping.localPort)) {
+      (!mapping.isSocks5() &&
+       (!ssh_validators::isValidHostname(mapping.localHost.c_str()) ||
+        !ssh_validators::isValidPort(mapping.localPort)))) {
     LOG_E("SSH", "Cannot add reverse tunnel: invalid mapping");
     return false;
   }
@@ -336,7 +373,8 @@ bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
     if (configured.remoteBindHost == mapping.remoteBindHost &&
         configured.remoteBindPort == mapping.remoteBindPort &&
         configured.localHost == mapping.localHost &&
-        configured.localPort == mapping.localPort) {
+        configured.localPort == mapping.localPort &&
+        configured.mode == mapping.mode) {
       alreadyConfigured = true;
       break;
     }
@@ -362,6 +400,16 @@ bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
     config_->addTunnelMapping(mapping);
   }
   return true;
+}
+
+bool SSHTunnel::addSocks5Tunnel(const String &remoteHost, int remotePort) {
+  TunnelConfig mapping;
+  mapping.remoteBindHost = remoteHost;
+  mapping.remoteBindPort = remotePort;
+  mapping.localHost = "";
+  mapping.localPort = 0;
+  mapping.mode = TunnelMode::Socks5;
+  return addReverseTunnel(mapping);
 }
 
 bool SSHTunnel::removeReverseTunnel(const String &remoteHost, int remotePort) {
@@ -393,10 +441,124 @@ bool SSHTunnel::hasAnyBackpressure() const {
 
 void SSHTunnel::progressChannelConnections() {
   for (int slot = 0; slot < channels_.getMaxSlots(); ++slot) {
+    ChannelSlot &channel = channels_.getSlot(slot);
+    const bool isSocks5 = channel.active && channel.isSocks5;
     channel_lifecycle::ConnectProgress progress =
         channels_.progressConnection(slot);
     if (progress == channel_lifecycle::ConnectProgress::Opened) {
+      if (isSocks5 && !queueConnectReply(channel, socks5::Reply::Succeeded)) {
+        LOGF_E("SOCKS5", "Channel %d: cannot queue CONNECT success", slot);
+        if (channel.toLocal) {
+          channel.toLocal->clear();
+        }
+        channels_.beginClose(slot, ChannelCloseReason::Error);
+        continue;
+      }
       emitChannelOpened(slot);
+    } else if (progress == channel_lifecycle::ConnectProgress::Failed &&
+               isSocks5) {
+      if (!queueConnectReply(channel, replyForDestinationError(channel))) {
+        LOGF_E("SOCKS5", "Channel %d: cannot queue CONNECT failure", slot);
+      }
+    }
+  }
+}
+
+void SSHTunnel::progressSocks5Negotiations() {
+  uint8_t input[256];
+  const unsigned long now = millis();
+
+  for (int slotIndex = 0; slotIndex < channels_.getMaxSlots(); ++slotIndex) {
+    ChannelSlot &slot = channels_.getSlot(slotIndex);
+    if (!slot.active || !slot.isSocks5 ||
+        slot.state != ChannelSlot::State::Negotiating) {
+      continue;
+    }
+
+    auto reject = [&](bool methodReply, socks5::Reply reply,
+                      const char *detail) {
+      bool queued = methodReply ? queueMethodSelection(slot, false)
+                                : queueConnectReply(slot, reply);
+      if (!queued) {
+        LOGF_E("SOCKS5", "Channel %d: failed to queue rejection", slotIndex);
+      }
+      if (slot.toLocal) {
+        slot.toLocal->clear();
+      }
+      LOGF_W("SOCKS5", "Channel %d: %s", slotIndex, detail);
+      channels_.beginClose(slotIndex, ChannelCloseReason::Error);
+    };
+
+    if ((now - slot.stateStartedMs) >= SOCKS5_NEGOTIATION_TIMEOUT_MS) {
+      reject(!slot.socks5Negotiator.methodAccepted(),
+             socks5::Reply::TtlExpired, "negotiation timeout");
+      continue;
+    }
+    if (slot.remoteEof && (!slot.toLocal || slot.toLocal->empty())) {
+      channels_.beginClose(slotIndex, ChannelCloseReason::RemoteClosed);
+      continue;
+    }
+
+    // A single pass may complete both a pipelined greeting and request, but
+    // each read is capped at bytesNeeded() so application payload remains in
+    // toLocal for the destination socket after CONNECT succeeds.
+    for (int step = 0; step < 8 && slot.toLocal && !slot.toLocal->empty() &&
+                       slot.state == ChannelSlot::State::Negotiating;
+         ++step) {
+      size_t needed = slot.socks5Negotiator.bytesNeeded();
+      if (needed == 0) {
+        reject(false, socks5::Reply::GeneralFailure,
+               "invalid negotiation state");
+        break;
+      }
+      size_t available = slot.toLocal->size();
+      size_t amount = needed < available ? needed : available;
+      if (amount > sizeof(input)) {
+        amount = sizeof(input);
+      }
+      size_t received = slot.toLocal->read(input, amount);
+      if (received == 0) {
+        break;
+      }
+
+      socks5::Event event = slot.socks5Negotiator.consume(input, received);
+      switch (event) {
+      case socks5::Event::NeedMore:
+        break;
+      case socks5::Event::MethodAccepted:
+        if (!queueMethodSelection(slot, true)) {
+          reject(true, socks5::Reply::GeneralFailure,
+                 "cannot queue method selection");
+        }
+        break;
+      case socks5::Event::ConnectRequest:
+        LOGF_I("SOCKS5", "Channel %d: CONNECT %s:%u", slotIndex,
+               slot.socks5Negotiator.targetHost(),
+               static_cast<unsigned>(slot.socks5Negotiator.targetPort()));
+        if (!channels_.beginDestinationConnection(
+                slotIndex, slot.socks5Negotiator.targetHost(),
+                slot.socks5Negotiator.targetPort())) {
+          reject(false, socks5::Reply::GeneralFailure,
+                 "invalid CONNECT destination");
+        }
+        break;
+      case socks5::Event::MethodRejected:
+        reject(true, socks5::Reply::GeneralFailure,
+               "NO AUTH was not offered");
+        break;
+      case socks5::Event::CommandNotSupported:
+        reject(false, socks5::Reply::CommandNotSupported,
+               "command is not CONNECT");
+        break;
+      case socks5::Event::AddressTypeNotSupported:
+        reject(false, socks5::Reply::AddressTypeNotSupported,
+               "address type is not IPv4 or domain");
+        break;
+      case socks5::Event::GeneralFailure:
+        reject(false, socks5::Reply::GeneralFailure,
+               "malformed request");
+        break;
+      }
     }
   }
 }
@@ -419,7 +581,8 @@ bool SSHTunnel::handleNewConnection() {
   // Circuit breaker: if this mapping's local endpoint has been failing,
   // reject the channel without burning a slot. Prevents a dead backend
   // from saturating the tunnel with repeated connection attempts.
-  if (channels_.isMappingBackedOff(mapping.remoteBindPort, millis())) {
+  if (!mapping.isSocks5() &&
+      channels_.isMappingBackedOff(mapping.remoteBindPort, millis())) {
     LOGF_W("SSH",
            "Mapping %s:%d in circuit-breaker back-off, rejecting channel",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort);

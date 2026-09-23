@@ -38,17 +38,22 @@ struct SSHServerConfig {
         onHostKeyMismatch(nullptr), hostKeyMismatchContext(nullptr) {}
 };
 
+enum class TunnelMode : uint8_t { Fixed, Socks5 };
+
 // Structure for tunnel configuration
 struct TunnelConfig {
   String remoteBindHost;
   int remoteBindPort;
   String localHost;
   int localPort;
+  TunnelMode mode;
 
   // Default constructor
   TunnelConfig()
       : remoteBindHost("127.0.0.1"), remoteBindPort(8080),
-        localHost("192.168.1.100"), localPort(80) {}
+        localHost("192.168.1.100"), localPort(80), mode(TunnelMode::Fixed) {}
+
+  bool isSocks5() const { return mode == TunnelMode::Socks5; }
 };
 
 // Structure for connection management
@@ -128,6 +133,8 @@ public:
   void addTunnelMapping(const String &remoteBindHost, int remoteBindPort,
                         const String &localHost, int localPort);
   void addTunnelMapping(const TunnelConfig &mapping);
+  void addSocks5TunnelMapping(const String &remoteBindHost,
+                              int remoteBindPort);
   bool removeTunnelMapping(size_t index);
   void clearTunnelMappings();
 

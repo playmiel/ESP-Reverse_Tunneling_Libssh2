@@ -360,10 +360,27 @@ void SSHConfiguration::addTunnelMapping(const TunnelConfig &mapping) {
     size_t idx = tunnelMappings.size() - 1;
     unlockConfig();
 
-    LOGF_I("CONFIG", "Tunnel mapping #%u added: %s:%d -> %s:%d", (unsigned)idx,
-           mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
-           mapping.localHost.c_str(), mapping.localPort);
+    if (mapping.isSocks5()) {
+      LOGF_I("CONFIG", "SOCKS5 mapping #%u added: %s:%d", (unsigned)idx,
+             mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
+    } else {
+      LOGF_I("CONFIG", "Tunnel mapping #%u added: %s:%d -> %s:%d",
+             (unsigned)idx, mapping.remoteBindHost.c_str(),
+             mapping.remoteBindPort, mapping.localHost.c_str(),
+             mapping.localPort);
+    }
   }
+}
+
+void SSHConfiguration::addSocks5TunnelMapping(const String &remoteBindHost,
+                                               int remoteBindPort) {
+  TunnelConfig mapping;
+  mapping.remoteBindHost = remoteBindHost;
+  mapping.remoteBindPort = remoteBindPort;
+  mapping.localHost = "";
+  mapping.localPort = 0;
+  mapping.mode = TunnelMode::Socks5;
+  addTunnelMapping(mapping);
 }
 
 bool SSHConfiguration::removeTunnelMapping(size_t index) {
@@ -508,8 +525,13 @@ void SSHConfiguration::printConfiguration() const {
         const TunnelConfig &mapping = tunnelMappings[i];
         LOGF_I("CONFIG", "#%u Remote Bind: %s:%d", (unsigned)i,
                mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
-        LOGF_I("CONFIG", "#%u Local Target: %s:%d", (unsigned)i,
-               mapping.localHost.c_str(), mapping.localPort);
+        if (mapping.isSocks5()) {
+          LOGF_I("CONFIG", "#%u Mode: SOCKS5 (NO AUTH, CONNECT)",
+                 (unsigned)i);
+        } else {
+          LOGF_I("CONFIG", "#%u Local Target: %s:%d", (unsigned)i,
+                 mapping.localHost.c_str(), mapping.localPort);
+        }
       }
     }
 
@@ -616,11 +638,13 @@ bool SSHConfiguration::validateTunnelConfig() const {
              (unsigned)i);
       return false;
     }
-    if (!ssh_validators::isValidHostname(mapping.localHost.c_str())) {
+    if (!mapping.isSocks5() &&
+        !ssh_validators::isValidHostname(mapping.localHost.c_str())) {
       LOGF_E("CONFIG", "Mapping #%u: Local host cannot be empty", (unsigned)i);
       return false;
     }
-    if (!ssh_validators::isValidPort(mapping.localPort)) {
+    if (!mapping.isSocks5() &&
+        !ssh_validators::isValidPort(mapping.localPort)) {
       LOGF_E("CONFIG", "Mapping #%u: Local port must be between 1 and 65535",
              (unsigned)i);
       return false;

@@ -5,6 +5,7 @@
 #include "channel_lifecycle.h"
 #include "circuit_breaker.h"
 #include "ring_buffer.h"
+#include "socks5_protocol.h"
 #include "ssh_config.h"
 #include <libssh2_esp.h>
 
@@ -43,12 +44,16 @@ struct ChannelSlot {
   DataRingBuffer *toLocal = nullptr;  // SSH -> Local
   DataRingBuffer *toRemote = nullptr; // Local -> SSH
 
-  // Channel state machine. Fixed tunnels start at Resolving; future SOCKS5
-  // tunnels start at Negotiating and choose a destination later.
+  // Channel state machine. Fixed tunnels start at Resolving; SOCKS5 tunnels
+  // start at Negotiating and choose a destination from the CONNECT request.
   using State = channel_lifecycle::State;
   State state = State::Closed;
   unsigned long stateStartedMs = 0;
   uint32_t resolvedIpv4 = 0; // network byte order, populated by Resolving
+  bool isSocks5 = false;
+  socks5::Negotiator socks5Negotiator;
+  int destinationError = 0;
+  bool destinationDnsFailure = false;
   bool reachedOpen = false; // preserves callback pairing on pre-open failures
   bool localEof = false;  // Local socket sent EOF / closed
   bool remoteEof = false; // SSH channel sent EOF
@@ -127,8 +132,8 @@ public:
   int allocateSlot();
 
   // Attach an accepted SSH channel and allocate its buffers without resolving
-  // or connecting to the destination. Fixed tunnels enter Resolving; a future
-  // SOCKS5 listener can defer destination selection and enter Negotiating.
+  // or connecting to the destination. Fixed tunnels enter Resolving; SOCKS5
+  // listeners defer destination selection and enter Negotiating.
   bool attachChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
                      const TunnelConfig &mapping,
                      bool deferDestination = false);
@@ -187,7 +192,8 @@ private:
   channel_lifecycle::ConnectProgress failConnection(int slotIndex,
                                                      const char *detail,
                                                      int errorCode,
-                                                     bool recordFailure = true);
+                                                     bool recordFailure = true,
+                                                     bool dnsFailure = false);
   channel_lifecycle::ConnectProgress markConnectionOpen(int slotIndex);
   void snapshotEndpoint(ChannelSlot &slot, const TunnelConfig &mapping);
   void resetSlot(int index);
