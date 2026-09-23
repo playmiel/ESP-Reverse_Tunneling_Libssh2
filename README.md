@@ -146,7 +146,7 @@ For more technical details:
 ## 🎯 Specifications
 
 - **Platform**: ESP32 only
-- **Framework**: Arduino
+- **Framework**: Arduino, Idf
 - **Cryptographic Backend**: mbedTLS
 - **Protocol**: SSH2 with reverse tunneling
 - **Memory**: 
