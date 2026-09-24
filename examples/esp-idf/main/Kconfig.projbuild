@@ -8,6 +8,10 @@ menu "Reverse tunnel example"
     config EXAMPLE_SSH_HOST
         string "SSH host"
         default ""
+    config EXAMPLE_SSH_PORT
+        int "SSH port"
+        range 1 65535
+        default 2222
     config EXAMPLE_SSH_USER
         string "SSH username"
         default ""
@@ -17,4 +21,15 @@ menu "Reverse tunnel example"
     config EXAMPLE_SSH_HOSTKEY_SHA256
         string "SSH host key SHA256 fingerprint"
         default ""
+    config EXAMPLE_REMOTE_BIND_PORT
+        int "Remote reverse tunnel port"
+        range 1 65535
+        default 22080
+    config EXAMPLE_LOCAL_HOST
+        string "Destination host reachable from ESP32"
+        default ""
+    config EXAMPLE_LOCAL_PORT
+        int "Destination port"
+        range 1 65535
+        default 9000
 endmenu

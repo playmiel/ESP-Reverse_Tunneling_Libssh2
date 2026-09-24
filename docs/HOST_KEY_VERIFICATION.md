@@ -4,6 +4,12 @@
 
 Host key verification is a critical security mechanism that protects against **Man-in-the-Middle (MITM)** attacks. It validates the SSH server’s identity by comparing its cryptographic fingerprint to an expected value.
 
+**Current ESP32 backend:** `libssh2_esp32` uses mbedTLS and has Ed25519
+disabled. For Arduino and native ESP-IDF, use a host key algorithm the backend
+supports, such as the RSA host key used in the [Docker test](../examples/esp-idf/README.md).
+The Ed25519 snippets below describe the general API but cannot be used with
+this build as-is.
+
 ## Why It Matters
 
 ### Without host key verification
@@ -29,17 +35,17 @@ Internet → [Attacker] → [Your ESP32] → [Real server]
 #### On your Linux server
 
 ```bash
-# Get the SHA256 fingerprint of the Ed25519 key
-ssh-keygen -l -f /etc/ssh/ssh_host_ed25519_key.pub -E sha256
+# Get the SHA256 fingerprint of the RSA host key
+ssh-keygen -l -f /etc/ssh/ssh_host_rsa_key.pub -E sha256
 
 # Or from a client
-ssh-keyscan -t ed25519 your-server.com | ssh-keygen -lf - -E sha256
+ssh-keyscan -t rsa your-server.com | ssh-keygen -lf - -E sha256
 ```
 
 #### Example output
 
 ```text
-256 SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56 root@server (ED25519)
+3072 SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56 root@server (RSA)
 ```
 
 ### 2. ESP32 Code Configuration
@@ -63,7 +69,7 @@ void setup() {
     // Enable verification with expected fingerprint
     globalSSHConfig.setHostKeyVerification(
     "abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56", // SHA256 fingerprint
-    "ssh-ed25519",  // Expected key type
+    "ssh-rsa",  // Expected key type
     true           // Enable verification
     );
 }
@@ -79,7 +85,7 @@ globalSSHConfig.setSSHKeyAuthFromMemory(/* SSH parameters */);
 globalSSHConfig.setHostKeyVerification(true);
 globalSSHConfig.setExpectedHostKey(
     "abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56",
-    "ssh-ed25519"
+    "ssh-rsa"
 );
 ```
 

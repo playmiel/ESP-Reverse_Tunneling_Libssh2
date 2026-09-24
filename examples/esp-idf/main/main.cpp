@@ -2,6 +2,7 @@
 #include <cstring>
 #include <esp_err.h>
 #include <esp_event.h>
+#include <esp_heap_caps.h>
 #include <esp_netif.h>
 #include <esp_wifi.h>
 #include <freertos/FreeRTOS.h>
@@ -54,14 +55,24 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_wifi_start());
   xEventGroupWaitBits(wifiEvents, connected, pdFALSE, pdTRUE, portMAX_DELAY);
 
-  globalSSHConfig.setSSHServer(CONFIG_EXAMPLE_SSH_HOST, 22,
+  globalSSHConfig.setSSHServer(CONFIG_EXAMPLE_SSH_HOST,
+                               CONFIG_EXAMPLE_SSH_PORT,
                                CONFIG_EXAMPLE_SSH_USER,
                                CONFIG_EXAMPLE_SSH_PASSWORD);
   globalSSHConfig.setHostKeyVerification(
       CONFIG_EXAMPLE_SSH_HOSTKEY_SHA256, "", true);
-  globalSSHConfig.setTunnelConfig("127.0.0.1", 8080, "127.0.0.1", 80);
+  globalSSHConfig.setTunnelConfig("127.0.0.1",
+                                  CONFIG_EXAMPLE_REMOTE_BIND_PORT,
+                                  CONFIG_EXAMPLE_LOCAL_HOST,
+                                  CONFIG_EXAMPLE_LOCAL_PORT);
+  if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
+    globalSSHConfig.setBufferConfig(8192, 10, 1800000, 64 * 1024);
+  } else {
+    globalSSHConfig.setBufferConfig(4096, 1, 1800000, 8192);
+  }
   SSHTunnel tunnel;
   if (!tunnel.init()) return;
+  tunnel.connectSSH();
   for (;;) {
     if (xEventGroupGetBits(wifiEvents) & connected) tunnel.loop();
     vTaskDelay(pdMS_TO_TICKS(10));

@@ -1,6 +1,13 @@
 # ESP-Reverse_Tunneling_Libssh2 Documentation
 
-This documentation covers all aspects of the ESP-Reverse_Tunneling_Libssh2 library.
+This library supports Arduino/PlatformIO and native ESP-IDF. Both use the
+`playmiel/libssh2_esp32` fork: PlatformIO fetches it through `lib_deps`, while
+ESP-IDF builds the pinned submodule.
+
+| Framework | Start here |
+|-----------|------------|
+| Arduino / PlatformIO | [Arduino example](../examples/README.md) |
+| Native ESP-IDF | [Integration and PSRAM guide](ESP_IDF.md) · [ESP-IDF example](../examples/esp-idf/README.md) |
 
 ## 📖 Main Guides
 
@@ -50,7 +57,7 @@ globalSSHConfig.setSSHKeyAuthFromMemory(
 // Server identity verification
 globalSSHConfig.setHostKeyVerification(
     "SHA256:server_fingerprint",
-    "ssh-ed25519",
+    "ssh-rsa",
     true
 );
 
@@ -74,12 +81,10 @@ globalSSHConfig.setTunnelConfig(
 
 | Algorithm | Support | Recommended Size |
 |-----------|---------|------------------|
-| **Ed25519** | ✅ Excellent | 256 bits (fixed) |
-| RSA | ✅ Excellent | 4096 bits |
-| ECDSA P-256 | ✅ Good | 256 bits |
-| ECDSA P-384 | ✅ Good | 384 bits |
-| ECDSA P-521 | ✅ Good | 521 bits |
-| DSA | ⚠️ Deprecated | Not recommended |
+| Ed25519 | ❌ Not enabled in the fork's mbedTLS backend | — |
+| RSA | ✅ Enabled | Server-dependent |
+| ECDSA | ✅ If `MBEDTLS_ECDSA_C` is enabled | Curve-dependent |
+| DSA | ❌ Disabled | — |
 
 ## 🛡️ Security Levels
 
@@ -107,13 +112,17 @@ globalSSHConfig.setHostKeyVerification(/* server fingerprint */);
 
 ## 🚀 Quick Start
 
-### 1. Installation
+### Arduino / PlatformIO installation
 
 ```ini
 # platformio.ini
 lib_deps = 
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
+    https://github.com/playmiel/libssh2_esp32.git#codex/esp-idf-component
 ```
+
+For native ESP-IDF, follow the [component setup](ESP_IDF.md). It includes
+both the tunnel library and its libssh2 submodule in `EXTRA_COMPONENT_DIRS`.
 
 ### 2. Minimal code
 
@@ -181,8 +190,9 @@ globalSSHConfig.diagnoseSSHKeys();
 ## 📈 Performance Optimizations
 
 ### Memory
-- Use Ed25519 keys (more compact)
-- Adjust `bufferSize` according to usage
+- Enable PSRAM in ESP-IDF `menuconfig` if the board provides it; see the
+  [PSRAM guide](ESP_IDF.md#psram-and-channel-buffers).
+- Adjust `bufferSize` and the per-direction ring buffer size according to usage
 - Limit `maxChannels` to what you need
 
 ### Network
@@ -209,6 +219,8 @@ globalSSHConfig.setBufferConfig(
 The fourth argument is the capacity of each directional ring buffer, not a
 total shared by both directions. The configuration above therefore reserves
 about 128 KiB of ring storage per active channel, plus implementation overhead.
+On boards without enabled PSRAM, start with smaller buffers such as the
+[native ESP-IDF example](../examples/esp-idf/main/main.cpp).
 
 ### Multi-tunnel / multiple listeners
 

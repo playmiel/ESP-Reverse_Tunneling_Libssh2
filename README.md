@@ -1,78 +1,80 @@
 # ESP-Reverse_Tunneling_Libssh2
 
-Library for ESP32 Arduino and native ESP-IDF enabling reverse SSH tunnels using libssh2. This branch includes the 3.0 SOCKS5 reverse proxy changes.
+Reverse SSH tunnels and a SOCKS5 reverse proxy for ESP32, with **Arduino** and
+**native ESP-IDF** support. Both options use
+[playmiel/libssh2_esp32](https://github.com/playmiel/libssh2_esp32).
 
-### Native ESP-IDF
+## Choose a framework
 
-Clone this repository with `--recurse-submodules`. Arduino/PlatformIO and
-ESP-IDF both use [playmiel/libssh2_esp32](https://github.com/playmiel/libssh2_esp32).
-PlatformIO fetches its `codex/esp-idf-component` branch through `lib_deps`;
-ESP-IDF builds the same fork from the pinned `components/libssh2_esp`
-submodule, with the native CMake adaptation.
+| Framework | Dependency | Build and example |
+|-----------|------------|-------------------|
+| Arduino / PlatformIO | `lib_deps` fetches `libssh2_esp32` from its `codex/esp-idf-component` branch | [Arduino example](examples/README.md) · `pio run -e arduino-3` |
+| Native ESP-IDF | The pinned `components/libssh2_esp` submodule provides the same fork as an ESP-IDF component | [ESP-IDF guide](docs/ESP_IDF.md) · [ESP-IDF example](examples/esp-idf/README.md) |
 
-In an ESP-IDF project's top-level `CMakeLists.txt`, before including
-`project.cmake`, add both components:
+### Arduino / PlatformIO
 
-```cmake
-set(EXTRA_COMPONENT_DIRS
-    "${CMAKE_CURRENT_LIST_DIR}/components/ESP-Reverse_Tunneling_Libssh2"
-    "${CMAKE_CURRENT_LIST_DIR}/components/ESP-Reverse_Tunneling_Libssh2/components/libssh2_esp")
-include($ENV{IDF_PATH}/tools/cmake/project.cmake)
-project(my_project)
-```
+Add both libraries to your project's `platformio.ini`:
 
-Initialize the submodule after cloning or updating:
-
-```bash
-git submodule update --init --recursive
-```
-
-The [ESP-IDF example](examples/esp-idf) uses Wi-Fi station mode. Set Wi-Fi,
-SSH server credentials and the server's SHA256 host-key fingerprint with
-`idf.py menuconfig`, then run `idf.py build flash monitor` from that directory.
-For key authentication, `setSSHKeyAuthFromMemory` needs no filesystem; the
-native `setSSHKeyAuth` path reads the private key and `.pub` file from an
-already mounted ESP-IDF VFS.
-
-### 1. Adding the Library
-
-**Option A: PlatformIO**
-```bash
-# Add to your platformio.ini
-lib_deps = 
+```ini
+lib_deps =
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
     https://github.com/playmiel/libssh2_esp32.git#codex/esp-idf-component
 ```
 
-**Option B: Arduino IDE**
-1. Download the project
-2. Copy files to your libraries folder
+The repository's [PlatformIO configuration](platformio.ini) already uses
+these dependencies. In Arduino IDE, install this library and the
+`libssh2_esp32` fork in your libraries folder.
 
-### 2. Usage in Your Code
+### Native ESP-IDF
+
+Clone with `--recurse-submodules`, then use the
+[native integration guide](docs/ESP_IDF.md) to add both components to your
+project. To try the ready-made project:
+
+```bash
+git submodule update --init --recursive
+cd examples/esp-idf
+idf.py set-target esp32
+idf.py menuconfig
+idf.py build flash monitor
+```
+
+The ESP-IDF example configures Wi-Fi, SSH credentials, host key verification,
+and the tunnel destination through `menuconfig`. PSRAM can be enabled there
+when the board has it; the example also runs without PSRAM using smaller
+buffers.
+
+## Arduino usage
 
 ```cpp
 #include "ESP-Reverse_Tunneling_Libssh2.h"
+#include <Arduino.h>
+#include <WiFi.h>
+
+SSHTunnel tunnel;
 
 void setup() {
     Serial.begin(115200);
     
     // WiFi configuration
     WiFi.begin("YOUR_SSID", "YOUR_PASSWORD");
+    while (WiFi.status() != WL_CONNECTED) delay(100);
     
     // SSH tunnel configuration with password
     globalSSHConfig.setSSHServer("server.com", 22, "user", "password");
     
-    // OR with SSH key from memory (recommended for LittleFS)
-    globalSSHConfig.setSSHKeyAuth("server.com", 22, "user", "/ssh_key");
-    
-    // Create and start tunnel
-    SSHTunnel tunnel;
-    tunnel.init();
-    tunnel.connectSSH();
+    globalSSHConfig.setTunnelConfig("127.0.0.1", 8080, "192.168.1.100", 80);
+    globalSSHConfig.setHostKeyVerification("SHA256:REPLACE_WITH_REAL_FINGERPRINT");
+
+    if (tunnel.init()) tunnel.connectSSH();
+}
+
+void loop() {
+    tunnel.loop();
 }
 ```
 
-### 3. SSH Key Authentication
+### SSH Key Authentication
 
 This library supports three methods for SSH key authentication:
 
@@ -93,7 +95,7 @@ This library supports three methods for SSH key authentication:
 
 📖 **Detailed guide**: [SSH Keys with Memory Authentication](docs/SSH_KEYS_MEMORY.md)
 
-### 4. Host Key Verification (Security)
+### Host Key Verification (Security)
 
 For production environments, enable host key verification to prevent Man-in-the-Middle attacks:
 
@@ -104,7 +106,7 @@ globalSSHConfig.setSSHKeyAuthFromMemory("server.com", 22, "user", privateKey, pu
 // Enable host key verification (recommended for production)
 globalSSHConfig.setHostKeyVerification(
     "SHA256:abcd1234efgh5678ijkl9012mnop3456qrst7890uvwx1234yz56",  // Accept OpenSSH format or 64-char hex
-    "ssh-ed25519",
+    "ssh-rsa",
     true
 );
 
@@ -118,7 +120,7 @@ globalSSHConfig.setHostKeyMismatchCallback(
 
 📖 **Security guide**: [Host Key Verification Documentation](docs/HOST_KEY_VERIFICATION.md)
 
-### 5. Compilation
+### Compilation
 
 ```bash
 pio run                    # Compilation
@@ -129,10 +131,13 @@ pio run --target upload    # Upload to ESP32
 
 This project provides two example formats:
 
-### PlatformIO Example (Recommended)
+### Arduino / PlatformIO example
 - **File**: [`examples/src/main.cpp`](examples/src/main.cpp)
-- **Usage**: Compiled when running `pio run` in the examples/ directory
-- **Features**: Full PlatformIO integration with advanced logging
+- **Build**: `pio run -e arduino-3` from the repository root
+
+### Native ESP-IDF example
+- **File**: [`examples/esp-idf/main/main.cpp`](examples/esp-idf/main/main.cpp)
+- **Build**: `idf.py build` from `examples/esp-idf`
 
 
 ## 📚 Technical Documentation
@@ -140,27 +145,19 @@ This project provides two example formats:
 For more technical details:
 
 - [`examples/`](examples/) - Usage examples
+- [`docs/ESP_IDF.md`](docs/ESP_IDF.md) - Native ESP-IDF integration and PSRAM
 - [`docs/SSH_KEYS_MEMORY.md`](docs/SSH_KEYS_MEMORY.md) - SSH Key authentication guide
 - [`docs/HOST_KEY_VERIFICATION.md`](docs/HOST_KEY_VERIFICATION.md) - Security and host verification
 
 ## 🎯 Specifications
 
 - **Platform**: ESP32 only
-- **Framework**: Arduino, Idf
+- **Framework**: Arduino and ESP-IDF
 - **Cryptographic Backend**: mbedTLS
 - **Protocol**: SSH2 with reverse tunneling
-- **Memory**: 
-- ~19% RAM (used 46252 bytes from 327680 bytes)
-- ~65% Flash (used 897321 bytes from 1310720 bytes)
+- **Memory**: Depends on the board, enabled PSRAM, and configured channels
 
-## 🤝 Contributing
-
-Contributions are welcome! See documentation guides for more details.
-
-## 📄 License
-
-See LICENSE file for details.
-### 6. Connection Tuning
+## Connection tuning
 
 ```cpp
 // Configure libssh2 keepalives alongside the existing periodic send
@@ -241,3 +238,11 @@ destination after the SSH channel is accepted.
 DNS runs outside the libssh2 session lock, and destination connections are
 polled cooperatively without a blocking wait, so a slow TCP connect cannot
 hold the SSH transport lock.
+
+## Contributing
+
+Contributions are welcome! See documentation guides for more details.
+
+## License
+
+See LICENSE file for details.

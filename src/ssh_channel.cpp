@@ -124,32 +124,31 @@ bool ChannelManager::attachChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
 
   // Use static tag strings so the DataRingBuffer destructor can safely log.
   // DataRingBuffer stores a const char* — stack strings become dangling.
-  // Pre-built tags for channels 0-7; dynamically allocated for 8+.
+  // Pre-built tags for channels 0-7; persistent buffers for channels 8-31.
   static const char *const kTagsToLocal[] = {
       "ch0_toLocal", "ch1_toLocal", "ch2_toLocal", "ch3_toLocal",
       "ch4_toLocal", "ch5_toLocal", "ch6_toLocal", "ch7_toLocal"};
   static const char *const kTagsToRemote[] = {
       "ch0_toRemote", "ch1_toRemote", "ch2_toRemote", "ch3_toRemote",
       "ch4_toRemote", "ch5_toRemote", "ch6_toRemote", "ch7_toRemote"};
-  // For channels >= 8, allocate persistent tag strings (leaked intentionally
-  // — they live for the process lifetime and are reused across bind cycles).
-  static char extraTagsL[24][16]; // supports up to channel 31
+  static char extraTagsL[24][16]; // supports channels 8-31
   static char extraTagsR[24][16];
   const char *tagL;
   const char *tagR;
   if (slotIndex < 8) {
     tagL = kTagsToLocal[slotIndex];
     tagR = kTagsToRemote[slotIndex];
-  } else {
-    int idx = slotIndex - 8;
-    if (idx >= 24)
-      idx = 23; // cap at ch31
+  } else if (slotIndex < 32) {
+    const int idx = slotIndex - 8;
     snprintf(extraTagsL[idx], sizeof(extraTagsL[idx]), "ch%d_toLocal",
              slotIndex);
     snprintf(extraTagsR[idx], sizeof(extraTagsR[idx]), "ch%d_toRemote",
              slotIndex);
     tagL = extraTagsL[idx];
     tagR = extraTagsR[idx];
+  } else {
+    tagL = "ch32plus_toLocal";
+    tagR = "ch32plus_toRemote";
   }
 
   // Heap guard: verify enough memory before allocating ring buffers.
