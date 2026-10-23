@@ -8,7 +8,7 @@ Reverse SSH tunnels and a SOCKS5 reverse proxy for ESP32, with **Arduino** and
 
 | Framework | Dependency | Build and example |
 |-----------|------------|-------------------|
-| Arduino / PlatformIO | `lib_deps` fetches `libssh2_esp32` from its `codex/esp-idf-component` branch | [Arduino example](examples/README.md) · `pio run -e arduino-3` |
+| Arduino / PlatformIO | `lib_deps` fetches `libssh2_esp32` from its `esp-idf-component` branch | [Arduino example](examples/README.md) · `pio run -e arduino-3` |
 | Native ESP-IDF | The pinned `components/libssh2_esp` submodule provides the same fork as an ESP-IDF component | [ESP-IDF guide](docs/ESP_IDF.md) · [ESP-IDF example](examples/esp-idf/README.md) |
 
 ### Arduino / PlatformIO
@@ -18,7 +18,7 @@ Add both libraries to your project's `platformio.ini`:
 ```ini
 lib_deps =
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
-    https://github.com/playmiel/libssh2_esp32.git#codex/esp-idf-component
+    https://github.com/playmiel/libssh2_esp32.git#esp-idf-component
 ```
 
 The repository's [PlatformIO configuration](platformio.ini) already uses

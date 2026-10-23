@@ -118,7 +118,7 @@ globalSSHConfig.setHostKeyVerification(/* server fingerprint */);
 # platformio.ini
 lib_deps = 
     https://github.com/playmiel/ESP-Reverse_Tunneling_Libssh2.git
-    https://github.com/playmiel/libssh2_esp32.git#codex/esp-idf-component
+    https://github.com/playmiel/libssh2_esp32.git#esp-idf-component
 ```
 
 For native ESP-IDF, follow the [component setup](ESP_IDF.md). It includes
