@@ -6,6 +6,8 @@
 #include <esp_system.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
+#include <stdlib.h>
+#include <string.h>
 
 // Feature levels (configurable via -DMEMFIX_LEVEL=<0|1|2>)
 // 0 = OFF: no heap check, no memset, minimal overhead
@@ -35,8 +37,13 @@
 // Function to check heap health
 inline void checkHeapHealth() {
 #if MEMFIX_LEVEL >= 2
+#ifdef TUNNEL_NATIVE_IDF
+  size_t freeHeap = heap_caps_get_free_size(MALLOC_CAP_8BIT);
+  size_t minFreeHeap = heap_caps_get_minimum_free_size(MALLOC_CAP_8BIT);
+#else
   size_t freeHeap = ESP.getFreeHeap();
   size_t minFreeHeap = ESP.getMinFreeHeap();
+#endif
   if (freeHeap < 50000) {
     LOGF_W("MEM", "Low heap: %u (min: %u)", (unsigned)freeHeap,
            (unsigned)minFreeHeap);

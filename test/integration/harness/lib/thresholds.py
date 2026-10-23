@@ -26,6 +26,10 @@ B_MAX_HEAP_DRIFT_BYTES = 5 * 1024
 D_CYCLES = 50
 D_CHUNK_BYTES = 100 * 1024
 D_INTER_CYCLE_DELAY_S = 1.0
+# TransportPump permits a silent half-closed backend to remain open for 5 s,
+# followed by a 200 ms SSH EOF grace period. The endurance test must allow
+# that configured close path instead of declaring a slot leak after 3 s.
+D_CHANNEL_SETTLE_TIMEOUT_S = 7.0
 D_MAX_HEAP_DRIFT_BYTES = 5 * 1024
 
 F_TRANSFER_BYTES = 10 * 1024 * 1024
@@ -52,8 +56,13 @@ SERIAL_PORT = os.environ.get("TEST_SERIAL_PORT", "/dev/ttyUSB1")
 SERIAL_BAUD = 115200
 DOCKER_HOST_FOR_CLIENT = "127.0.0.1"
 # Number of reverse-tunnel listeners the test firmware should bind:
-# 22080 (echo), 22081 (slow_echo), 22082 (placeholder / dead-port for G1).
-EXPECTED_LISTENER_COUNT = 3
+# 22080 (echo), 22081 (slow_echo), 22082 (dead-port), 22083 (SOCKS5).
+EXPECTED_LISTENER_COUNT = 4
+SOCKS5_MAPPING = 22083
+SOCKS5_TARGET_HOST = os.environ.get("TEST_DOCKER_HOST_IP", "192.168.0.190")
+SOCKS5_DOMAIN_TARGET = os.environ.get(
+    "TEST_SOCKS_DOMAIN_TARGET", SOCKS5_TARGET_HOST)
+SOCKS5_TARGET_PORT = 9000
 # String value emitted by SSHTunnel::getStateString() when the SSH session
 # is fully established (matches the firmware, not an arbitrary constant).
 TUNNEL_STATE_CONNECTED = "Connected"

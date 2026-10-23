@@ -1,10 +1,11 @@
 #include "ssh_tunnel.h"
 #include "ssh_config_validators.h"
+#include <errno.h>
 #include <unistd.h>
 
 namespace {
 
-enum class BindResult { Bound, Failed, LockUnavailable };
+enum class AttachResult { Attached, Failed, LockUnavailable };
 
 bool closeAcceptedChannel(SSHSession &session, LIBSSH2_CHANNEL *channel,
                           TickType_t lockTicks, const char *logDetail) {
@@ -26,17 +27,56 @@ bool closeAcceptedChannel(SSHSession &session, LIBSSH2_CHANNEL *channel,
   return false;
 }
 
-BindResult bindAcceptedChannel(SSHSession &session, ChannelManager &channels,
-                               int slot, LIBSSH2_CHANNEL *channel,
-                               const TunnelConfig &mapping,
-                               TickType_t lockTicks) {
+AttachResult attachAcceptedChannel(SSHSession &session,
+                                   ChannelManager &channels, int slot,
+                                   LIBSSH2_CHANNEL *channel,
+                                   const TunnelConfig &mapping,
+                                   TickType_t lockTicks) {
+  // This libssh2 mutation is the only attachment step that needs the session
+  // lock. Buffer allocation, DNS and socket connection all happen afterwards
+  // without holding it.
   if (!session.lock(lockTicks)) {
-    return BindResult::LockUnavailable;
+    return AttachResult::LockUnavailable;
   }
-
-  bool bound = channels.bindChannel(slot, channel, mapping);
+  libssh2_channel_set_blocking(channel, 0);
   session.unlock();
-  return bound ? BindResult::Bound : BindResult::Failed;
+
+  bool attached =
+      channels.attachChannel(slot, channel, mapping, mapping.isSocks5());
+  return attached ? AttachResult::Attached : AttachResult::Failed;
+}
+
+socks5::Reply replyForDestinationError(const ChannelSlot &slot) {
+  if (slot.destinationDnsFailure) {
+    return socks5::Reply::HostUnreachable;
+  }
+  switch (slot.destinationError) {
+  case ECONNREFUSED:
+  case ECONNRESET: // lwIP may report a closed loopback port as reset
+    return socks5::Reply::ConnectionRefused;
+  case ENETUNREACH:
+    return socks5::Reply::NetworkUnreachable;
+  case EHOSTUNREACH:
+    return socks5::Reply::HostUnreachable;
+  case ETIMEDOUT:
+    return socks5::Reply::TtlExpired;
+  default:
+    return socks5::Reply::GeneralFailure;
+  }
+}
+
+bool queueMethodSelection(ChannelSlot &slot, bool accepted) {
+  uint8_t response[2];
+  const size_t length =
+      socks5::writeMethodSelection(accepted, response, sizeof(response));
+  return slot.toRemote && slot.toRemote->write(response, length) == length;
+}
+
+bool queueConnectReply(ChannelSlot &slot, socks5::Reply reply) {
+  uint8_t response[10];
+  const size_t length =
+      socks5::writeConnectReply(reply, response, sizeof(response));
+  return slot.toRemote && slot.toRemote->write(response, length) == length;
 }
 
 } // namespace
@@ -139,15 +179,19 @@ void SSHTunnel::disconnect() {
     locked = session_.lock(pdMS_TO_TICKS(2000));
   }
   for (int i = 0; i < channels_.getMaxSlots(); ++i) {
-    if (!channels_.getSlot(i).active) {
+    ChannelSlot &channel = channels_.getSlot(i);
+    if (!channel.active) {
       continue;
     }
+    bool wasOpen = channel.reachedOpen;
     if (locked) {
       channels_.finalizeClose(i);
     } else {
       channels_.abandonSlot(i, ChannelCloseReason::Manual);
     }
-    emitChannelClosed(i, ChannelCloseReason::Manual);
+    if (wasOpen) {
+      emitChannelClosed(i, ChannelCloseReason::Manual);
+    }
   }
   if (locked) {
     session_.unlock();
@@ -229,6 +273,11 @@ void SSHTunnel::loop() {
     // keep accepting until no more pending channels
   }
 
+  // DNS and destination connects progress independently from channel
+  // acceptance and never hold the libssh2 session lock.
+  progressSocks5Negotiations();
+  progressChannelConnections();
+
   // Pump all data (the core of the new architecture)
   transport_.pumpAll();
 
@@ -237,7 +286,9 @@ void SSHTunnel::loop() {
   int closeCount = transport_.consumeCloseEvents(
       closeEvents, TransportPump::MAX_CLOSE_EVENTS);
   for (int i = 0; i < closeCount; ++i) {
-    emitChannelClosed(closeEvents[i].slot, closeEvents[i].reason);
+    if (closeEvents[i].wasOpen) {
+      emitChannelClosed(closeEvents[i].slot, closeEvents[i].reason);
+    }
   }
 
   // If pumpAll had to hard-abandon a stuck channel, the SSH session can't
@@ -289,9 +340,7 @@ unsigned long SSHTunnel::getBytesReceived() { return bytesReceived_; }
 
 unsigned long SSHTunnel::getBytesSent() { return bytesSent_; }
 
-unsigned long SSHTunnel::getBytesDropped() {
-  return 0; // No deferred/drop mechanism in v2
-}
+unsigned long SSHTunnel::getBytesDropped() { return transport_.bytesDropped(); }
 
 int SSHTunnel::getActiveChannels() { return channels_.getActiveCount(); }
 
@@ -306,8 +355,9 @@ void SSHTunnel::setEventHandlers(const SSHTunnelEvents &handlers) {
 bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
   if (!ssh_validators::isValidHostname(mapping.remoteBindHost.c_str()) ||
       !ssh_validators::isValidRemoteBindPort(mapping.remoteBindPort) ||
-      !ssh_validators::isValidHostname(mapping.localHost.c_str()) ||
-      !ssh_validators::isValidPort(mapping.localPort)) {
+      (!mapping.isSocks5() &&
+       (!ssh_validators::isValidHostname(mapping.localHost.c_str()) ||
+        !ssh_validators::isValidPort(mapping.localPort)))) {
     LOG_E("SSH", "Cannot add reverse tunnel: invalid mapping");
     return false;
   }
@@ -321,7 +371,8 @@ bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
     if (configured.remoteBindHost == mapping.remoteBindHost &&
         configured.remoteBindPort == mapping.remoteBindPort &&
         configured.localHost == mapping.localHost &&
-        configured.localPort == mapping.localPort) {
+        configured.localPort == mapping.localPort &&
+        configured.mode == mapping.mode) {
       alreadyConfigured = true;
       break;
     }
@@ -347,6 +398,16 @@ bool SSHTunnel::addReverseTunnel(const TunnelConfig &mapping) {
     config_->addTunnelMapping(mapping);
   }
   return true;
+}
+
+bool SSHTunnel::addSocks5Tunnel(const String &remoteHost, int remotePort) {
+  TunnelConfig mapping;
+  mapping.remoteBindHost = remoteHost;
+  mapping.remoteBindPort = remotePort;
+  mapping.localHost = "";
+  mapping.localPort = 0;
+  mapping.mode = TunnelMode::Socks5;
+  return addReverseTunnel(mapping);
 }
 
 bool SSHTunnel::removeReverseTunnel(const String &remoteHost, int remotePort) {
@@ -376,6 +437,128 @@ bool SSHTunnel::hasAnyBackpressure() const {
 // Private
 // ---------------------------------------------------------------------------
 
+void SSHTunnel::progressChannelConnections() {
+  for (int slot = 0; slot < channels_.getMaxSlots(); ++slot) {
+    ChannelSlot &channel = channels_.getSlot(slot);
+    const bool isSocks5 = channel.active && channel.isSocks5;
+    channel_lifecycle::ConnectProgress progress =
+        channels_.progressConnection(slot);
+    if (progress == channel_lifecycle::ConnectProgress::Opened) {
+      if (isSocks5 && !queueConnectReply(channel, socks5::Reply::Succeeded)) {
+        LOGF_E("SOCKS5", "Channel %d: cannot queue CONNECT success", slot);
+        if (channel.toLocal) {
+          channel.toLocal->clear();
+        }
+        channels_.beginClose(slot, ChannelCloseReason::Error);
+        continue;
+      }
+      emitChannelOpened(slot);
+    } else if (progress == channel_lifecycle::ConnectProgress::Failed &&
+               isSocks5) {
+      if (!queueConnectReply(channel, replyForDestinationError(channel))) {
+        LOGF_E("SOCKS5", "Channel %d: cannot queue CONNECT failure", slot);
+      }
+    }
+  }
+}
+
+void SSHTunnel::progressSocks5Negotiations() {
+  uint8_t input[256];
+  const unsigned long now = millis();
+
+  for (int slotIndex = 0; slotIndex < channels_.getMaxSlots(); ++slotIndex) {
+    ChannelSlot &slot = channels_.getSlot(slotIndex);
+    if (!slot.active || !slot.isSocks5 ||
+        slot.state != ChannelSlot::State::Negotiating) {
+      continue;
+    }
+
+    auto reject = [&](bool methodReply, socks5::Reply reply,
+                      const char *detail) {
+      bool queued = methodReply ? queueMethodSelection(slot, false)
+                                : queueConnectReply(slot, reply);
+      if (!queued) {
+        LOGF_E("SOCKS5", "Channel %d: failed to queue rejection", slotIndex);
+      }
+      if (slot.toLocal) {
+        slot.toLocal->clear();
+      }
+      LOGF_W("SOCKS5", "Channel %d: %s", slotIndex, detail);
+      channels_.beginClose(slotIndex, ChannelCloseReason::Error);
+    };
+
+    if ((now - slot.stateStartedMs) >= SOCKS5_NEGOTIATION_TIMEOUT_MS) {
+      reject(!slot.socks5Negotiator.methodAccepted(), socks5::Reply::TtlExpired,
+             "negotiation timeout");
+      continue;
+    }
+    if (slot.remoteEof && (!slot.toLocal || slot.toLocal->empty())) {
+      channels_.beginClose(slotIndex, ChannelCloseReason::RemoteClosed);
+      continue;
+    }
+
+    // A single pass may complete both a pipelined greeting and request, but
+    // each read is capped at bytesNeeded() so application payload remains in
+    // toLocal for the destination socket after CONNECT succeeds.
+    for (int step = 0; step < 8 && slot.toLocal && !slot.toLocal->empty() &&
+                       slot.state == ChannelSlot::State::Negotiating;
+         ++step) {
+      size_t needed = slot.socks5Negotiator.bytesNeeded();
+      if (needed == 0) {
+        reject(false, socks5::Reply::GeneralFailure,
+               "invalid negotiation state");
+        break;
+      }
+      size_t available = slot.toLocal->size();
+      size_t amount = needed < available ? needed : available;
+      if (amount > sizeof(input)) {
+        amount = sizeof(input);
+      }
+      size_t received = slot.toLocal->read(input, amount);
+      if (received == 0) {
+        break;
+      }
+
+      socks5::Event event = slot.socks5Negotiator.consume(input, received);
+      switch (event) {
+      case socks5::Event::NeedMore:
+        break;
+      case socks5::Event::MethodAccepted:
+        if (!queueMethodSelection(slot, true)) {
+          reject(true, socks5::Reply::GeneralFailure,
+                 "cannot queue method selection");
+        }
+        break;
+      case socks5::Event::ConnectRequest:
+        LOGF_I("SOCKS5", "Channel %d: CONNECT %s:%u", slotIndex,
+               slot.socks5Negotiator.targetHost(),
+               static_cast<unsigned>(slot.socks5Negotiator.targetPort()));
+        if (!channels_.beginDestinationConnection(
+                slotIndex, slot.socks5Negotiator.targetHost(),
+                slot.socks5Negotiator.targetPort())) {
+          reject(false, socks5::Reply::GeneralFailure,
+                 "invalid CONNECT destination");
+        }
+        break;
+      case socks5::Event::MethodRejected:
+        reject(true, socks5::Reply::GeneralFailure, "NO AUTH was not offered");
+        break;
+      case socks5::Event::CommandNotSupported:
+        reject(false, socks5::Reply::CommandNotSupported,
+               "command is not CONNECT");
+        break;
+      case socks5::Event::AddressTypeNotSupported:
+        reject(false, socks5::Reply::AddressTypeNotSupported,
+               "address type is not IPv4 or domain");
+        break;
+      case socks5::Event::GeneralFailure:
+        reject(false, socks5::Reply::GeneralFailure, "malformed request");
+        break;
+      }
+    }
+  }
+}
+
 bool SSHTunnel::handleNewConnection() {
   // Always try to accept from libssh2, even if slots are full.
   // This prevents the SSH server from timing out the forwarded channel.
@@ -393,8 +576,9 @@ bool SSHTunnel::handleNewConnection() {
 
   // Circuit breaker: if this mapping's local endpoint has been failing,
   // reject the channel without burning a slot. Prevents a dead backend
-  // from saturating the tunnel with repeated bind attempts.
-  if (channels_.isMappingBackedOff(mapping.remoteBindPort, millis())) {
+  // from saturating the tunnel with repeated connection attempts.
+  if (!mapping.isSocks5() &&
+      channels_.isMappingBackedOff(mapping.remoteBindPort, millis())) {
     LOGF_W("SSH",
            "Mapping %s:%d in circuit-breaker back-off, rejecting channel",
            mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
@@ -405,35 +589,35 @@ bool SSHTunnel::handleNewConnection() {
     return false;
   }
 
-  // Try to bind directly if a slot is available
+  // Attach immediately if a slot is available. Destination resolution and
+  // connection are progressed later, outside the libssh2 session lock.
   int slot = channels_.allocateSlot();
   if (slot >= 0) {
-    BindResult bindResult = bindAcceptedChannel(session_, channels_, slot, ch,
-                                                mapping, pdMS_TO_TICKS(200));
-    if (bindResult == BindResult::Bound) {
+    AttachResult attachResult = attachAcceptedChannel(
+        session_, channels_, slot, ch, mapping, pdMS_TO_TICKS(200));
+    if (attachResult == AttachResult::Attached) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
-      LOGF_I("SSH", "SERVERDIAG bind_ok slot=%d remote=%s:%d local=%s:%d", slot,
-             mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+      LOGF_I("SSH", "SERVERDIAG attach_ok slot=%d remote=%s:%d local=%s:%d",
+             slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
              mapping.localHost.c_str(), mapping.localPort);
 #endif
-      emitChannelOpened(slot);
       return true;
     }
-    if (bindResult == BindResult::LockUnavailable) {
+    if (attachResult == AttachResult::LockUnavailable) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
       LOGF_W("SSH",
-             "SERVERDIAG bind_lock_unavailable slot=%d remote=%s:%d "
+             "SERVERDIAG attach_lock_unavailable slot=%d remote=%s:%d "
              "local=%s:%d",
              slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
              mapping.localHost.c_str(), mapping.localPort);
 #endif
-      LOG_W("SSH", "Session lock unavailable while binding accepted channel");
+      LOG_W("SSH", "Session lock unavailable while attaching accepted channel");
       if (pendingCount_ < MAX_PENDING) {
         PendingChannel &pending = pendingQueue_[pendingCount_];
         pending.channel = ch;
         pending.mapping = mapping;
         pending.queuedAtMs = millis();
-        pending.action = PendingChannel::Action::Bind;
+        pending.action = PendingChannel::Action::Attach;
         pendingCount_++;
 #ifdef TUNNEL_DIAG_LOG_ONLY
         LOGF_W("SSH",
@@ -444,7 +628,7 @@ bool SSHTunnel::handleNewConnection() {
                MAX_PENDING);
 #endif
         LOGF_I("SSH",
-               "Channel queued for later binding after lock contention "
+               "Channel queued for later attachment after lock contention "
                "(pending: %d/%d)",
                pendingCount_, MAX_PENDING);
         return false;
@@ -459,15 +643,15 @@ bool SSHTunnel::handleNewConnection() {
       return false;
     }
 
-    // Bind failure means the local endpoint or channel resources are not
-    // usable right now — close the channel, don't keep it hanging.
+    // Attachment failure means the slot resources are unavailable. Close the
+    // accepted SSH channel; destination failures are handled asynchronously.
     if (!enqueueDeferredClose(ch, mapping,
-                              "Rejecting accepted channel after bind "
+                              "Rejecting accepted channel after attachment "
                               "failure")) {
       LOG_W("SSH", "Deferred close queue full, dropping channel");
     }
 #ifdef TUNNEL_DIAG_LOG_ONLY
-    LOGF_W("SSH", "SERVERDIAG bind_failed slot=%d remote=%s:%d local=%s:%d",
+    LOGF_W("SSH", "SERVERDIAG attach_failed slot=%d remote=%s:%d local=%s:%d",
            slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
            mapping.localHost.c_str(), mapping.localPort);
 #endif
@@ -480,7 +664,7 @@ bool SSHTunnel::handleNewConnection() {
     pending.channel = ch;
     pending.mapping = mapping;
     pending.queuedAtMs = millis();
-    pending.action = PendingChannel::Action::Bind;
+    pending.action = PendingChannel::Action::Attach;
     pendingCount_++;
 #ifdef TUNNEL_DIAG_LOG_ONLY
     LOGF_W("SSH",
@@ -490,7 +674,7 @@ bool SSHTunnel::handleNewConnection() {
            mapping.localHost.c_str(), mapping.localPort, pendingCount_,
            MAX_PENDING);
 #endif
-    LOGF_I("SSH", "Channel queued for later binding (pending: %d/%d)",
+    LOGF_I("SSH", "Channel queued for later attachment (pending: %d/%d)",
            pendingCount_, MAX_PENDING);
     return false;
   }
@@ -577,28 +761,27 @@ void SSHTunnel::drainPendingQueue() {
 
     int slot = channels_.allocateSlot();
     if (slot >= 0) {
-      BindResult bindResult =
-          bindAcceptedChannel(session_, channels_, slot, pending.channel,
-                              pending.mapping, pdMS_TO_TICKS(200));
-      if (bindResult == BindResult::Bound) {
+      AttachResult attachResult =
+          attachAcceptedChannel(session_, channels_, slot, pending.channel,
+                                pending.mapping, pdMS_TO_TICKS(200));
+      if (attachResult == AttachResult::Attached) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
         LOGF_I("SSH",
-               "SERVERDIAG queued_bind_ok slot=%d waited=%lums "
+               "SERVERDIAG queued_attach_ok slot=%d waited=%lums "
                "remote=%s:%d local=%s:%d",
                slot, millis() - pending.queuedAtMs,
                pending.mapping.remoteBindHost.c_str(),
                pending.mapping.remoteBindPort,
                pending.mapping.localHost.c_str(), pending.mapping.localPort);
 #endif
-        LOGF_I("SSH", "Queued channel bound to slot %d (waited %lums)", slot,
+        LOGF_I("SSH", "Queued channel attached to slot %d (waited %lums)", slot,
                millis() - pending.queuedAtMs);
-        emitChannelOpened(slot);
         pending.channel = nullptr; // consumed
       } else {
-        if (bindResult == BindResult::LockUnavailable) {
+        if (attachResult == AttachResult::LockUnavailable) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
           LOGF_W("SSH",
-                 "SERVERDIAG queued_bind_lock_unavailable slot=%d "
+                 "SERVERDIAG queued_attach_lock_unavailable slot=%d "
                  "waited=%lums remote=%s:%d local=%s:%d",
                  slot, millis() - pending.queuedAtMs,
                  pending.mapping.remoteBindHost.c_str(),
@@ -613,7 +796,7 @@ void SSHTunnel::drainPendingQueue() {
         }
 
         LOGF_W("SSH",
-               "Dropping queued channel for %s:%d -> %s:%d after bind "
+               "Dropping queued channel for %s:%d -> %s:%d after attachment "
                "failure",
                pending.mapping.remoteBindHost.c_str(),
                pending.mapping.remoteBindPort,
@@ -688,7 +871,7 @@ void SSHTunnel::cleanExpiredPending() {
     if (!pending.channel) {
       continue;
     }
-    if (pending.action == PendingChannel::Action::Bind &&
+    if (pending.action == PendingChannel::Action::Attach &&
         (now - pending.queuedAtMs) > PENDING_TIMEOUT_MS) {
       LOGF_W("SSH", "Pending channel expired after %lums, dropping",
              now - pending.queuedAtMs);
@@ -789,13 +972,17 @@ void SSHTunnel::enterErrorState(const char *reason) {
   // Close all orphan channels and their local sockets to prevent leaks
   if (session_.lock(pdMS_TO_TICKS(500))) {
     for (int i = 0; i < channels_.getMaxSlots(); ++i) {
-      if (channels_.getSlot(i).active) {
-        ChannelCloseReason cr = channels_.getSlot(i).closeReason;
+      ChannelSlot &channel = channels_.getSlot(i);
+      if (channel.active) {
+        bool wasOpen = channel.reachedOpen;
+        ChannelCloseReason cr = channel.closeReason;
         if (cr == ChannelCloseReason::Unknown) {
           cr = ChannelCloseReason::Error;
         }
         channels_.finalizeClose(i);
-        emitChannelClosed(i, cr);
+        if (wasOpen) {
+          emitChannelClosed(i, cr);
+        }
       }
     }
     session_.unlock();
@@ -805,12 +992,15 @@ void SSHTunnel::enterErrorState(const char *reason) {
     for (int i = 0; i < channels_.getMaxSlots(); ++i) {
       ChannelSlot &ch = channels_.getSlot(i);
       if (ch.active) {
+        bool wasOpen = ch.reachedOpen;
         ChannelCloseReason cr = ch.closeReason;
         if (cr == ChannelCloseReason::Unknown) {
           cr = ChannelCloseReason::Error;
         }
         channels_.abandonSlot(i, cr);
-        emitChannelClosed(i, cr);
+        if (wasOpen) {
+          emitChannelClosed(i, cr);
+        }
       }
     }
   }

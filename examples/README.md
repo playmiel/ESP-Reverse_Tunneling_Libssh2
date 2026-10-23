@@ -1,27 +1,30 @@
 # Examples – ESP-Reverse_Tunneling_Libssh2
 
-This folder contains ready-to-build sketches that demonstrate how to use the
-library on a standard ESP32 board.
+This folder contains both Arduino/PlatformIO and native ESP-IDF examples for
+an ESP32 board.
 
 ## Layout
 
-- `platformio.ini` – minimal PlatformIO project definition referencing the
-  library from the repository root.
-- `src/main.cpp` – fully working reverse-tunnel example (Wi-Fi setup, SSH
+- `src/main.cpp` – Arduino reverse-tunnel example (Wi-Fi setup, SSH
   configuration, tunnel loop, periodic stats).
-- `sdkconfig.*` – generated PlatformIO SDK defaults (kept for convenience).
+- `esp-idf/` – native ESP-IDF project with Wi-Fi and SSH settings in
+  `menuconfig`; see its [README](esp-idf/README.md).
 
 No `.ino` sketches or helper scripts are required; everything builds from
 `src/main.cpp`.
 
-## Build
+## Build with Arduino / PlatformIO
 
 ```bash
-cd examples
-pio run          # compile the example
+pio run -e arduino-3  # compile from the repository root
 pio run -t upload  # flash your connected ESP32
 pio device monitor  # watch serial logs (115200 by default)
 ```
+
+The root [`platformio.ini`](../platformio.ini) fetches the
+`playmiel/libssh2_esp32` fork. For native ESP-IDF, initialize the submodule,
+then run `idf.py build flash monitor` from `examples/esp-idf`; the
+[ESP-IDF guide](../docs/ESP_IDF.md) covers installation and PSRAM.
 
 ## Customize
 

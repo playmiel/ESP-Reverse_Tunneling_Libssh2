@@ -1,11 +1,11 @@
 #ifndef SSH_TUNNEL_H
 #define SSH_TUNNEL_H
 
+#include "platform_compat.h"
 #include "ssh_channel.h"
 #include "ssh_config.h"
 #include "ssh_session.h"
 #include "ssh_transport.h"
-#include <Arduino.h>
 
 // TunnelState and event types - kept identical for API compatibility
 enum TunnelState {
@@ -27,12 +27,12 @@ struct SSHTunnelEvents {
 
 // A forwarded channel waiting for a free slot.
 struct PendingChannel {
-  enum class Action { Bind, Close };
+  enum class Action { Attach, Close };
 
   LIBSSH2_CHANNEL *channel = nullptr;
   TunnelConfig mapping;
   unsigned long queuedAtMs = 0;
-  Action action = Action::Bind;
+  Action action = Action::Attach;
 };
 
 // SSHTunnel: public facade with the same API as before.
@@ -86,6 +86,7 @@ public:
   // Dynamic tunnel management. When connected, these methods update the live
   // listener set immediately as well as the configuration used on reconnect.
   bool addReverseTunnel(const TunnelConfig &mapping);
+  bool addSocks5Tunnel(const String &remoteHost, int remotePort);
   bool removeReverseTunnel(const String &remoteHost, int remotePort);
 
   // Backpressure query for adaptive delay in caller loop
@@ -100,8 +101,14 @@ public:
 #endif
 
 private:
-  // Accept pending SSH channel and bind to a local socket
+  // Accept a pending SSH channel and attach it to a slot.
   bool handleNewConnection();
+
+  // Advance Resolving/Connecting channels without holding the session lock.
+  void progressChannelConnections();
+
+  // Consume incremental SOCKS5 handshakes for deferred-destination channels.
+  void progressSocks5Negotiations();
 
   // Drain queued connections into newly freed slots
   void drainPendingQueue();
@@ -160,6 +167,7 @@ private:
   static constexpr int MAX_DEFERRED_CLOSE = 4;
   static constexpr unsigned long PENDING_TIMEOUT_MS = 5000;
   static constexpr unsigned long CLOSE_RETRY_TIMEOUT_MS = 5000;
+  static constexpr unsigned long SOCKS5_NEGOTIATION_TIMEOUT_MS = 5000;
   PendingChannel pendingQueue_[MAX_PENDING];
   int pendingCount_ = 0;
   PendingChannel deferredCloseQueue_[MAX_DEFERRED_CLOSE];

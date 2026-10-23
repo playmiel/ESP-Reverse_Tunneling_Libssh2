@@ -81,6 +81,14 @@ def test_throughput_stability(wait_tunnel_ready, tunnel_socket,
     t_send.join(2.0)
     t_recv.join(2.0)
 
+    # Closing the client socket is asynchronous from the ESP32's point of
+    # view. Wait until the channel has actually drained and its ring buffers
+    # have been released before comparing heap snapshots. Without this wait,
+    # the test measures the expected memory cost of one still-active channel
+    # and reports it as a leak.
+    serial_monitor.wait_for(lambda s: s.get("ch", 99) == 0, timeout_s=5.0)
+    time.sleep(2.0)  # collect two idle STATS_TEST samples after finalization
+
     # Skip first 5s ramp-up window
     samples = [s for s in samples if s[0] >= 5.0]
     bps_values = [s[1] for s in samples]

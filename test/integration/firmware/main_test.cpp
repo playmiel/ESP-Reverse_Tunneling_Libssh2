@@ -64,15 +64,17 @@ void setup() {
   Serial.printf("WIFI_OK ip=%s rssi=%d\n",
                 WiFi.localIP().toString().c_str(), WiFi.RSSI());
 
-  // Three tunnel mappings (must match harness expectations):
+  // Four tunnel mappings (must match harness expectations):
   //   22080 -> DOCKER_HOST_IP:9000  (echo, used by tests A/B/D/F)
   //   22081 -> DOCKER_HOST_IP:9001  (slow_echo, used by test G2)
   //   22082 -> DOCKER_HOST_IP:65500 (dead port, used by test G1)
+  //   22083 -> SOCKS5 listener (NO AUTH, CONNECT, used by test H)
   globalSSHConfig.clearTunnelMappings();
-  globalSSHConfig.setMaxReverseListeners(3);
+  globalSSHConfig.setMaxReverseListeners(4);
   globalSSHConfig.addTunnelMapping("127.0.0.1", 22080, DOCKER_HOST_IP, 9000);
   globalSSHConfig.addTunnelMapping("127.0.0.1", 22081, DOCKER_HOST_IP, 9001);
   globalSSHConfig.addTunnelMapping("127.0.0.1", 22082, DOCKER_HOST_IP, 65500);
+  globalSSHConfig.addSocks5TunnelMapping("127.0.0.1", 22083);
 
   if (!tunnel.init() || !tunnel.connectSSH()) {
     Serial.println("TUNNEL_INIT_FAIL");

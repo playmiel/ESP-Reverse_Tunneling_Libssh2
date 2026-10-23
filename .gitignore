@@ -47,6 +47,12 @@ __pycache__/
 *.pyc
 .pytest_cache/
 
+# Native ESP-IDF example output and local credentials in sdkconfig
+/examples/esp-idf/build/
+/examples/esp-idf/sdkconfig
+/examples/esp-idf/sdkconfig.old
+/examples/esp-idf/dependencies.lock
+/examples/esp-idf/.clangd
+
 # Local-only design docs / specs / plans / test reports
 docs/superpowers/
-
