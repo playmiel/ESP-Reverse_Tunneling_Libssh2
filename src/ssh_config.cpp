@@ -134,13 +134,15 @@ bool SSHConfiguration::loadSSHKeysFromLittleFS(const String &privateKeyPath) {
 bool SSHConfiguration::loadSSHKeysFromFile(const String &privateKeyPath) {
 #ifdef TUNNEL_NATIVE_IDF
   std::ifstream privateKeyFile(privateKeyPath.c_str(), std::ios::binary);
-  std::ifstream publicKeyFile((privateKeyPath + ".pub").c_str(), std::ios::binary);
+  std::ifstream publicKeyFile((privateKeyPath + ".pub").c_str(),
+                              std::ios::binary);
   if (!privateKeyFile || !publicKeyFile) {
     LOGF_E("CONFIG", "Cannot open SSH key files: %s", privateKeyPath.c_str());
     return false;
   }
-  sshConfig.privateKeyData.assign(std::istreambuf_iterator<char>(privateKeyFile),
-                                  std::istreambuf_iterator<char>());
+  sshConfig.privateKeyData.assign(
+      std::istreambuf_iterator<char>(privateKeyFile),
+      std::istreambuf_iterator<char>());
   sshConfig.publicKeyData.assign(std::istreambuf_iterator<char>(publicKeyFile),
                                  std::istreambuf_iterator<char>());
   return !sshConfig.privateKeyData.empty() && !sshConfig.publicKeyData.empty();
@@ -396,7 +398,7 @@ void SSHConfiguration::addTunnelMapping(const TunnelConfig &mapping) {
 }
 
 void SSHConfiguration::addSocks5TunnelMapping(const String &remoteBindHost,
-                                               int remoteBindPort) {
+                                              int remoteBindPort) {
   TunnelConfig mapping;
   mapping.remoteBindHost = remoteBindHost;
   mapping.remoteBindPort = remoteBindPort;
@@ -549,8 +551,7 @@ void SSHConfiguration::printConfiguration() const {
         LOGF_I("CONFIG", "#%u Remote Bind: %s:%d", (unsigned)i,
                mapping.remoteBindHost.c_str(), mapping.remoteBindPort);
         if (mapping.isSocks5()) {
-          LOGF_I("CONFIG", "#%u Mode: SOCKS5 (NO AUTH, CONNECT)",
-                 (unsigned)i);
+          LOGF_I("CONFIG", "#%u Mode: SOCKS5 (NO AUTH, CONNECT)", (unsigned)i);
         } else {
           LOGF_I("CONFIG", "#%u Local Target: %s:%d", (unsigned)i,
                  mapping.localHost.c_str(), mapping.localPort);

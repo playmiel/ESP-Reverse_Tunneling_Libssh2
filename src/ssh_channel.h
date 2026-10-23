@@ -55,8 +55,8 @@ struct ChannelSlot {
   int destinationError = 0;
   bool destinationDnsFailure = false;
   bool reachedOpen = false; // preserves callback pairing on pre-open failures
-  bool localEof = false;  // Local socket sent EOF / closed
-  bool remoteEof = false; // SSH channel sent EOF
+  bool localEof = false;    // Local socket sent EOF / closed
+  bool remoteEof = false;   // SSH channel sent EOF
   bool localShutdownSent =
       false; // shutdown(SHUT_WR) issued on local socket after remote EOF
   unsigned long closeStartMs = 0;
@@ -189,11 +189,9 @@ public:
   unsigned long getBreakerTrips() const { return breaker_.totalTrips(); }
 
 private:
-  channel_lifecycle::ConnectProgress failConnection(int slotIndex,
-                                                     const char *detail,
-                                                     int errorCode,
-                                                     bool recordFailure = true,
-                                                     bool dnsFailure = false);
+  channel_lifecycle::ConnectProgress
+  failConnection(int slotIndex, const char *detail, int errorCode,
+                 bool recordFailure = true, bool dnsFailure = false);
   channel_lifecycle::ConnectProgress markConnectionOpen(int slotIndex);
   void snapshotEndpoint(ChannelSlot &slot, const TunnelConfig &mapping);
   void resetSlot(int index);

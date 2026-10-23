@@ -110,8 +110,8 @@ private:
 
   // Restore bytes removed from a FIFO after a partial/non-blocking send.
   // Prefer the prepend area to retain ordering, then fall back to the ring.
-  size_t requeueToFront(DataRingBuffer *buffer, const uint8_t *data,
-                        size_t len, int slot, const char *path);
+  size_t requeueToFront(DataRingBuffer *buffer, const uint8_t *data, size_t len,
+                        int slot, const char *path);
 
   // Account and report data that was already read but could not be buffered.
   void recordDropped(size_t expected, size_t stored, int slot,

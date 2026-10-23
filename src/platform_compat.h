@@ -35,7 +35,8 @@ public:
   void remove(size_t from, size_t count = npos) { erase(from, count); }
   void replace(const char *oldText, const char *newText) {
     size_t oldSize = std::char_traits<char>::length(oldText);
-    if (oldSize == 0) return;
+    if (oldSize == 0)
+      return;
     size_t from = 0;
     while ((from = find(oldText, from)) != npos) {
       std::string::replace(from, oldSize, newText);
@@ -46,7 +47,10 @@ public:
     auto space = [](unsigned char c) { return std::isspace(c); };
     auto first = std::find_if_not(begin(), end(), space);
     auto last = std::find_if_not(rbegin(), rend(), space).base();
-    if (first >= last) { clear(); return; }
+    if (first >= last) {
+      clear();
+      return;
+    }
     *this = substr(first - begin(), last - first);
   }
   void toLowerCase() {

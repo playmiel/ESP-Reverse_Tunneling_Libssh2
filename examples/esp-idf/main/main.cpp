@@ -46,8 +46,8 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
                                              onWifiEvent, nullptr));
   wifi_config_t wifi = {};
-  std::strncpy(reinterpret_cast<char *>(wifi.sta.ssid), CONFIG_EXAMPLE_WIFI_SSID,
-               sizeof(wifi.sta.ssid) - 1);
+  std::strncpy(reinterpret_cast<char *>(wifi.sta.ssid),
+               CONFIG_EXAMPLE_WIFI_SSID, sizeof(wifi.sta.ssid) - 1);
   std::strncpy(reinterpret_cast<char *>(wifi.sta.password),
                CONFIG_EXAMPLE_WIFI_PASSWORD, sizeof(wifi.sta.password) - 1);
   ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
@@ -55,14 +55,12 @@ extern "C" void app_main() {
   ESP_ERROR_CHECK(esp_wifi_start());
   xEventGroupWaitBits(wifiEvents, connected, pdFALSE, pdTRUE, portMAX_DELAY);
 
-  globalSSHConfig.setSSHServer(CONFIG_EXAMPLE_SSH_HOST,
-                               CONFIG_EXAMPLE_SSH_PORT,
+  globalSSHConfig.setSSHServer(CONFIG_EXAMPLE_SSH_HOST, CONFIG_EXAMPLE_SSH_PORT,
                                CONFIG_EXAMPLE_SSH_USER,
                                CONFIG_EXAMPLE_SSH_PASSWORD);
-  globalSSHConfig.setHostKeyVerification(
-      CONFIG_EXAMPLE_SSH_HOSTKEY_SHA256, "", true);
-  globalSSHConfig.setTunnelConfig("127.0.0.1",
-                                  CONFIG_EXAMPLE_REMOTE_BIND_PORT,
+  globalSSHConfig.setHostKeyVerification(CONFIG_EXAMPLE_SSH_HOSTKEY_SHA256, "",
+                                         true);
+  globalSSHConfig.setTunnelConfig("127.0.0.1", CONFIG_EXAMPLE_REMOTE_BIND_PORT,
                                   CONFIG_EXAMPLE_LOCAL_HOST,
                                   CONFIG_EXAMPLE_LOCAL_PORT);
   if (heap_caps_get_total_size(MALLOC_CAP_SPIRAM) > 0) {
@@ -71,10 +69,12 @@ extern "C" void app_main() {
     globalSSHConfig.setBufferConfig(4096, 1, 1800000, 8192);
   }
   SSHTunnel tunnel;
-  if (!tunnel.init()) return;
+  if (!tunnel.init())
+    return;
   tunnel.connectSSH();
   for (;;) {
-    if (xEventGroupGetBits(wifiEvents) & connected) tunnel.loop();
+    if (xEventGroupGetBits(wifiEvents) & connected)
+      tunnel.loop();
     vTaskDelay(pdMS_TO_TICKS(10));
   }
 }

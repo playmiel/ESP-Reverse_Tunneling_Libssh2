@@ -340,9 +340,7 @@ unsigned long SSHTunnel::getBytesReceived() { return bytesReceived_; }
 
 unsigned long SSHTunnel::getBytesSent() { return bytesSent_; }
 
-unsigned long SSHTunnel::getBytesDropped() {
-  return transport_.bytesDropped();
-}
+unsigned long SSHTunnel::getBytesDropped() { return transport_.bytesDropped(); }
 
 int SSHTunnel::getActiveChannels() { return channels_.getActiveCount(); }
 
@@ -490,8 +488,8 @@ void SSHTunnel::progressSocks5Negotiations() {
     };
 
     if ((now - slot.stateStartedMs) >= SOCKS5_NEGOTIATION_TIMEOUT_MS) {
-      reject(!slot.socks5Negotiator.methodAccepted(),
-             socks5::Reply::TtlExpired, "negotiation timeout");
+      reject(!slot.socks5Negotiator.methodAccepted(), socks5::Reply::TtlExpired,
+             "negotiation timeout");
       continue;
     }
     if (slot.remoteEof && (!slot.toLocal || slot.toLocal->empty())) {
@@ -543,8 +541,7 @@ void SSHTunnel::progressSocks5Negotiations() {
         }
         break;
       case socks5::Event::MethodRejected:
-        reject(true, socks5::Reply::GeneralFailure,
-               "NO AUTH was not offered");
+        reject(true, socks5::Reply::GeneralFailure, "NO AUTH was not offered");
         break;
       case socks5::Event::CommandNotSupported:
         reject(false, socks5::Reply::CommandNotSupported,
@@ -555,8 +552,7 @@ void SSHTunnel::progressSocks5Negotiations() {
                "address type is not IPv4 or domain");
         break;
       case socks5::Event::GeneralFailure:
-        reject(false, socks5::Reply::GeneralFailure,
-               "malformed request");
+        reject(false, socks5::Reply::GeneralFailure, "malformed request");
         break;
       }
     }
@@ -601,9 +597,8 @@ bool SSHTunnel::handleNewConnection() {
         session_, channels_, slot, ch, mapping, pdMS_TO_TICKS(200));
     if (attachResult == AttachResult::Attached) {
 #ifdef TUNNEL_DIAG_LOG_ONLY
-      LOGF_I("SSH",
-             "SERVERDIAG attach_ok slot=%d remote=%s:%d local=%s:%d", slot,
-             mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
+      LOGF_I("SSH", "SERVERDIAG attach_ok slot=%d remote=%s:%d local=%s:%d",
+             slot, mapping.remoteBindHost.c_str(), mapping.remoteBindPort,
              mapping.localHost.c_str(), mapping.localPort);
 #endif
       return true;
@@ -779,8 +774,8 @@ void SSHTunnel::drainPendingQueue() {
                pending.mapping.remoteBindPort,
                pending.mapping.localHost.c_str(), pending.mapping.localPort);
 #endif
-        LOGF_I("SSH", "Queued channel attached to slot %d (waited %lums)",
-               slot, millis() - pending.queuedAtMs);
+        LOGF_I("SSH", "Queued channel attached to slot %d (waited %lums)", slot,
+               millis() - pending.queuedAtMs);
         pending.channel = nullptr; // consumed
       } else {
         if (attachResult == AttachResult::LockUnavailable) {

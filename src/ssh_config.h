@@ -133,8 +133,7 @@ public:
   void addTunnelMapping(const String &remoteBindHost, int remoteBindPort,
                         const String &localHost, int localPort);
   void addTunnelMapping(const TunnelConfig &mapping);
-  void addSocks5TunnelMapping(const String &remoteBindHost,
-                              int remoteBindPort);
+  void addSocks5TunnelMapping(const String &remoteBindHost, int remoteBindPort);
   bool removeTunnelMapping(size_t index);
   void clearTunnelMappings();
 

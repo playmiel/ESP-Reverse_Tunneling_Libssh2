@@ -772,8 +772,7 @@ void TransportPump::drainSshToLocal() {
         break;
       } else {
         // EAGAIN/EWOULDBLOCK: put ALL data back at the front
-        requeueToFront(ch.toLocal, txBuf_, got, i,
-                       "local EAGAIN requeue");
+        requeueToFront(ch.toLocal, txBuf_, got, i, "local EAGAIN requeue");
         if (ch.firstLocalSendEagainMs == 0) {
           ch.firstLocalSendEagainMs = millis();
         }
@@ -862,15 +861,13 @@ void TransportPump::drainLocalToSsh() {
               break;
             }
           } else if (written == LIBSSH2_ERROR_EAGAIN) {
-            requeueToFront(ch.toRemote, txBuf_, got, i,
-                           "SSH EAGAIN requeue");
+            requeueToFront(ch.toRemote, txBuf_, got, i, "SSH EAGAIN requeue");
             ch.eagainCount++;
             if (ch.firstEagainMs == 0)
               ch.firstEagainMs = millis();
             hitEagain = true;
           } else {
-            requeueToFront(ch.toRemote, txBuf_, got, i,
-                           "SSH error requeue");
+            requeueToFront(ch.toRemote, txBuf_, got, i, "SSH error requeue");
             ch.consecutiveErrors++;
             LOGF_W("SSH", "Channel %d: SSH write error %ld (errors=%d)", i,
                    (long)written, ch.consecutiveErrors);

@@ -214,8 +214,8 @@ bool ChannelManager::attachChannel(int slotIndex, LIBSSH2_CHANNEL *sshChannel,
   return true;
 }
 
-bool ChannelManager::beginDestinationConnection(int slotIndex,
-                                                const char *host, int port) {
+bool ChannelManager::beginDestinationConnection(int slotIndex, const char *host,
+                                                int port) {
   if (slotIndex < 0 || slotIndex >= maxSlots_ || !host || host[0] == '\0' ||
       port < 1 || port > 65535) {
     return false;
@@ -242,9 +242,8 @@ bool ChannelManager::beginDestinationConnection(int slotIndex,
 }
 
 channel_lifecycle::ConnectProgress
-ChannelManager::failConnection(int slotIndex, const char *detail,
-                               int errorCode, bool recordFailure,
-                               bool dnsFailure) {
+ChannelManager::failConnection(int slotIndex, const char *detail, int errorCode,
+                               bool recordFailure, bool dnsFailure) {
   ChannelSlot &slot = slots_[slotIndex];
   slot.destinationError = errorCode;
   slot.destinationDnsFailure = dnsFailure;
@@ -341,8 +340,8 @@ ChannelManager::progressConnection(int slotIndex) {
       hints.ai_family = AF_INET;
       hints.ai_socktype = SOCK_STREAM;
       struct addrinfo *result = nullptr;
-      int dnsResult = getaddrinfo(slot.endpoint.localHost, nullptr, &hints,
-                                  &result);
+      int dnsResult =
+          getaddrinfo(slot.endpoint.localHost, nullptr, &hints, &result);
       if (dnsResult != 0 || !result || !result->ai_addr) {
         if (result) {
           freeaddrinfo(result);
@@ -364,8 +363,7 @@ ChannelManager::progressConnection(int slotIndex) {
       return failConnection(slotIndex, "socket creation", errno);
     }
     int flags = fcntl(slot.localSocket, F_GETFL, 0);
-    if (flags < 0 ||
-        fcntl(slot.localSocket, F_SETFL, flags | O_NONBLOCK) < 0) {
+    if (flags < 0 || fcntl(slot.localSocket, F_SETFL, flags | O_NONBLOCK) < 0) {
       return failConnection(slotIndex, "non-blocking setup", errno);
     }
 
@@ -392,8 +390,8 @@ ChannelManager::progressConnection(int slotIndex) {
   FD_SET(slot.localSocket, &writeFds);
   FD_SET(slot.localSocket, &errorFds);
   struct timeval noWait = {0, 0};
-  int selected = select(slot.localSocket + 1, nullptr, &writeFds, &errorFds,
-                        &noWait);
+  int selected =
+      select(slot.localSocket + 1, nullptr, &writeFds, &errorFds, &noWait);
   if (selected < 0) {
     return failConnection(slotIndex, "connect poll", errno);
   }
@@ -412,8 +410,8 @@ ChannelManager::progressConnection(int slotIndex) {
   }
 
   unsigned long now = millis();
-  if (channel_lifecycle::connectTimedOut(
-          now, slot.stateStartedMs, LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS)) {
+  if (channel_lifecycle::connectTimedOut(now, slot.stateStartedMs,
+                                         LOCAL_ENDPOINT_CONNECT_TIMEOUT_MS)) {
     return failConnection(slotIndex, "connect timeout", ETIMEDOUT);
   }
   return channel_lifecycle::ConnectProgress::Pending;
